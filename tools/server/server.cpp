@@ -1,4 +1,5 @@
 #include "chat.h"
+#include "ggml.h"
 #include "utils.hpp"
 
 #include "arg.h"
@@ -594,6 +595,103 @@ struct result_timings {
         }
 
         return base;
+    }
+};
+
+struct reasoning_cache {
+    struct cache_item {
+        std::string id;
+        std::string content;
+    };
+
+    std::unordered_map<std::string, cache_item> cache;
+    std::deque<std::string> ids;
+    std::mutex mutex;
+    size_t n_size;
+
+    void init(size_t size = 64) {
+        SRV_INF("initializing reasoning cache, n_size = %ld\n", size);
+        n_size = size;
+    }
+
+    bool enabled() const {
+        return n_size > 0;
+    }
+
+    std::optional<std::string> get(const std::string & id) {
+        if (n_size <= 0) {
+            return std::nullopt;
+        }
+
+        std::unique_lock<std::mutex> lock(mutex);
+        auto it = cache.find(id);
+        if (it == cache.end()) {
+            SRV_DBG("reasoning cache miss: %s\n", id.c_str());
+            return std::nullopt;
+        }
+
+        std::string hit = it->second.content;
+        SRV_DBG("reasoning cache hit: %s\n", id.c_str());
+        return hit;
+    }
+
+    void insert(const std::string & id, const std::string & content) {
+        if (n_size <= 0) {
+            return;
+        }
+
+        std::unique_lock<std::mutex> lock(mutex);
+
+        if (ids.size() >= n_size) {
+            const std::string & last_id = ids.back();
+            ids.pop_back();
+            cache.erase(last_id);
+        }
+
+        ids.push_front(id);
+        cache[id] = {/* .id = */ id, /* .content = */ content};
+        SRV_DBG("reasoning cache add: %s\n", id.c_str());
+    }
+
+    void extract_from_message(const common_chat_msg & msg) {
+        for (const auto & t : msg.tool_calls) {
+            if (!t.id.empty() && !msg.reasoning_content.empty()) {
+                insert(t.id, msg.reasoning_content);
+            }
+        }
+    }
+
+    void inject_oaicompat_chat_params(json & body) {
+        if (!body.contains("messages")) {
+            return;
+        }
+
+        json & messages = body.at("messages");
+        if (!messages.is_array()) {
+            return;
+        }
+
+        for (auto &msg : messages) {
+            if (!msg.contains("tool_calls") || msg.contains("reasoning_content")) {
+                continue;
+            }
+
+            // inject cached reasoning to tool call messages to support models that require it (gpt-oss)
+            const json & tool_calls = msg.at("tool_calls");
+            if (tool_calls.is_array() && !tool_calls.empty()) {
+                for (const auto & t : tool_calls) {
+                    std::string tool_id = json_value(t, "id", std::string());
+                    if (tool_id.empty()) {
+                        continue;
+                    }
+
+                    if (auto content = get(tool_id)) {
+                        msg["reasoning_content"] = content;
+                        break;
+                    }
+                }
+            }
+        }
     }
 };
 
@@ -1970,6 +2068,9 @@ struct server_context {
     common_chat_templates_ptr chat_templates;
     oaicompat_parser_options  oai_parser_opt;
 
+    // reasoning cache
+    reasoning_cache cache_reasoning;
+
     ~server_context() {
         mtmd_free(mctx);
 
@@ -2174,6 +2275,8 @@ struct server_context {
             /* allow_audio           */ mctx ? mtmd_support_audio (mctx) : false,
             /* enable_thinking       */ params_base.reasoning_budget != 0,
         };
+
+        cache_reasoning.init(params_base.reasoning_cache);
     }
 
     server_slot * get_slot_by_id(int id) {
@@ -2597,6 +2700,10 @@ struct server_context {
         res->oaicompat_model       = slot.params.oaicompat_model;
         res->oaicompat_cmpl_id     = slot.params.oaicompat_cmpl_id;
         res->oaicompat_msg         = slot.update_chat_msg(res->oaicompat_msg_diffs);
+
+        if (cache_reasoning.enabled()) {
+            cache_reasoning.extract_from_message(res->oaicompat_msg);
+        }
 
         // populate res.probs_output
         if (slot.params.sampling.n_probs > 0) {
@@ -4573,6 +4680,9 @@ int main(int argc, char ** argv) {
 
         auto body = json::parse(req.body);
         std::vector<raw_buffer> files;
+        if (ctx_server.cache_reasoning.enabled()) {
+            ctx_server.cache_reasoning.inject_oaicompat_chat_params(body);
+        }
         json data = oaicompat_chat_params_parse(
             body,
             ctx_server.oai_parser_opt,
@@ -4591,6 +4701,9 @@ int main(int argc, char ** argv) {
     const auto handle_apply_template = [&ctx_server, &res_ok](const httplib::Request & req, httplib::Response & res) {
         auto body = json::parse(req.body);
         std::vector<raw_buffer> files; // dummy, unused
+        if (ctx_server.cache_reasoning.enabled()) {
+            ctx_server.cache_reasoning.inject_oaicompat_chat_params(body);
+        }
         json data = oaicompat_chat_params_parse(
             body,
             ctx_server.oai_parser_opt,
