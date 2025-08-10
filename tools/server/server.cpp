@@ -672,8 +672,25 @@ struct reasoning_cache {
         }
 
         for (auto &msg : messages) {
+            std::string role = json_value(msg, "role", std::string());
+            if (role != "assistant") {
+                continue;
+            }
+
             if (!msg.contains("tool_calls") || msg.contains("reasoning_content")) {
                 continue;
+            }
+
+            // do not inject if the message contains a non-empty content
+            if (msg.contains("content")) {
+                if (msg.at("content").is_string()) {
+                    std::string content = json_value(msg, "content", std::string());
+                    if (!content.empty()) {
+                        continue;
+                    }
+                } else if (!msg.at("content").empty()) {
+                    continue;
+                }
             }
 
             // inject cached reasoning to tool call messages to support models that require it (gpt-oss)
