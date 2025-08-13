@@ -1349,6 +1349,20 @@ static common_chat_params common_chat_params_init_gpt_oss(const common_chat_temp
         "<|end|>",
     };
 
+    if (!inputs.json_schema.is_null()) {
+        data.grammar_lazy = false;
+        data.grammar = build_grammar([&](const common_grammar_builder & builder) {
+            auto analysis = builder.add_rule("analysis",
+                "\"<|channel|>analysis<|message|>\" ( [^<] | \"<\" [^|] )* \"<|end|>\"");
+            auto constrain = builder.add_rule("constrain", "\"<|constrain|>\"? [a-zA-Z0-9_-]+");
+            auto final = builder.add_rule("final",
+                "\"<|channel|>final\" ( \" \" " + constrain + " )? \"<|message|>\" " +
+                builder.add_schema("response", inputs.json_schema)
+            );
+            builder.add_rule("root", analysis + "? \"<|start|>assistant\" " + final);
+        });
+    }
+
     if (inputs.tools.is_array() && !inputs.tools.empty()) {
         data.grammar_lazy = inputs.tool_choice != COMMON_CHAT_TOOL_CHOICE_REQUIRED;
         data.grammar = build_grammar([&](const common_grammar_builder & builder) {
@@ -1420,6 +1434,7 @@ static void common_chat_parse_gpt_oss(common_chat_msg_parser & builder) {
     static const common_regex end_regex("<\\|end\\|>");
     static const common_regex to_regex(" to=");
     static const common_regex function_regex("functions\\.([^<\\s]+)");
+    static const common_regex constrain_regex(" <\\|constrain\\|>([a-zA-Z0-9_-]+)");
     static const common_regex user_tool_call_regex("(?: <\\|constrain\\|>([a-zA-Z]+))?<\\|message\\|>");
     static const common_regex builtin_tool_call_regex("(?:browser|python)[\\s\\S]*<\\|message\\|>");
 
@@ -1522,6 +1537,7 @@ static void common_chat_parse_gpt_oss(common_chat_msg_parser & builder) {
         } else if (type == "commentary") {
             commentary();
         } else if (type == "final") {
+            builder.try_consume_regex(constrain_regex); // response formats may emit user-defined formats
             if (!try_consume_message()) {
                 throw common_chat_msg_parse_exception("expected: <|message|>, got: " + consume_until_next());
             }
@@ -2168,7 +2184,7 @@ static common_chat_params common_chat_templates_apply_jinja(
     }
 
     // GPT-OSS
-    if (src.find("<|channel|>") != std::string::npos && params.json_schema.is_null()) {
+    if (src.find("<|channel|>") != std::string::npos) {
         return common_chat_params_init_gpt_oss(tmpl, params);
     }
 
