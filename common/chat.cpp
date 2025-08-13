@@ -1413,148 +1413,73 @@ static common_chat_params common_chat_params_init_gpt_oss(const common_chat_temp
     return data;
 }
 static void common_chat_parse_gpt_oss(common_chat_msg_parser & builder) {
-    static const common_regex message_regex("<\\|message\\|>");
-    static const common_regex channel_regex("<\\|channel\\|>(final|analysis|commentary)");
-    static const common_regex tool_call_channel_regex("<\\|channel\\|>(commentary|analysis)");
+    static const std::string constraint = "(?: (<\\|constrain\\|>)?([a-zA-Z0-9_-]+))";
+    static const std::string recipient("(?: to=functions\\.([^<\\s]+))");
+
     static const common_regex start_regex("<\\|start\\|>assistant");
     static const common_regex end_regex("<\\|end\\|>");
-    static const common_regex to_regex(" to=");
-    static const common_regex function_regex("functions\\.([^<\\s]+)");
-    static const common_regex user_tool_call_regex("(?: <\\|constrain\\|>([a-zA-Z]+))?<\\|message\\|>");
-    static const common_regex builtin_tool_call_regex("(?:browser|python)[\\s\\S]*<\\|message\\|>");
+    static const common_regex basic_analysis_regex("<\\|channel\\|>analysis<\\|message\\|>");
+    static const common_regex final_regex("<\\|channel\\|>final" + constraint + "?<\\|message\\|>");
+    static const common_regex commentary_preamble_regex("<\\|channel\\|>commentary<\\|message\\|>");
+    static const common_regex tool_call1_regex(recipient + "<\\|channel\\|>(analysis|commentary)" + constraint + "?<\\|message\\|>");
+    static const common_regex tool_call2_regex("<\\|channel\\|>(analysis|commentary)" + recipient + constraint + "?<\\|message\\|>");
 
-    // Save the channel start so we can roll back to delegate reasoning parsing to builder.
-    size_t channel_start_pos = 0;
-
-    auto consume_until_next = [&](size_t from = std::string::npos) {
-        if (auto res = builder.try_find_regex(start_regex, from, false)) {
-            auto begin = res->groups[0].begin;
-            builder.move_to(begin);
-            return res->prelude;
+    auto consume_end = [&](bool include_end = false) {
+        if (auto res = builder.try_find_regex(end_regex, std::string::npos, false)) {
+            return res->prelude + (include_end ? builder.str(res->groups[0]) : "");
         }
         return builder.consume_rest();
     };
 
-    auto try_consume_message = [&]() {
-        if (builder.try_consume_regex(message_regex)) {
-            if (!builder.try_find_regex(end_regex)) {
-                builder.add_content(builder.consume_rest());
-            }
-            return true;
-        }
-        return false;
-    };
-
-    auto tool_call = [&](bool recipient_in_role) {
-        if (auto res = builder.try_consume_regex(function_regex)) {
-            auto name = builder.str(res->groups[1]);
-
-            if (recipient_in_role) {
-                if (!builder.try_consume_regex(tool_call_channel_regex)) {
-                    throw common_chat_msg_parse_exception("expected <|channel|>(commentary|analysis), got: " + consume_until_next());
-                }
-            }
-
-            if (builder.try_consume_regex(user_tool_call_regex)) {
-                if (auto args = builder.try_consume_json_with_dumped_args({{}})) {
-                    if (builder.syntax().parse_tool_calls) {
-                        if (!builder.add_tool_call(name, "", args->value) || args->is_partial) {
-                            throw common_chat_msg_partial_exception("incomplete tool call");
-                        }
-                    } else {
-                        std::string args_as_string;
-                        if (args->value.is_object()) {
-                            args_as_string = args->value.dump();
-                        } else {
-                            args_as_string = args->value;
-                        }
-
-                        // simulate tool call in content
-                        builder.add_content("<tool_call>");
-                        builder.add_content("{\"name\": " + json(name).dump() + ", \"arguments\": ");
-                        builder.add_content(args_as_string);
-                        if (!args->is_partial) {
-                            builder.add_content("}");
-                            builder.add_content("</tool_call>");
-                        } else {
-                            throw common_chat_msg_partial_exception("incomplete tool call");
-                        }
-                    }
+    auto handle_tool_call = [&](const std::string & name) {
+        if (auto args = builder.try_consume_json_with_dumped_args({{}})) {
+            if (builder.syntax().parse_tool_calls) {
+                if (!builder.add_tool_call(name, "", args->value) || args->is_partial) {
+                    throw common_chat_msg_partial_exception("incomplete tool call");
                 }
             } else {
-                throw common_chat_msg_parse_exception("expected function args, got: " + consume_until_next());
+                std::string args_as_string;
+                if (args->value.is_object()) {
+                    args_as_string = args->value.dump();
+                } else {
+                    args_as_string = args->value;
+                }
+
+                // simulate tool call in content
+                builder.add_content("<tool_call>");
+                builder.add_content("{\"name\": " + json(name).dump() + ", \"arguments\": ");
+                builder.add_content(args_as_string);
+                if (!args->is_partial) {
+                    builder.add_content("}");
+                    builder.add_content("</tool_call>");
+                } else {
+                    throw common_chat_msg_partial_exception("incomplete tool call");
+                }
             }
-        } else if (builder.try_consume_regex(builtin_tool_call_regex)) {
-            builder.consume_rest();
-            LOG_ERR("builtin tool calls not implemented\n");
-        } else {
-            throw common_chat_msg_parse_exception("expected function name, got: " + consume_until_next());
         }
     };
 
-    auto commentary = [&]() {
-        if (builder.try_consume_regex(to_regex)) {
-            tool_call(false);
-        } else if (!try_consume_message()) {
-            throw common_chat_msg_parse_exception("expected: \" to=\" or <|message|>, got: " + consume_until_next());
-        }
-    };
-
-    auto analysis = [&]() {
-        if (builder.try_consume_regex(to_regex)) {
-            tool_call(false); // built-in tools can be called in the analysis channel
-        } else if (builder.try_consume_regex(message_regex)) {
-            builder.move_to(channel_start_pos);
+    do {
+        if (auto res = builder.try_consume_regex(basic_analysis_regex)) {
+            builder.move_to(res->groups[0].begin);
             if (builder.syntax().reasoning_format == COMMON_REASONING_FORMAT_NONE || builder.syntax().reasoning_in_content) {
-                builder.add_content(consume_until_next());
+                builder.add_content(consume_end(true));
             } else {
                 builder.try_parse_reasoning("<|channel|>analysis<|message|>", "<|end|>");
             }
-        } else {
-            throw common_chat_msg_parse_exception("expected: <|message|>, got: " + consume_until_next());
+        } else if (builder.try_consume_regex(final_regex)) {
+            builder.add_content(consume_end());
+            break;
+        } else if (builder.try_consume_regex(commentary_preamble_regex)) {
+            builder.add_content(consume_end());
+        } else if (auto res = builder.try_consume_regex(tool_call1_regex)) {
+            std::string name = builder.str(res->groups[1]);
+            handle_tool_call(name);
+        } else if (auto res = builder.try_consume_regex(tool_call2_regex)) {
+            std::string name = builder.str(res->groups[2]);
+            handle_tool_call(name);
         }
-    };
-
-    auto channel = [&](const common_chat_msg_parser::find_regex_result & match) {
-        auto type = builder.str(match.groups[1]);
-        if (type == "analysis") {
-            analysis();
-        } else if (type == "commentary") {
-            commentary();
-        } else if (type == "final") {
-            if (!try_consume_message()) {
-                throw common_chat_msg_parse_exception("expected: <|message|>, got: " + consume_until_next());
-            }
-        } else {
-            throw common_chat_msg_parse_exception("expected one of: [analysis, commentary, final], got: " + consume_until_next());
-        }
-    };
-
-    auto message = [&]() {
-        if (auto res = builder.try_consume_regex(channel_regex)) {
-            channel_start_pos = res->groups[0].begin;
-            channel(*res);
-        } else if (builder.try_consume_regex(to_regex)) {
-            tool_call(true);
-        } else {
-            throw common_chat_msg_parse_exception("expected: <|channel|> or \" to\", got: " + consume_until_next());
-        }
-    };
-
-    try {
-        message();
-    } catch (const common_chat_msg_parse_exception & e) {
-        LOG_DBG("Parse error: %s\n", e.what());
-    }
-
-    // Read in complete messages until done or partial exception raised
-    while (auto res = builder.try_consume_regex(start_regex)) {
-        try {
-            message();
-        } catch (const common_chat_msg_parse_exception & e) {
-            LOG_DBG("Parse error: %s\n", e.what());
-        }
-    }
+    } while (builder.try_find_regex(start_regex, std::string::npos, false));
 
     builder.consume_rest();
 }
