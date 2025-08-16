@@ -3003,6 +3003,14 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         }
     ).set_examples({LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_MAIN}).set_env("LLAMA_ARG_THINK_BUDGET"));
     add_opt(common_arg(
+        {"--reasoning-cache"}, "N",
+        "controls the reasoning cache size for models that require reasoning content during inference. (default: 0)",
+        [](common_params & params, int value) {
+            if (value < 0) { throw std::invalid_argument("invalid value"); }
+            params.reasoning_cache = value;
+        }
+    ).set_examples({LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_MAIN}).set_env("LLAMA_ARG_REASONING_CACHE"));
+    add_opt(common_arg(
         {"--chat-template"}, "JINJA_TEMPLATE",
         string_format(
             "set custom jinja chat template (default: template taken from model's metadata)\n"
