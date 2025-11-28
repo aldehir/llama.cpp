@@ -6,11 +6,13 @@
 #include <string>
 
 std::string json_schema_to_grammar(const nlohmann::ordered_json & schema,
-                                   bool force_gbnf = false);
+                                   bool force_gbnf = false,
+                                   bool raw = false);
 
 struct common_grammar_builder {
     std::function<std::string(const std::string &, const std::string &)> add_rule;
     std::function<std::string(const std::string &, const nlohmann::ordered_json &)> add_schema;
+    std::function<std::string(const std::string &, const nlohmann::ordered_json &)> add_string_schema;
     std::function<void(nlohmann::ordered_json &)> resolve_refs;
 };
 

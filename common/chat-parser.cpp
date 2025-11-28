@@ -1469,9 +1469,6 @@ static void common_chat_parse(common_chat_msg_parser & builder) {
         case COMMON_CHAT_FORMAT_KIMI_K2:
             common_chat_parse_kimi_k2(builder);
             break;
-        case COMMON_CHAT_FORMAT_QWEN3_CODER_XML:
-            common_chat_parse_qwen3_coder_xml(builder);
-            break;
         case COMMON_CHAT_FORMAT_APRIEL_1_5:
             common_chat_parse_apriel_1_5(builder);
             break;
