@@ -10,6 +10,9 @@
 #include <vector>
 #include <variant>
 
+// non-thread-safe
+void common_peg_debug_set(bool enabled);
+
 struct common_grammar_builder;
 
 class common_peg_parser_builder;
@@ -19,6 +22,9 @@ constexpr common_peg_parser_id COMMON_PEG_INVALID_PARSER_ID = static_cast<common
 
 using common_peg_ast_id = size_t;
 constexpr common_peg_ast_id COMMON_PEG_INVALID_AST_ID = static_cast<common_peg_ast_id>(-1);
+
+using common_peg_value_id = size_t;
+constexpr common_peg_value_id COMMON_PEG_INVALID_VALUE_ID = static_cast<common_peg_value_id>(-1);
 
 // Lightweight wrapper around common_peg_parser_id for convenience
 class common_peg_parser {
@@ -66,9 +72,129 @@ enum common_peg_parse_result_type {
     COMMON_PEG_PARSE_RESULT_FAIL            = 0,
     COMMON_PEG_PARSE_RESULT_SUCCESS         = 1,
     COMMON_PEG_PARSE_RESULT_NEED_MORE_INPUT = 2,
+    COMMON_PEG_PARSE_RESULT_FATAL           = 3,
 };
 
 const char * common_peg_parse_result_type_name(common_peg_parse_result_type type);
+
+struct common_peg_value {
+    virtual ~common_peg_value() = default;
+};
+
+using common_peg_value_ptr = std::shared_ptr<common_peg_value>;
+
+class common_peg_value_store {
+    struct stored_value {
+        common_peg_value_ptr value;
+        std::string rule_name;
+    };
+    std::vector<stored_value> values_;
+
+  public:
+    common_peg_value_id add(common_peg_value_ptr val, const std::string & rule_name = "") {
+        common_peg_value_id id = values_.size();
+        values_.push_back({std::move(val), rule_name});
+        return id;
+    }
+
+    common_peg_value_ptr get(common_peg_value_id id) const {
+        if (id == COMMON_PEG_INVALID_VALUE_ID || id >= values_.size()) {
+            return nullptr;
+        }
+        return values_[id].value;
+    }
+
+    std::string_view rule(common_peg_value_id id) const {
+        if (id == COMMON_PEG_INVALID_VALUE_ID || id >= values_.size()) {
+            return "";
+        }
+        return values_[id].rule_name;
+    }
+
+    template <typename T>
+    std::shared_ptr<T> get_as(common_peg_value_id id) const {
+        return std::dynamic_pointer_cast<T>(get(id));
+    }
+
+    void clear() { values_.clear(); }
+    size_t size() const { return values_.size(); }
+};
+
+class common_peg_semantic_context {
+    std::string_view text_;
+    const std::vector<common_peg_value_id>& child_ids_;
+    const common_peg_value_store& store_;
+
+  public:
+    common_peg_semantic_context(
+        std::string_view text,
+        const std::vector<common_peg_value_id>& children,
+        const common_peg_value_store& store
+    ) : text_(text), child_ids_(children), store_(store) {}
+
+    std::string_view text() const { return text_; }
+
+    size_t size() const { return child_ids_.size(); }
+    bool empty() const { return child_ids_.empty(); }
+
+    template <typename T>
+    std::shared_ptr<T> get(size_t i) const {
+        if (i >= child_ids_.size()) {
+            return nullptr;
+        }
+        return store_.get_as<T>(child_ids_[i]);
+    }
+
+    template <typename T>
+    std::shared_ptr<T> find(size_t start = 0) const {
+        for (size_t i = start; i < child_ids_.size(); i++) {
+            if (auto p = store_.get_as<T>(child_ids_[i])) {
+                return p;
+            }
+        }
+        return nullptr;
+    }
+
+    template<typename T, typename Base = T>
+    std::vector<std::shared_ptr<Base>> slice(size_t start, size_t end = SIZE_MAX) const {
+        std::vector<std::shared_ptr<Base>> result;
+        size_t actual_end = std::min(end, child_ids_.size());
+        for (size_t i = start; i < actual_end; i++) {
+            if (auto p = store_.get_as<T>(child_ids_[i])) {
+                result.push_back(std::move(p));
+            }
+        }
+        return result;
+    }
+
+    template<typename T, typename Base = T>
+    std::vector<std::shared_ptr<Base>> all() const {
+        return slice<T, Base>(0);
+    }
+
+    common_peg_value_ptr raw(size_t i) const {
+        if (i >= child_ids_.size()) {
+            return nullptr;
+        }
+        return store_.get(child_ids_[i]);
+    }
+
+    common_peg_value_ptr single() const {
+        return (child_ids_.size() == 1) ? store_.get(child_ids_[0]) : nullptr;
+    }
+
+    template <typename K, typename V = K>
+    std::pair<std::shared_ptr<K>, std::shared_ptr<V>> pair() const {
+        return { get<K>(0), get<V>(1) };
+    }
+
+    std::string_view rule(size_t i) const {
+        if (i >= child_ids_.size()) {
+            return "";
+        }
+        return store_.rule(child_ids_[i]);
+    }
+};
 
 struct common_peg_ast_node {
     common_peg_ast_id id;
@@ -83,6 +209,10 @@ struct common_peg_ast_node {
 };
 
 struct common_peg_parse_result;
+
+using common_peg_semantic_action = std::function<
+    common_peg_value_ptr(const common_peg_semantic_context& ctx)
+>;
 
 using common_peg_ast_visitor = std::function<void(const common_peg_ast_node & node)>;
 
@@ -119,6 +249,7 @@ struct common_peg_parse_result {
     size_t end = 0;
 
     std::vector<common_peg_ast_id> nodes;
+    std::vector<common_peg_value_id> values;
 
     common_peg_parse_result() = default;
 
@@ -131,17 +262,61 @@ struct common_peg_parse_result {
     common_peg_parse_result(common_peg_parse_result_type type, size_t start, size_t end, std::vector<common_peg_ast_id> nodes)
         : type(type), start(start), end(end), nodes(std::move(nodes)) {}
 
+    common_peg_parse_result(common_peg_parse_result_type type, size_t start, size_t end, std::vector<common_peg_ast_id> nodes, std::vector<common_peg_value_id> values)
+        : type(type), start(start), end(end), nodes(std::move(nodes)), values(std::move(values)) {}
+
     bool fail() const { return type == COMMON_PEG_PARSE_RESULT_FAIL; }
+    bool fatal() const { return type == COMMON_PEG_PARSE_RESULT_FATAL; }
     bool need_more_input() const { return type == COMMON_PEG_PARSE_RESULT_NEED_MORE_INPUT; }
     bool success() const { return type == COMMON_PEG_PARSE_RESULT_SUCCESS; }
+};
+
+struct common_peg_parse_error {
+    size_t position;
+    std::string message;
+    std::string rule;
+};
+
+class common_peg_cache {
+    struct key_hash {
+        size_t operator()(const std::pair<common_peg_parser_id, size_t> & k) const {
+            // Combine parser id and position into a single hash
+            return std::hash<size_t>()(k.first) ^ (std::hash<size_t>()(k.second) << 1);
+        }
+    };
+
+    std::unordered_map<std::pair<common_peg_parser_id, size_t>, common_peg_parse_result, key_hash> cache_;
+
+  public:
+    bool get(common_peg_parser_id id, size_t pos, common_peg_parse_result & result) const {
+        auto it = cache_.find({id, pos});
+        if (it != cache_.end()) {
+            result = it->second;
+            return true;
+        }
+        return false;
+    }
+
+    void put(common_peg_parser_id id, size_t pos, const common_peg_parse_result & result) {
+        cache_[{id, pos}] = result;
+    }
+
+    void clear() { cache_.clear(); }
+    size_t size() const { return cache_.size(); }
 };
 
 struct common_peg_parse_context {
     std::string input;
     bool is_partial;
     common_peg_ast_arena ast;
+    common_peg_value_store values;
 
     int parse_depth;
+
+    std::vector<common_peg_parse_error> errors;
+    size_t furthest_position = 0;
+
+    std::unique_ptr<common_peg_cache> cache;
 
     common_peg_parse_context()
         : is_partial(false), parse_depth(0) {}
@@ -151,6 +326,12 @@ struct common_peg_parse_context {
 
     common_peg_parse_context(const std::string & input, bool is_partial)
         : input(input), is_partial(is_partial), parse_depth(0) {}
+
+    void add_error(size_t pos, const std::string & message, const std::string & rule = "");
+
+    void enable_cache() { cache = std::make_unique<common_peg_cache>(); }
+    std::unique_ptr<common_peg_cache> release_cache() { return std::move(cache); }
+    void set_cache(std::unique_ptr<common_peg_cache> c) { cache = std::move(c); }
 };
 
 class common_peg_arena;
@@ -225,6 +406,7 @@ struct common_peg_rule_parser {
     std::string name;
     common_peg_parser_id child;
     bool trigger;
+    common_peg_semantic_action action;  // optional semantic action
 };
 
 struct common_peg_ref_parser {
@@ -238,6 +420,13 @@ struct common_peg_atomic_parser {
 struct common_peg_tag_parser {
     common_peg_parser_id child;
     std::string tag;
+};
+
+struct common_peg_cut_parser {};
+
+struct common_peg_expect_parser {
+    common_peg_parser_id child;
+    std::string message;
 };
 
 // Variant holding all parser types
@@ -260,7 +449,9 @@ using common_peg_parser_variant = std::variant<
     common_peg_rule_parser,
     common_peg_ref_parser,
     common_peg_atomic_parser,
-    common_peg_tag_parser
+    common_peg_tag_parser,
+    common_peg_cut_parser,
+    common_peg_expect_parser
 >;
 
 class common_peg_arena {
@@ -306,10 +497,17 @@ class common_peg_arena {
 };
 
 class common_peg_parser_builder {
+    friend class common_peg_parser;
+
     common_peg_arena arena_;
+    common_peg_parser_id token_space_ = COMMON_PEG_INVALID_PARSER_ID;
+    common_peg_parser_id word_boundary_ = COMMON_PEG_INVALID_PARSER_ID;
 
     common_peg_parser wrap(common_peg_parser_id id) { return common_peg_parser(id, *this); }
     common_peg_parser add(const common_peg_parser_variant & p) { return wrap(arena_.add_parser(p)); }
+
+    // flattens left side if it's a choice
+    common_peg_parser choice_flatten_left(common_peg_parser_id left, common_peg_parser_id right);
 
   public:
     common_peg_parser_builder();
@@ -383,6 +581,24 @@ class common_peg_parser_builder {
     //   S -> [ \t\n]*
     common_peg_parser space() { return add(common_peg_space_parser{}); }
 
+    // Sets the whitespace parser to use for token() and keyword().
+    // If not set, token() returns the parser unchanged.
+    void set_token_space(const common_peg_parser & p) { token_space_ = p.id(); }
+
+    // Sets the word boundary parser for keyword().
+    // keyword() will use negate(word_boundary) to ensure the keyword isn't a prefix.
+    // If not set, keyword() behaves like token().
+    void set_word_boundary(const common_peg_parser & p) { word_boundary_ = p.id(); }
+
+    // Wraps a parser to consume trailing whitespace (as configured by set_token_space).
+    //   token(p) -> p token_space
+    common_peg_parser token(const common_peg_parser & p);
+    common_peg_parser token(const std::string & literal);
+
+    // Creates a keyword parser: matches literal, checks word boundary, consumes trailing whitespace.
+    //   keyword(kw) -> kw !word_boundary token_space
+    common_peg_parser keyword(const std::string & kw);
+
     // Matches all characters until a delimiter is found (delimiter not consumed).
     //   S -> (!delim .)*
     common_peg_parser until(const std::string & delimiter) { return add(common_peg_until_parser{{delimiter}}); }
@@ -436,6 +652,16 @@ class common_peg_parser_builder {
     //   auto json = p.rule("json", [&]() { return json_object() | json_array() | ... })
     common_peg_parser rule(const std::string & name, const std::function<common_peg_parser()> & builder, bool trigger = false);
 
+    common_peg_parser rule(const std::string & name, const common_peg_parser & p, bool trigger, common_peg_semantic_action action);
+    common_peg_parser rule(const std::string & name, const std::function<common_peg_parser()> & builder, bool trigger, common_peg_semantic_action action);
+
+    common_peg_parser action_rule(const std::string & name, const common_peg_parser & p, common_peg_semantic_action action) {
+        return rule(name, p, false, std::move(action));
+    }
+    common_peg_parser action_rule(const std::string & name, const std::function<common_peg_parser()> & builder, common_peg_semantic_action action) {
+        return rule(name, builder, false, std::move(action));
+    }
+
     // Creates a trigger rule. When generating a lazy grammar from the parser,
     // only trigger rules and descendents are emitted.
     common_peg_parser trigger_rule(const std::string & name, const common_peg_parser & p) { return rule(name, p, true); }
@@ -449,6 +675,14 @@ class common_peg_parser_builder {
     // Tags create nodes in the generated AST for semantic purposes.
     // Unlike rules, you can tag multiple nodes with the same tag.
     common_peg_parser tag(const std::string & tag, const common_peg_parser & p) { return add(common_peg_tag_parser{p.id(), tag}); }
+
+    // Cut commits to the current choice branch, preventing backtracking on subsequent failure.
+    // Used in sequences: seq(a, cut(), b)
+    common_peg_parser cut() { return add(common_peg_cut_parser{}); }
+
+    // Expect wraps a parser with an error message that is recorded on failure.
+    common_peg_parser expect(const common_peg_parser & p, const std::string & message);
+    common_peg_parser expect(const std::string & literal, const std::string & message);
 
     void set_root(const common_peg_parser & p);
 

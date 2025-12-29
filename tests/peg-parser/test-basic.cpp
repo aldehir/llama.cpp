@@ -451,4 +451,66 @@ void test_basic(testing & t) {
             t.assert_equal("result_is_fail", true, result.fail());
         });
     });
+
+    t.test("cut", [](testing & t) {
+        // Cut prevents backtracking in choice
+        t.test("cut_prevents_backtracking", [](testing &t) {
+            auto parser = build_peg_parser([](common_peg_parser_builder & p) {
+                return p.choice({
+                    p.sequence({p.literal("a"), p.cut(), p.literal("b")}),
+                    p.literal("ac")
+                });
+            });
+
+            common_peg_parse_context ctx("ac", false);
+            auto result = parser.parse(ctx);
+            t.assert_equal("cut_prevents_backtracking", true, result.fail());
+        });
+
+        // Cut is local to inner choice - outer choice still works
+        t.test("cut_local_to_choice", [](testing &t) {
+            auto parser = build_peg_parser([](common_peg_parser_builder & p) {
+                auto inner = p.choice({
+                    p.sequence({p.literal("a"), p.cut(), p.literal("b")}),
+                    p.literal("ab")
+                });
+                return p.choice({inner, p.literal("ac")});
+            });
+
+            common_peg_parse_context ctx("ac", false);
+            auto result = parser.parse(ctx);
+            t.assert_equal("cut_local_to_choice", true, result.success());
+        });
+    });
+
+    t.test("expect", [](testing & t) {
+        // Expect records error on failure
+        t.test("expect_records_error", [](testing &t) {
+            auto parser = build_peg_parser([](common_peg_parser_builder & p) {
+                return p.expect(p.literal("hello"), "expected 'hello'");
+            });
+
+            common_peg_parse_context ctx("world", false);
+            auto result = parser.parse(ctx);
+            t.assert_equal("fail", true, result.fail());
+            t.assert_equal("error_count", 1u, ctx.errors.size());
+            t.assert_equal("message", std::string("expected 'hello'"), ctx.errors[0].message);
+        });
+
+        // Only furthest position errors kept
+        t.test("expect_furthest_position", [](testing &t) {
+            auto parser = build_peg_parser([](common_peg_parser_builder & p) {
+                return p.sequence({
+                    p.expect(p.literal("ab"), "expected 'ab'"),
+                    p.expect(p.literal("cd"), "expected 'cd'")
+                });
+            });
+
+            common_peg_parse_context ctx("abxy", false);
+            auto result = parser.parse(ctx);
+            t.assert_equal("fail", true, result.fail());
+            t.assert_equal("error_count", 1u, ctx.errors.size());
+            t.assert_equal("message", std::string("expected 'cd'"), ctx.errors[0].message);
+        });
+    });
 }
