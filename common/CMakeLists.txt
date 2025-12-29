@@ -87,6 +87,8 @@ add_library(${TARGET} STATIC
     jinja/jinja-lexer.h
     jinja/jinja-parser.cpp
     jinja/jinja-parser.h
+    jinja/jinja-peg-parser.cpp
+    jinja/jinja-peg-parser.h
     jinja/jinja-vm.cpp
     jinja/jinja-vm.h
     jinja/jinja-vm-builtins.cpp

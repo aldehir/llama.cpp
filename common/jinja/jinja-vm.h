@@ -2,6 +2,7 @@
 
 #include "jinja-lexer.h"
 #include "jinja-value.h"
+#include "peg-parser.h"
 
 #include <string>
 #include <vector>
@@ -28,14 +29,15 @@ struct context {
 
 /**
  * Base class for all nodes in the AST.
+ * Inherits from common_peg_value to be used as semantic values in PEG parsing.
  */
-struct statement {
+struct statement : public common_peg_value {
     virtual ~statement() = default;
     virtual std::string type() const { return "Statement"; }
     virtual value execute(context &) { throw std::runtime_error("cannot exec " + type()); }
 };
 
-using statement_ptr = std::unique_ptr<statement>;
+using statement_ptr = std::shared_ptr<statement>;
 using statements = std::vector<statement_ptr>;
 
 // Type Checking Utilities
