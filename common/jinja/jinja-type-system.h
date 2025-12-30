@@ -29,6 +29,19 @@ struct Type {
     virtual bool equals(const TypePtr& other) const = 0;
     virtual TypePtr clone() const = 0;
     virtual std::string kind() const = 0;
+
+    // Pretty printing with indentation (default delegates to to_string)
+    virtual std::string to_string_pretty(int indent = 0, int indent_size = 2) const {
+        return to_string();
+    }
+
+    // Check if this type is "simple" enough to stay inline
+    virtual bool is_simple() const { return true; }
+
+protected:
+    static std::string make_indent(int level, int size) {
+        return std::string(level * size, ' ');
+    }
 };
 
 /**
@@ -74,6 +87,21 @@ struct array_type : public Type {
 
     std::string to_string() const override {
         return "array<" + (element_type ? element_type->to_string() : "unknown") + ">";
+    }
+
+    std::string to_string_pretty(int indent, int indent_size) const override {
+        if (!element_type || element_type->is_simple()) {
+            return to_string();
+        }
+        // Element is complex - expand it
+        return "array<\n" +
+               make_indent(indent + 1, indent_size) +
+               element_type->to_string_pretty(indent + 1, indent_size) +
+               "\n" + make_indent(indent, indent_size) + ">";
+    }
+
+    bool is_simple() const override {
+        return !element_type || element_type->is_simple();
     }
 
     bool equals(const TypePtr& other) const override {
@@ -143,6 +171,39 @@ struct object_type : public Type {
         return result;
     }
 
+    std::string to_string_pretty(int indent, int indent_size) const override {
+        if (is_simple()) {
+            return to_string();
+        }
+
+        std::string result = "{\n";
+        bool first = true;
+        for (const auto& [name, field] : fields) {
+            if (!first) result += ",\n";
+            first = false;
+            result += make_indent(indent + 1, indent_size);
+            result += name;
+            if (field.optional) result += "?";
+            result += ": ";
+            if (field.type) {
+                result += field.type->to_string_pretty(indent + 1, indent_size);
+            } else {
+                result += "unknown";
+            }
+        }
+        result += "\n" + make_indent(indent, indent_size) + "}";
+        return result;
+    }
+
+    bool is_simple() const override {
+        // Simple if 3 or fewer fields and all field types are simple
+        if (fields.size() > 3) return false;
+        for (const auto& [name, field] : fields) {
+            if (field.type && !field.type->is_simple()) return false;
+        }
+        return true;
+    }
+
     bool equals(const TypePtr& other) const override {
         auto* o = dynamic_cast<object_type*>(other.get());
         if (!o) return false;
@@ -196,6 +257,29 @@ struct union_type : public Type {
             result += alternatives[i]->to_string();
         }
         return result.empty() ? "never" : result;
+    }
+
+    std::string to_string_pretty(int indent, int indent_size) const override {
+        if (is_simple()) {
+            return to_string();
+        }
+        // Complex union - put each alternative on its own line
+        std::string result;
+        for (size_t i = 0; i < alternatives.size(); ++i) {
+            if (i > 0) {
+                result += "\n" + make_indent(indent, indent_size) + "| ";
+            }
+            result += alternatives[i]->to_string_pretty(indent, indent_size);
+        }
+        return result.empty() ? "never" : result;
+    }
+
+    bool is_simple() const override {
+        // Simple if all alternatives are literals or primitives
+        for (const auto& alt : alternatives) {
+            if (!alt->is_simple()) return false;
+        }
+        return true;
     }
 
     bool equals(const TypePtr& other) const override {
@@ -333,6 +417,49 @@ struct function_type : public Type {
         }
         result += ") -> " + (return_type ? return_type->to_string() : "unknown");
         return result;
+    }
+
+    std::string to_string_pretty(int indent, int indent_size) const override {
+        if (is_simple()) {
+            return to_string();
+        }
+        // Complex function - format params and return type
+        std::string result = "(";
+        bool has_complex_param = false;
+        for (const auto& p : param_types) {
+            if (p && !p->is_simple()) { has_complex_param = true; break; }
+        }
+
+        if (has_complex_param && param_types.size() > 1) {
+            result += "\n";
+            for (size_t i = 0; i < param_types.size(); ++i) {
+                if (i > 0) result += ",\n";
+                result += make_indent(indent + 1, indent_size);
+                result += param_types[i] ? param_types[i]->to_string_pretty(indent + 1, indent_size) : "unknown";
+            }
+            result += "\n" + make_indent(indent, indent_size) + ")";
+        } else {
+            for (size_t i = 0; i < param_types.size(); ++i) {
+                if (i > 0) result += ", ";
+                result += param_types[i] ? param_types[i]->to_string_pretty(indent, indent_size) : "unknown";
+            }
+            result += ")";
+        }
+
+        result += " -> ";
+        if (return_type) {
+            result += return_type->to_string_pretty(indent, indent_size);
+        } else {
+            result += "unknown";
+        }
+        return result;
+    }
+
+    bool is_simple() const override {
+        for (const auto& p : param_types) {
+            if (p && !p->is_simple()) return false;
+        }
+        return !return_type || return_type->is_simple();
     }
 
     bool equals(const TypePtr& other) const override {
