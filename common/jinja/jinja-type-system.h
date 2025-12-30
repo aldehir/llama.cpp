@@ -14,7 +14,7 @@ struct Type;
 using TypePtr = std::shared_ptr<Type>;
 
 // Type variable name generator
-struct TypeVarGenerator {
+struct type_var_generator {
     static inline int counter = 0;
     static std::string fresh() { return "T" + std::to_string(++counter); }
     static void reset() { counter = 0; }
@@ -34,11 +34,11 @@ struct Type {
 /**
  * Primitive types: int, float, string, bool, null
  */
-struct PrimitiveType : public Type {
+struct primitive_type : public Type {
     enum Kind { Int, Float, String, Bool, Null };
     Kind prim_kind;
 
-    explicit PrimitiveType(Kind k) : prim_kind(k) {}
+    explicit primitive_type(Kind k) : prim_kind(k) {}
 
     std::string to_string() const override {
         switch (prim_kind) {
@@ -52,12 +52,12 @@ struct PrimitiveType : public Type {
     }
 
     bool equals(const TypePtr& other) const override {
-        auto* p = dynamic_cast<PrimitiveType*>(other.get());
+        auto* p = dynamic_cast<primitive_type*>(other.get());
         return p && p->prim_kind == prim_kind;
     }
 
     TypePtr clone() const override {
-        return std::make_shared<PrimitiveType>(prim_kind);
+        return std::make_shared<primitive_type>(prim_kind);
     }
 
     std::string kind() const override { return "primitive"; }
@@ -67,17 +67,17 @@ struct PrimitiveType : public Type {
  * Array type with element type
  * Example: array<string> or array<{content: string, role: string}>
  */
-struct ArrayType : public Type {
+struct array_type : public Type {
     TypePtr element_type;
 
-    explicit ArrayType(TypePtr elem = nullptr) : element_type(std::move(elem)) {}
+    explicit array_type(TypePtr elem = nullptr) : element_type(std::move(elem)) {}
 
     std::string to_string() const override {
         return "array<" + (element_type ? element_type->to_string() : "unknown") + ">";
     }
 
     bool equals(const TypePtr& other) const override {
-        auto* a = dynamic_cast<ArrayType*>(other.get());
+        auto* a = dynamic_cast<array_type*>(other.get());
         if (!a) return false;
         if (!element_type && !a->element_type) return true;
         if (!element_type || !a->element_type) return false;
@@ -85,7 +85,7 @@ struct ArrayType : public Type {
     }
 
     TypePtr clone() const override {
-        return std::make_shared<ArrayType>(element_type ? element_type->clone() : nullptr);
+        return std::make_shared<array_type>(element_type ? element_type->clone() : nullptr);
     }
 
     std::string kind() const override { return "array"; }
@@ -95,7 +95,7 @@ struct ArrayType : public Type {
  * Object type with named fields (structural typing)
  * Example: {content: string, role: string, tool_calls?: array<...>}
  */
-struct ObjectType : public Type {
+struct object_type : public Type {
     struct Field {
         std::string name;
         TypePtr type;
@@ -109,7 +109,7 @@ struct ObjectType : public Type {
     std::map<std::string, Field> fields;
     bool extensible;  // true if object may have additional unknown fields
 
-    explicit ObjectType(bool ext = true) : extensible(ext) {}
+    explicit object_type(bool ext = true) : extensible(ext) {}
 
     void add_field(const std::string& name, TypePtr type, bool optional = false) {
         fields[name] = Field{name, std::move(type), optional};
@@ -144,7 +144,7 @@ struct ObjectType : public Type {
     }
 
     bool equals(const TypePtr& other) const override {
-        auto* o = dynamic_cast<ObjectType*>(other.get());
+        auto* o = dynamic_cast<object_type*>(other.get());
         if (!o) return false;
         if (fields.size() != o->fields.size()) return false;
         for (const auto& [name, field] : fields) {
@@ -161,7 +161,7 @@ struct ObjectType : public Type {
     }
 
     TypePtr clone() const override {
-        auto obj = std::make_shared<ObjectType>(extensible);
+        auto obj = std::make_shared<object_type>(extensible);
         for (const auto& [name, field] : fields) {
             obj->fields[name] = Field{name, field.type ? field.type->clone() : nullptr, field.optional};
         }
@@ -175,11 +175,11 @@ struct ObjectType : public Type {
  * Union type: represents "type A or type B"
  * Example: string | null (optional string)
  */
-struct UnionType : public Type {
+struct union_type : public Type {
     std::vector<TypePtr> alternatives;
 
-    UnionType() = default;
-    explicit UnionType(std::vector<TypePtr> alts) : alternatives(std::move(alts)) {}
+    union_type() = default;
+    explicit union_type(std::vector<TypePtr> alts) : alternatives(std::move(alts)) {}
 
     void add_alternative(TypePtr type) {
         // Don't add duplicates
@@ -199,7 +199,7 @@ struct UnionType : public Type {
     }
 
     bool equals(const TypePtr& other) const override {
-        auto* u = dynamic_cast<UnionType*>(other.get());
+        auto* u = dynamic_cast<union_type*>(other.get());
         if (!u) return false;
         if (alternatives.size() != u->alternatives.size()) return false;
         // Order-independent comparison
@@ -214,7 +214,7 @@ struct UnionType : public Type {
     }
 
     TypePtr clone() const override {
-        auto u = std::make_shared<UnionType>();
+        auto u = std::make_shared<union_type>();
         for (const auto& alt : alternatives) {
             u->alternatives.push_back(alt->clone());
         }
@@ -228,18 +228,18 @@ struct UnionType : public Type {
  * Type variable: represents an unknown type to be solved
  * Used during constraint solving
  */
-struct TypeVariable : public Type {
+struct type_variable : public Type {
     std::string name;
     TypePtr bound;  // If solved, this holds the concrete type
 
-    explicit TypeVariable(const std::string& n) : name(n), bound(nullptr) {}
+    explicit type_variable(const std::string& n) : name(n), bound(nullptr) {}
 
     bool is_bound() const { return bound != nullptr; }
 
     TypePtr resolve() const {
         if (!bound) return nullptr;
         // Follow chain of type variables
-        if (auto* tv = dynamic_cast<TypeVariable*>(bound.get())) {
+        if (auto* tv = dynamic_cast<type_variable*>(bound.get())) {
             return tv->resolve();
         }
         return bound;
@@ -252,12 +252,12 @@ struct TypeVariable : public Type {
 
     bool equals(const TypePtr& other) const override {
         if (bound) return bound->equals(other);
-        auto* tv = dynamic_cast<TypeVariable*>(other.get());
+        auto* tv = dynamic_cast<type_variable*>(other.get());
         return tv && tv->name == name;
     }
 
     TypePtr clone() const override {
-        auto tv = std::make_shared<TypeVariable>(name);
+        auto tv = std::make_shared<type_variable>(name);
         if (bound) tv->bound = bound->clone();
         return tv;
     }
@@ -268,12 +268,12 @@ struct TypeVariable : public Type {
 /**
  * Function type (for macros and filters)
  */
-struct FunctionType : public Type {
+struct function_type : public Type {
     std::vector<TypePtr> param_types;
     TypePtr return_type;
 
-    FunctionType() = default;
-    FunctionType(std::vector<TypePtr> params, TypePtr ret)
+    function_type() = default;
+    function_type(std::vector<TypePtr> params, TypePtr ret)
         : param_types(std::move(params)), return_type(std::move(ret)) {}
 
     std::string to_string() const override {
@@ -287,7 +287,7 @@ struct FunctionType : public Type {
     }
 
     bool equals(const TypePtr& other) const override {
-        auto* f = dynamic_cast<FunctionType*>(other.get());
+        auto* f = dynamic_cast<function_type*>(other.get());
         if (!f) return false;
         if (param_types.size() != f->param_types.size()) return false;
         for (size_t i = 0; i < param_types.size(); ++i) {
@@ -308,7 +308,7 @@ struct FunctionType : public Type {
         for (const auto& p : param_types) {
             params.push_back(p ? p->clone() : nullptr);
         }
-        return std::make_shared<FunctionType>(std::move(params),
+        return std::make_shared<function_type>(std::move(params),
             return_type ? return_type->clone() : nullptr);
     }
 
@@ -320,48 +320,48 @@ struct FunctionType : public Type {
 // ============================================================================
 
 inline TypePtr make_int() {
-    return std::make_shared<PrimitiveType>(PrimitiveType::Int);
+    return std::make_shared<primitive_type>(primitive_type::Int);
 }
 
 inline TypePtr make_float() {
-    return std::make_shared<PrimitiveType>(PrimitiveType::Float);
+    return std::make_shared<primitive_type>(primitive_type::Float);
 }
 
 inline TypePtr make_string() {
-    return std::make_shared<PrimitiveType>(PrimitiveType::String);
+    return std::make_shared<primitive_type>(primitive_type::String);
 }
 
 inline TypePtr make_bool() {
-    return std::make_shared<PrimitiveType>(PrimitiveType::Bool);
+    return std::make_shared<primitive_type>(primitive_type::Bool);
 }
 
 inline TypePtr make_null() {
-    return std::make_shared<PrimitiveType>(PrimitiveType::Null);
+    return std::make_shared<primitive_type>(primitive_type::Null);
 }
 
 inline TypePtr make_array(TypePtr elem = nullptr) {
-    return std::make_shared<ArrayType>(std::move(elem));
+    return std::make_shared<array_type>(std::move(elem));
 }
 
 inline TypePtr make_object(bool extensible = true) {
-    return std::make_shared<ObjectType>(extensible);
+    return std::make_shared<object_type>(extensible);
 }
 
 inline TypePtr make_union() {
-    return std::make_shared<UnionType>();
+    return std::make_shared<union_type>();
 }
 
 inline TypePtr make_typevar(const std::string& name) {
-    return std::make_shared<TypeVariable>(name);
+    return std::make_shared<type_variable>(name);
 }
 
 inline TypePtr make_function(std::vector<TypePtr> params, TypePtr ret) {
-    return std::make_shared<FunctionType>(std::move(params), std::move(ret));
+    return std::make_shared<function_type>(std::move(params), std::move(ret));
 }
 
 // Helper for optional types (T | null)
 inline TypePtr make_optional(TypePtr type) {
-    auto u = std::make_shared<UnionType>();
+    auto u = std::make_shared<union_type>();
     u->add_alternative(std::move(type));
     u->add_alternative(make_null());
     return u;

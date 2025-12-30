@@ -17,12 +17,12 @@ namespace types {
 /**
  * Result of type inference analysis
  */
-struct InferenceResult {
+struct inference_result {
     // Inferred types for top-level variables
     std::map<std::string, TypePtr> variable_types;
 
     // All generated constraints (for debugging)
-    ConstraintSet constraints;
+    constraint_set constraints;
 
     // Any errors encountered
     std::vector<std::string> errors;
@@ -87,29 +87,29 @@ struct InferenceResult {
 /**
  * Main entry point for type inference
  */
-class TypeAnalyzer {
+class type_analyzer {
 public:
-    TypeAnalyzer() = default;
+    type_analyzer() = default;
 
     /**
      * Analyze a parsed Jinja program and infer types
      */
-    InferenceResult analyze(program& ast) {
-        InferenceResult result;
-        TypeVarGenerator::reset();
+    inference_result analyze(program& ast) {
+        inference_result result;
+        type_var_generator::reset();
 
         // Create root environment
-        TypeEnvironment root_env;
+        type_environment root_env;
 
         // Add built-in globals
         setup_builtins(root_env);
 
         // Generate constraints
-        TypeInferenceVisitor visitor(result.constraints, &root_env);
+        type_inference_visitor visitor(result.constraints, &root_env);
         visitor.dispatch(ast);
 
         // Solve constraints
-        ConstraintSolver solver;
+        constraint_solver solver;
         if (!solver.solve(result.constraints)) {
             result.errors = solver.errors;
         }
@@ -126,7 +126,7 @@ public:
     }
 
 private:
-    void setup_builtins(TypeEnvironment& env) {
+    void setup_builtins(type_environment& env) {
         // Standard Jinja built-ins
         env.bind("true", make_bool());
         env.bind("false", make_bool());
@@ -159,15 +159,15 @@ private:
 /**
  * Analyze a parsed program and infer types
  */
-inline InferenceResult infer_types(program& ast) {
-    TypeAnalyzer analyzer;
+inline inference_result infer_types(program& ast) {
+    type_analyzer analyzer;
     return analyzer.analyze(ast);
 }
 
 /**
  * Parse and analyze a template source string
  */
-inline InferenceResult infer_types_from_source(const std::string& source) {
+inline inference_result infer_types_from_source(const std::string& source) {
     lexer lex;
     preprocess_options opts;
     auto lexer_res = lex.tokenize(source, opts);
@@ -178,7 +178,7 @@ inline InferenceResult infer_types_from_source(const std::string& source) {
 /**
  * Parse and analyze a template source with custom preprocessing options
  */
-inline InferenceResult infer_types_from_source(
+inline inference_result infer_types_from_source(
     const std::string& source,
     const preprocess_options& opts)
 {
@@ -196,7 +196,7 @@ inline InferenceResult infer_types_from_source(
  * Check if an object type has a specific field
  */
 inline bool has_field(const TypePtr& type, const std::string& field_name) {
-    if (auto* obj = as_type<ObjectType>(type)) {
+    if (auto* obj = as_type<object_type>(type)) {
         return obj->has_field(field_name);
     }
     return false;
@@ -206,7 +206,7 @@ inline bool has_field(const TypePtr& type, const std::string& field_name) {
  * Check if a field is optional in an object type
  */
 inline bool is_field_optional(const TypePtr& type, const std::string& field_name) {
-    if (auto* obj = as_type<ObjectType>(type)) {
+    if (auto* obj = as_type<object_type>(type)) {
         auto* field = obj->get_field(field_name);
         return field ? field->optional : true;
     }
@@ -217,7 +217,7 @@ inline bool is_field_optional(const TypePtr& type, const std::string& field_name
  * Get the element type of an array
  */
 inline TypePtr get_element_type(const TypePtr& type) {
-    if (auto* arr = as_type<ArrayType>(type)) {
+    if (auto* arr = as_type<array_type>(type)) {
         return arr->element_type;
     }
     return nullptr;
@@ -227,7 +227,7 @@ inline TypePtr get_element_type(const TypePtr& type) {
  * Get a field type from an object
  */
 inline TypePtr get_field_type(const TypePtr& type, const std::string& field_name) {
-    if (auto* obj = as_type<ObjectType>(type)) {
+    if (auto* obj = as_type<object_type>(type)) {
         auto* field = obj->get_field(field_name);
         return field ? field->type : nullptr;
     }
@@ -239,9 +239,9 @@ inline TypePtr get_field_type(const TypePtr& type, const std::string& field_name
  * Returns true if type is array<{role: string, content: string, ...}>
  */
 inline bool is_message_array(const TypePtr& type) {
-    if (auto* arr = as_type<ArrayType>(type)) {
+    if (auto* arr = as_type<array_type>(type)) {
         if (arr->element_type) {
-            if (auto* obj = as_type<ObjectType>(arr->element_type)) {
+            if (auto* obj = as_type<object_type>(arr->element_type)) {
                 // Check for common message fields
                 bool has_role = obj->has_field("role");
                 bool has_content = obj->has_field("content");
@@ -256,9 +256,9 @@ inline bool is_message_array(const TypePtr& type) {
  * Check if messages support tool_calls
  */
 inline bool supports_tool_calls(const TypePtr& type) {
-    if (auto* arr = as_type<ArrayType>(type)) {
+    if (auto* arr = as_type<array_type>(type)) {
         if (arr->element_type) {
-            if (auto* obj = as_type<ObjectType>(arr->element_type)) {
+            if (auto* obj = as_type<object_type>(arr->element_type)) {
                 return obj->has_field("tool_calls");
             }
         }
@@ -270,9 +270,9 @@ inline bool supports_tool_calls(const TypePtr& type) {
  * Check if messages support reasoning_content
  */
 inline bool supports_reasoning_content(const TypePtr& type) {
-    if (auto* arr = as_type<ArrayType>(type)) {
+    if (auto* arr = as_type<array_type>(type)) {
         if (arr->element_type) {
-            if (auto* obj = as_type<ObjectType>(arr->element_type)) {
+            if (auto* obj = as_type<object_type>(arr->element_type)) {
                 return obj->has_field("reasoning_content");
             }
         }

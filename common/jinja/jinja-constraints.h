@@ -13,7 +13,7 @@ namespace types {
  */
 
 // Equality constraint: T1 = T2
-struct EqualityConstraint {
+struct equality_constraint {
     TypePtr left;
     TypePtr right;
     std::string source;  // Debug info: where this constraint came from
@@ -26,7 +26,7 @@ struct EqualityConstraint {
 };
 
 // Field access constraint: T1 has field 'name' of type T2
-struct HasFieldConstraint {
+struct has_field_constraint {
     TypePtr object_type;
     std::string field_name;
     TypePtr field_type;
@@ -42,7 +42,7 @@ struct HasFieldConstraint {
 };
 
 // Array element constraint: T1 is array with element type T2
-struct ArrayElementConstraint {
+struct array_element_constraint {
     TypePtr array_type;
     TypePtr element_type;
     std::string source;
@@ -55,7 +55,7 @@ struct ArrayElementConstraint {
 };
 
 // Iterable constraint: T can be iterated (array or object)
-struct IterableConstraint {
+struct iterable_constraint {
     TypePtr type;
     TypePtr element_type;  // Type of iteration variable
     std::string source;
@@ -68,7 +68,7 @@ struct IterableConstraint {
 };
 
 // Callable constraint: T is callable with return type R
-struct CallableConstraint {
+struct callable_constraint {
     TypePtr callee_type;
     std::vector<TypePtr> arg_types;
     TypePtr return_type;
@@ -89,7 +89,7 @@ struct CallableConstraint {
 // Output coercion constraint: T is used in output context (will be coerced to string)
 // This is a "soft" constraint - it suggests the type should be string-like
 // but doesn't force it (since any type can be stringified in Jinja)
-struct OutputCoercionConstraint {
+struct output_coercion_constraint {
     TypePtr type;
     std::string source;
 
@@ -101,7 +101,7 @@ struct OutputCoercionConstraint {
 
 // String operand constraint: T is used in string context (e.g., ~ operator)
 // This is stronger than output coercion - the value is definitely a string
-struct StringOperandConstraint {
+struct string_operand_constraint {
     TypePtr type;
     std::string source;
 
@@ -112,58 +112,58 @@ struct StringOperandConstraint {
 };
 
 // Union of all constraint types
-using Constraint = std::variant<
-    EqualityConstraint,
-    HasFieldConstraint,
-    ArrayElementConstraint,
-    IterableConstraint,
-    CallableConstraint,
-    OutputCoercionConstraint,
-    StringOperandConstraint
+using constraint = std::variant<
+    equality_constraint,
+    has_field_constraint,
+    array_element_constraint,
+    iterable_constraint,
+    callable_constraint,
+    output_coercion_constraint,
+    string_operand_constraint
 >;
 
 /**
  * Constraint set - collects all constraints from template analysis
  */
-struct ConstraintSet {
-    std::vector<Constraint> constraints;
+struct constraint_set {
+    std::vector<constraint> constraints;
 
-    void add(Constraint c) {
+    void add(constraint c) {
         constraints.push_back(std::move(c));
     }
 
     void add_equality(TypePtr left, TypePtr right, const std::string& source) {
-        constraints.push_back(EqualityConstraint{std::move(left), std::move(right), source});
+        constraints.push_back(equality_constraint{std::move(left), std::move(right), source});
     }
 
     void add_field(TypePtr obj, const std::string& field, TypePtr type,
                    bool optional, const std::string& source) {
-        constraints.push_back(HasFieldConstraint{
+        constraints.push_back(has_field_constraint{
             std::move(obj), field, std::move(type), optional, source
         });
     }
 
     void add_array_element(TypePtr arr, TypePtr elem, const std::string& source) {
-        constraints.push_back(ArrayElementConstraint{std::move(arr), std::move(elem), source});
+        constraints.push_back(array_element_constraint{std::move(arr), std::move(elem), source});
     }
 
     void add_iterable(TypePtr type, TypePtr elem, const std::string& source) {
-        constraints.push_back(IterableConstraint{std::move(type), std::move(elem), source});
+        constraints.push_back(iterable_constraint{std::move(type), std::move(elem), source});
     }
 
     void add_callable(TypePtr callee, std::vector<TypePtr> args, TypePtr ret,
                       const std::string& source) {
-        constraints.push_back(CallableConstraint{
+        constraints.push_back(callable_constraint{
             std::move(callee), std::move(args), std::move(ret), source
         });
     }
 
     void add_output_coercion(TypePtr type, const std::string& source) {
-        constraints.push_back(OutputCoercionConstraint{std::move(type), source});
+        constraints.push_back(output_coercion_constraint{std::move(type), source});
     }
 
     void add_string_operand(TypePtr type, const std::string& source) {
-        constraints.push_back(StringOperandConstraint{std::move(type), source});
+        constraints.push_back(string_operand_constraint{std::move(type), source});
     }
 
     void clear() {
@@ -178,8 +178,8 @@ struct ConstraintSet {
         std::string result = "Constraints (" + std::to_string(constraints.size()) + "):\n";
         for (const auto& c : constraints) {
             result += "  ";
-            std::visit([&](const auto& constraint) {
-                result += constraint.to_string();
+            std::visit([&](const auto& cst) {
+                result += cst.to_string();
             }, c);
             result += "\n";
         }

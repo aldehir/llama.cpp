@@ -23,7 +23,7 @@ static std::string read_file(const std::string& path) {
 using namespace jinja::types;
 
 // Test helper to print results
-void print_result(const std::string& test_name, const InferenceResult& result) {
+void print_result(const std::string& test_name, const inference_result& result) {
     std::cout << "=== " << test_name << " ===\n";
     std::cout << result.to_string();
     std::cout << "\nConstraints:\n" << result.constraints_to_string() << "\n";

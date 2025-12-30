@@ -13,8 +13,8 @@ namespace jinja {
  * the existing AST classes.
  */
 template<typename Result>
-struct ASTVisitor {
-    virtual ~ASTVisitor() = default;
+struct ast_visitor {
+    virtual ~ast_visitor() = default;
 
     // Statements
     virtual Result visit(program& node) = 0;
@@ -104,7 +104,7 @@ struct ASTVisitor {
  * Base class for visitors that don't need to return a value.
  * All visit methods have default empty implementations.
  */
-struct DefaultASTVisitor : public ASTVisitor<void> {
+struct default_ast_visitor : public ast_visitor<void> {
     // Statements - default empty implementations
     void visit(program& node) override {
         for (auto& stmt : node.body) dispatch(*stmt);

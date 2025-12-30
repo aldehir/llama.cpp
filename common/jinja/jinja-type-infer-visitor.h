@@ -16,12 +16,12 @@ namespace types {
  * Type environment - maps variable names to their types
  * Supports nested scopes via parent pointer
  */
-struct TypeEnvironment {
+struct type_environment {
     std::map<std::string, TypePtr> bindings;
-    TypeEnvironment* parent = nullptr;
+    type_environment* parent = nullptr;
 
-    TypeEnvironment() = default;
-    explicit TypeEnvironment(TypeEnvironment* p) : parent(p) {}
+    type_environment() = default;
+    explicit type_environment(type_environment* p) : parent(p) {}
 
     TypePtr lookup(const std::string& name) const {
         auto it = bindings.find(name);
@@ -52,15 +52,15 @@ struct TypeEnvironment {
 
 /**
  * Type guard - captures type narrowing information from test expressions
- * Example: "x is string" produces TypeGuard{x, string}
+ * Example: "x is string" produces type_guard{x, string}
  */
-struct TypeGuard {
+struct type_guard {
     std::string variable;  // The variable being narrowed
     TypePtr narrowed_type; // The type it's narrowed to
     bool negated = false;  // True if this is from "is not" or "not (x is ...)"
 
-    TypeGuard() = default;
-    TypeGuard(const std::string& var, TypePtr type, bool neg = false)
+    type_guard() = default;
+    type_guard(const std::string& var, TypePtr type, bool neg = false)
         : variable(var), narrowed_type(std::move(type)), negated(neg) {}
 
     bool valid() const { return !variable.empty() && narrowed_type != nullptr; }
@@ -69,40 +69,40 @@ struct TypeGuard {
 /**
  * Context tracking for conditional access analysis
  */
-struct InferenceContext {
+struct inference_context {
     bool in_conditional = false;  // Inside if/ternary
     bool in_loop = false;         // Inside for loop
     bool in_output = false;       // Inside output expression {{ }}
     int depth = 0;                // Nesting depth
 
-    InferenceContext enter_conditional() const {
-        return InferenceContext{true, in_loop, in_output, depth + 1};
+    inference_context enter_conditional() const {
+        return inference_context{true, in_loop, in_output, depth + 1};
     }
 
-    InferenceContext enter_loop() const {
-        return InferenceContext{in_conditional, true, in_output, depth + 1};
+    inference_context enter_loop() const {
+        return inference_context{in_conditional, true, in_output, depth + 1};
     }
 
-    InferenceContext enter_output() const {
-        return InferenceContext{in_conditional, in_loop, true, depth};
+    inference_context enter_output() const {
+        return inference_context{in_conditional, in_loop, true, depth};
     }
 };
 
 /**
  * Type inference visitor - generates constraints from AST
  */
-struct TypeInferenceVisitor : public ASTVisitor<TypePtr> {
-    ConstraintSet& constraints;
-    TypeEnvironment* env;
-    InferenceContext ctx;
+struct type_inference_visitor : public ast_visitor<TypePtr> {
+    constraint_set& constraints;
+    type_environment* env;
+    inference_context ctx;
 
     // Stack of environments for scoping
-    std::vector<std::unique_ptr<TypeEnvironment>> env_stack;
+    std::vector<std::unique_ptr<type_environment>> env_stack;
 
     // Root environment (kept separate for final result extraction)
-    TypeEnvironment* root_env;
+    type_environment* root_env;
 
-    TypeInferenceVisitor(ConstraintSet& cs, TypeEnvironment* root)
+    type_inference_visitor(constraint_set& cs, type_environment* root)
         : constraints(cs), env(root), ctx(), root_env(root) {}
 
     // === Type guard extraction ===
@@ -111,7 +111,7 @@ struct TypeInferenceVisitor : public ASTVisitor<TypePtr> {
      * Extract a type guard from a test expression like "x is string"
      * Returns an invalid guard if no narrowing can be inferred
      */
-    TypeGuard extract_type_guard(statement& test_node, bool negated = false) {
+    type_guard extract_type_guard(statement& test_node, bool negated = false) {
         // Handle "not (x is y)" - extract inner test and flip negation
         if (auto* unary = dynamic_cast<unary_expression*>(&test_node)) {
             if (unary->op.value == "not") {
@@ -126,7 +126,7 @@ struct TypeInferenceVisitor : public ASTVisitor<TypePtr> {
             if (auto* id = dynamic_cast<identifier*>(test->operand.get())) {
                 var_name = id->val;
             } else {
-                return TypeGuard{}; // Can only narrow simple identifiers for now
+                return type_guard{}; // Can only narrow simple identifiers for now
             }
 
             // Get the test name
@@ -173,7 +173,7 @@ struct TypeInferenceVisitor : public ASTVisitor<TypePtr> {
             }
 
             if (narrowed_type) {
-                return TypeGuard(var_name, narrowed_type, negated);
+                return type_guard(var_name, narrowed_type, negated);
             }
         }
 
@@ -185,18 +185,18 @@ struct TypeInferenceVisitor : public ASTVisitor<TypePtr> {
             // Return guard with current type to indicate "is defined"
             auto current = env->lookup(id->val);
             if (current && !negated) {
-                return TypeGuard(id->val, current, false);
+                return type_guard(id->val, current, false);
             }
         }
 
-        return TypeGuard{}; // No narrowing possible
+        return type_guard{}; // No narrowing possible
     }
 
     /**
      * Apply a type guard to the current environment
      * Creates a new binding with the narrowed type
      */
-    void apply_type_guard(const TypeGuard& guard) {
+    void apply_type_guard(const type_guard& guard) {
         if (!guard.valid()) return;
 
         if (guard.negated) {
@@ -218,7 +218,7 @@ struct TypeInferenceVisitor : public ASTVisitor<TypePtr> {
 
     // Scope management
     void push_scope() {
-        auto new_env = std::make_unique<TypeEnvironment>(env);
+        auto new_env = std::make_unique<type_environment>(env);
         env = new_env.get();
         env_stack.push_back(std::move(new_env));
     }
@@ -232,7 +232,7 @@ struct TypeInferenceVisitor : public ASTVisitor<TypePtr> {
 
     // Fresh type variable
     TypePtr fresh() {
-        return make_typevar(TypeVarGenerator::fresh());
+        return make_typevar(type_var_generator::fresh());
     }
 
     // Get source location string for debugging
@@ -278,7 +278,7 @@ struct TypeInferenceVisitor : public ASTVisitor<TypePtr> {
         push_scope();
         if (guard.valid()) {
             // In the else branch, the guard is negated
-            TypeGuard inverted_guard(guard.variable, guard.narrowed_type, !guard.negated);
+            type_guard inverted_guard(guard.variable, guard.narrowed_type, !guard.negated);
             // For now, we don't apply negated guards (would need exclusion types)
             // But we still create the scope for proper scoping
         }
@@ -326,7 +326,7 @@ struct TypeInferenceVisitor : public ASTVisitor<TypePtr> {
                 if (true_type == false_type || (true_type && false_type && true_type->equals(false_type))) {
                     merged_type = true_type;
                 } else {
-                    auto u = std::make_shared<UnionType>();
+                    auto u = std::make_shared<union_type>();
                     u->add_alternative(true_type);
                     u->add_alternative(false_type);
                     merged_type = u;
@@ -334,7 +334,7 @@ struct TypeInferenceVisitor : public ASTVisitor<TypePtr> {
             } else if (true_type) {
                 // Set only in true branch - union with original (or just true_type if no original)
                 if (original_type && original_type != true_type && !original_type->equals(true_type)) {
-                    auto u = std::make_shared<UnionType>();
+                    auto u = std::make_shared<union_type>();
                     u->add_alternative(true_type);
                     u->add_alternative(original_type);
                     merged_type = u;
@@ -344,7 +344,7 @@ struct TypeInferenceVisitor : public ASTVisitor<TypePtr> {
             } else if (false_type) {
                 // Set only in false branch - union with original
                 if (original_type && original_type != false_type && !original_type->equals(false_type)) {
-                    auto u = std::make_shared<UnionType>();
+                    auto u = std::make_shared<union_type>();
                     u->add_alternative(false_type);
                     u->add_alternative(original_type);
                     merged_type = u;
@@ -392,7 +392,7 @@ struct TypeInferenceVisitor : public ASTVisitor<TypePtr> {
         }
 
         // Built-in loop object
-        auto loop_obj = std::make_shared<ObjectType>(false);  // not extensible
+        auto loop_obj = std::make_shared<object_type>(false);  // not extensible
         loop_obj->add_field("index", make_int());
         loop_obj->add_field("index0", make_int());
         loop_obj->add_field("first", make_bool());
@@ -513,9 +513,9 @@ struct TypeInferenceVisitor : public ASTVisitor<TypePtr> {
         // Bind macro name in outer scope
         if (is_stmt<identifier>(node.name)) {
             auto* name_id = cast_stmt<identifier>(node.name);
-            auto func_type = std::make_shared<FunctionType>(
+            auto ft = std::make_shared<function_type>(
                 std::move(param_types), make_string());
-            env->bind(name_id->val, func_type);
+            env->bind(name_id->val, ft);
         }
 
         return make_null();
@@ -669,7 +669,7 @@ struct TypeInferenceVisitor : public ASTVisitor<TypePtr> {
     }
 
     TypePtr visit(object_literal& node) override {
-        auto obj = std::make_shared<ObjectType>(false);
+        auto obj = std::make_shared<object_type>(false);
         for (auto& [key_stmt, val_stmt] : node.val) {
             auto val_type = dispatch(*val_stmt);
             // Key could be string literal or identifier
@@ -727,7 +727,7 @@ struct TypeInferenceVisitor : public ASTVisitor<TypePtr> {
         // Logical operators
         if (op == "and" || op == "or") {
             // Short-circuit: result type depends on operands
-            auto u = std::make_shared<UnionType>();
+            auto u = std::make_shared<union_type>();
             u->add_alternative(left_type);
             u->add_alternative(right_type);
             return u;
@@ -1066,7 +1066,7 @@ struct TypeInferenceVisitor : public ASTVisitor<TypePtr> {
         ctx = old_ctx;
 
         // Result is union of both branches
-        auto u = std::make_shared<UnionType>();
+        auto u = std::make_shared<union_type>();
         u->add_alternative(true_type);
         u->add_alternative(false_type);
         return u;
