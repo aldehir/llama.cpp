@@ -47,9 +47,86 @@ struct test_context {
     int passed = 0;
     int failed = 0;
     int skipped = 0;
+    std::string input_file;  // If set, analyze this file instead of running tests
 };
 
 static test_context g_ctx;
+
+// Helper to read file contents
+static std::string read_file(const std::string& path) {
+    std::ifstream file(path);
+    if (!file.is_open()) {
+        return "";
+    }
+    std::stringstream buffer;
+    buffer << file.rdbuf();
+    return buffer.str();
+}
+
+// ============================================================================
+// File Analysis Mode
+// ============================================================================
+
+void print_usage(const char* program_name) {
+    std::cout << "Usage: " << program_name << " [OPTIONS] [FILE]\n\n";
+    std::cout << "Run Jinja type system tests or analyze a template file.\n\n";
+    std::cout << "Options:\n";
+    std::cout << "  -v, --verbose    Show constraints in output\n";
+    std::cout << "  -h, --help       Show this help message\n\n";
+    std::cout << "If FILE is provided, analyze that template instead of running tests.\n";
+}
+
+int analyze_file(const std::string& path) {
+    std::cout << color::BOLD << "=== JINJA TYPE INFERENCE ===" << color::RESET << "\n\n";
+
+    std::string source = read_file(path);
+    if (source.empty()) {
+        std::cerr << color::RED << "Error: Could not read file: " << path << color::RESET << "\n";
+        return 1;
+    }
+
+    std::cout << color::DIM << "File: " << path << color::RESET << "\n\n";
+
+    auto result = infer_types_from_source(source);
+
+    // Print schema
+    std::cout << color::BOLD << "Inferred Schema:" << color::RESET << "\n";
+    for (const auto& [name, type] : result.variable_types) {
+        std::cout << "  " << color::CYAN << name << color::RESET << ":";
+        if (type) {
+            if (type->is_simple()) {
+                std::cout << " " << type->to_string() << "\n";
+            } else {
+                std::cout << "\n    " << type->to_string_pretty(2, 2) << "\n";
+            }
+        } else {
+            std::cout << " unknown\n";
+        }
+    }
+
+    // Print constraints if verbose
+    if (g_ctx.verbose) {
+        std::cout << "\n" << color::BOLD << "Constraints (" << result.constraints.size() << "):" << color::RESET << "\n";
+        for (const auto& c : result.constraints.constraints) {
+            std::cout << color::DIM << "  ";
+            std::visit([](const auto& cst) {
+                std::cout << cst.to_string();
+            }, c);
+            std::cout << color::RESET << "\n";
+        }
+    }
+
+    // Print errors if any
+    if (!result.errors.empty()) {
+        std::cout << "\n" << color::YELLOW << "Warnings/Errors:" << color::RESET << "\n";
+        for (const auto& err : result.errors) {
+            std::cout << color::DIM << "  - " << err << color::RESET << "\n";
+        }
+    }
+
+    std::cout << "\n" << color::GREEN << "Analysis complete." << color::RESET << "\n";
+    return 0;
+}
 
 void print_header(int num, const std::string& name) {
     std::cout << color::BOLD << "Test " << num << ": " << name << color::RESET << "\n";
@@ -113,17 +190,6 @@ void print_summary() {
     std::cout << "\n";
 }
 
-// Helper to read file contents
-static std::string read_file(const std::string& path) {
-    std::ifstream file(path);
-    if (!file.is_open()) {
-        return "";
-    }
-    std::stringstream buffer;
-    buffer << file.rdbuf();
-    return buffer.str();
-}
-
 // ============================================================================
 // Tests
 // ============================================================================
@@ -136,7 +202,22 @@ int main(int argc, char* argv[]) {
         std::string arg = argv[i];
         if (arg == "--verbose" || arg == "-v") {
             g_ctx.verbose = true;
+        } else if (arg == "--help" || arg == "-h") {
+            print_usage(argv[0]);
+            return 0;
+        } else if (arg[0] != '-') {
+            // Assume it's a file path
+            g_ctx.input_file = arg;
+        } else {
+            std::cerr << color::RED << "Unknown option: " << arg << color::RESET << "\n";
+            print_usage(argv[0]);
+            return 1;
         }
+    }
+
+    // If a file is specified, analyze it instead of running tests
+    if (!g_ctx.input_file.empty()) {
+        return analyze_file(g_ctx.input_file);
     }
 
     std::cout << color::BOLD << "=== JINJA TYPE SYSTEM TESTS ===" << color::RESET << "\n\n";
