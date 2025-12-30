@@ -173,7 +173,10 @@ int main(void) {
                 {{ message.role }}: {{ message.content }}
                 {%- if message.tool_calls %}
                     {%- for tool_call in message.tool_calls %}
-                        {{ tool_call.function.name }}({{ tool_call.function.arguments }})
+                        {%- if tool_call.function -%}
+                            {% set tool_call = tool_call.function %}
+                        {%- endif -%}
+                        {{ tool_call.name }}({{ tool_call.arguments }})
                     {%- endfor %}
                 {%- endif %}
             {%- endfor %}

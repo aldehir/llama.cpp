@@ -169,20 +169,13 @@ private:
             subst[tv->name] = new_obj;
         } else if (auto* existing_obj = as_type<ObjectType>(current)) {
             // Modify the existing object directly (not a copy!)
-            auto* existing = existing_obj->get_field(c.field_name);
-            if (existing) {
-                // Unify field types
-                if (!unify(existing->type, c.field_type)) {
-                    errors.push_back("Field type mismatch for '" + c.field_name +
-                        "' at " + c.source);
-                }
-                // If accessed unconditionally anywhere, mark as required
-                if (!c.optional) {
-                    existing->optional = false;
-                }
-            } else {
-                // Add new field to the original object
-                existing_obj->add_field(c.field_name, c.field_type, c.optional);
+            add_field_to_object(existing_obj, c.field_name, c.field_type, c.optional, c.source);
+        } else if (auto* union_type = as_type<UnionType>(current)) {
+            // Union type - add field constraint to ALL alternatives
+            for (auto& alt : union_type->alternatives) {
+                // Create a new HasFieldConstraint for each alternative
+                HasFieldConstraint alt_constraint{alt, c.field_name, c.field_type, c.optional, c.source};
+                solve_constraint(alt_constraint);
             }
         } else {
             // Non-object type with field access - create an object type
@@ -193,6 +186,28 @@ private:
             if (!last_var.empty()) {
                 subst[last_var] = fallback_obj;
             }
+        }
+    }
+
+    /**
+     * Helper to add a field to an object type, handling unification
+     */
+    void add_field_to_object(ObjectType* obj, const std::string& field_name,
+                             TypePtr field_type, bool optional, const std::string& source) {
+        auto* existing = obj->get_field(field_name);
+        if (existing) {
+            // Unify field types
+            if (!unify(existing->type, field_type)) {
+                errors.push_back("Field type mismatch for '" + field_name +
+                    "' at " + source);
+            }
+            // If accessed unconditionally anywhere, mark as required
+            if (!optional) {
+                existing->optional = false;
+            }
+        } else {
+            // Add new field to the original object
+            obj->add_field(field_name, field_type, optional);
         }
     }
 

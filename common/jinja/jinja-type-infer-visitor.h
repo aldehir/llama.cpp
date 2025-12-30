@@ -7,6 +7,7 @@
 #include <string>
 #include <stack>
 #include <memory>
+#include <set>
 
 namespace jinja {
 namespace types {
@@ -258,6 +259,9 @@ struct TypeInferenceVisitor : public ASTVisitor<TypePtr> {
         auto old_ctx = ctx;
         ctx = ctx.enter_conditional();
 
+        // Track bindings before visiting branches
+        // We need to merge bindings that happen in either branch
+
         // Visit body with type guard applied (true branch)
         push_scope();
         if (guard.valid() && !guard.negated) {
@@ -266,6 +270,8 @@ struct TypeInferenceVisitor : public ASTVisitor<TypePtr> {
         for (auto& stmt : node.body) {
             visit_body_statement(*stmt);
         }
+        // Capture true branch bindings before popping
+        auto true_branch_bindings = env->local_bindings();
         pop_scope();
 
         // Visit alternate with inverted guard (false branch)
@@ -279,10 +285,78 @@ struct TypeInferenceVisitor : public ASTVisitor<TypePtr> {
         for (auto& stmt : node.alternate) {
             visit_body_statement(*stmt);
         }
+        // Capture false branch bindings before popping
+        auto false_branch_bindings = env->local_bindings();
         pop_scope();
+
+        // Merge branch bindings into the parent scope
+        // For variables set in either branch, create union types
+        merge_branch_bindings(true_branch_bindings, false_branch_bindings);
 
         ctx = old_ctx;
         return make_null();
+    }
+
+    /**
+     * Merge bindings from if/else branches into the parent scope
+     * Creates union types for variables that could have different types
+     */
+    void merge_branch_bindings(
+        const std::map<std::string, TypePtr>& true_bindings,
+        const std::map<std::string, TypePtr>& false_bindings)
+    {
+        std::set<std::string> all_vars;
+        for (const auto& [name, _] : true_bindings) all_vars.insert(name);
+        for (const auto& [name, _] : false_bindings) all_vars.insert(name);
+
+        for (const auto& var_name : all_vars) {
+            auto true_it = true_bindings.find(var_name);
+            auto false_it = false_bindings.find(var_name);
+
+            TypePtr true_type = (true_it != true_bindings.end()) ? true_it->second : nullptr;
+            TypePtr false_type = (false_it != false_bindings.end()) ? false_it->second : nullptr;
+
+            // Get original type from parent scope (if exists)
+            TypePtr original_type = env->lookup(var_name);
+
+            TypePtr merged_type;
+
+            if (true_type && false_type) {
+                // Set in both branches - union of both
+                if (true_type == false_type || (true_type && false_type && true_type->equals(false_type))) {
+                    merged_type = true_type;
+                } else {
+                    auto u = std::make_shared<UnionType>();
+                    u->add_alternative(true_type);
+                    u->add_alternative(false_type);
+                    merged_type = u;
+                }
+            } else if (true_type) {
+                // Set only in true branch - union with original (or just true_type if no original)
+                if (original_type && original_type != true_type && !original_type->equals(true_type)) {
+                    auto u = std::make_shared<UnionType>();
+                    u->add_alternative(true_type);
+                    u->add_alternative(original_type);
+                    merged_type = u;
+                } else {
+                    merged_type = true_type;
+                }
+            } else if (false_type) {
+                // Set only in false branch - union with original
+                if (original_type && original_type != false_type && !original_type->equals(false_type)) {
+                    auto u = std::make_shared<UnionType>();
+                    u->add_alternative(false_type);
+                    u->add_alternative(original_type);
+                    merged_type = u;
+                } else {
+                    merged_type = false_type;
+                }
+            }
+
+            if (merged_type) {
+                env->bind(var_name, merged_type);
+            }
+        }
     }
 
     TypePtr visit(for_statement& node) override {
