@@ -116,23 +116,14 @@ struct type_inference_visitor : public ast_visitor<TypePtr> {
     type_inference_visitor(constraint_set& cs, type_environment* root)
         : constraints(cs), env(root), ctx(), root_env(root) {}
 
-    // === Type guard extraction ===
-
-    /**
-     * Extract a type guard from a test expression like "x is string"
-     * Returns an invalid guard if no narrowing can be inferred
-     */
     type_guard extract_type_guard(statement& test_node, bool negated = false) {
-        // Handle "not (x is y)" - extract inner test and flip negation
         if (auto* unary = dynamic_cast<unary_expression*>(&test_node)) {
             if (unary->op.value == "not") {
                 return extract_type_guard(*unary->argument, !negated);
             }
         }
 
-        // Handle "x is y" test expressions
         if (auto* test = dynamic_cast<test_expression*>(&test_node)) {
-            // Get the variable or member expression being tested
             std::string var_name;
             TypePtr member_object_type;
             std::string member_field_name;
@@ -140,31 +131,25 @@ struct type_inference_visitor : public ast_visitor<TypePtr> {
             if (auto* id = dynamic_cast<identifier*>(test->operand.get())) {
                 var_name = id->val;
             } else if (auto* member = dynamic_cast<member_expression*>(test->operand.get())) {
-                // Handle member expressions like message.content or message['content']
-                // First, visit the operand to get its type and register constraints
                 member_object_type = dispatch(*test->operand);
 
-                // Get the field name
                 if (!member->computed) {
-                    // dot access: obj.field
                     if (auto* prop_id = dynamic_cast<identifier*>(member->property.get())) {
                         member_field_name = prop_id->val;
                     }
                 } else {
-                    // bracket access: obj['field']
                     if (auto* str_lit = dynamic_cast<string_literal*>(member->property.get())) {
                         member_field_name = str_lit->val;
                     }
                 }
 
                 if (member_field_name.empty()) {
-                    return type_guard{}; // Dynamic access, can't narrow
+                    return type_guard{};
                 }
             } else {
-                return type_guard{}; // Can only narrow identifiers and member expressions
+                return type_guard{};
             }
 
-            // Get the test name
             std::string test_name;
             if (auto* test_id = dynamic_cast<identifier*>(test->test.get())) {
                 test_name = test_id->val;
@@ -174,12 +159,10 @@ struct type_inference_visitor : public ast_visitor<TypePtr> {
                 }
             }
 
-            // Handle "is not" by flipping negation
             if (test->negate) {
                 negated = !negated;
             }
 
-            // Map test names to types
             TypePtr narrowed_type = nullptr;
             if (test_name == "string") {
                 narrowed_type = make_string();
@@ -192,10 +175,7 @@ struct type_inference_visitor : public ast_visitor<TypePtr> {
             } else if (test_name == "none" || test_name == "null") {
                 narrowed_type = make_null();
             } else if (test_name == "defined") {
-                // "is defined" means variable exists and is non-null
-                // For negated (is not defined), we can't narrow
                 if (!negated) {
-                    // Variable is defined - mark as non-null by giving it its current type
                     auto current = env->lookup(var_name);
                     if (current) {
                         narrowed_type = current;
@@ -208,7 +188,6 @@ struct type_inference_visitor : public ast_visitor<TypePtr> {
             }
 
             if (narrowed_type) {
-                // Return appropriate guard type
                 if (!var_name.empty()) {
                     return type_guard(var_name, narrowed_type, negated);
                 } else if (!member_field_name.empty()) {
@@ -217,54 +196,32 @@ struct type_inference_visitor : public ast_visitor<TypePtr> {
             }
         }
 
-        // Handle truthiness check: "if x" or "if x.field"
-        // This implies x (or x.field) is truthy/non-null
         if (auto* id = dynamic_cast<identifier*>(&test_node)) {
-            // "if x" - x is truthy, meaning it's defined and non-null
-            // We don't narrow the type, but we know it's not null
-            // Return guard with current type to indicate "is defined"
             auto current = env->lookup(id->val);
             if (current && !negated) {
                 return type_guard(id->val, current, false);
             }
         }
 
-        return type_guard{}; // No narrowing possible
+        return type_guard{};
     }
 
-    /**
-     * Apply a type guard to the current environment
-     * Creates a new binding with the narrowed type
-     */
     void apply_type_guard(const type_guard& guard) {
-        if (!guard.valid()) return;
-
-        if (guard.negated) {
-            // For negated guards like "x is not string", we can't easily narrow
-            // In the future, we could create exclusion types
-            return;
-        }
+        if (!guard.valid() || guard.negated) return;
 
         if (guard.is_variable_guard()) {
-            // Simple variable guard: bind the variable to its narrowed type in current scope
             env->bind(guard.variable, guard.narrowed_type);
-
-            // Also add an equality constraint to help the solver
             auto existing = root_env->lookup(guard.variable);
             if (existing) {
                 constraints.add_equality(existing, guard.narrowed_type,
                     "type guard narrowing " + guard.variable);
             }
         } else if (guard.is_field_guard()) {
-            // Member expression guard: add constraint that field type includes narrowed type
-            // guard.object_type is the type of the field (from visiting the member expression)
-            // This allows the field to have multiple types (e.g., string | array<...>)
             constraints.add_type_alternative(guard.object_type, guard.narrowed_type,
                 "type guard narrowing field " + guard.field_name);
         }
     }
 
-    // Scope management
     void push_scope() {
         auto new_env = std::make_unique<type_environment>(env);
         env = new_env.get();
@@ -278,17 +235,11 @@ struct type_inference_visitor : public ast_visitor<TypePtr> {
         }
     }
 
-    // Fresh type variable
-    TypePtr fresh() {
-        return make_typevar(type_var_generator::fresh());
-    }
+    TypePtr fresh() { return make_typevar(type_var_generator::fresh()); }
 
-    // Get source location string for debugging
     std::string source_loc(const statement& node) {
         return "pos:" + std::to_string(node.pos);
     }
-
-    // === Statement visitors ===
 
     TypePtr visit(program& node) override {
         for (auto& stmt : node.body) {
@@ -298,19 +249,12 @@ struct type_inference_visitor : public ast_visitor<TypePtr> {
     }
 
     TypePtr visit(if_statement& node) override {
-        // Visit test expression first (generates constraints)
-        auto test_type = dispatch(*node.test);
-
-        // Extract type guard from the test
+        dispatch(*node.test);
         auto guard = extract_type_guard(*node.test);
 
         auto old_ctx = ctx;
         ctx = ctx.enter_conditional();
 
-        // Track bindings before visiting branches
-        // We need to merge bindings that happen in either branch
-
-        // Visit body with type guard applied (true branch)
         push_scope();
         if (guard.valid() && !guard.negated) {
             apply_type_guard(guard);
@@ -318,37 +262,22 @@ struct type_inference_visitor : public ast_visitor<TypePtr> {
         for (auto& stmt : node.body) {
             visit_body_statement(*stmt);
         }
-        // Capture true branch bindings before popping
         auto true_branch_bindings = env->local_bindings();
         pop_scope();
 
-        // Visit alternate with inverted guard (false branch)
         push_scope();
-        if (guard.valid()) {
-            // In the else branch, the guard is negated
-            type_guard inverted_guard(guard.variable, guard.narrowed_type, !guard.negated);
-            // For now, we don't apply negated guards (would need exclusion types)
-            // But we still create the scope for proper scoping
-        }
         for (auto& stmt : node.alternate) {
             visit_body_statement(*stmt);
         }
-        // Capture false branch bindings before popping
         auto false_branch_bindings = env->local_bindings();
         pop_scope();
 
-        // Merge branch bindings into the parent scope
-        // For variables set in either branch, create union types
         merge_branch_bindings(true_branch_bindings, false_branch_bindings);
 
         ctx = old_ctx;
         return make_null();
     }
 
-    /**
-     * Merge bindings from if/else branches into the parent scope
-     * Creates union types for variables that could have different types
-     */
     void merge_branch_bindings(
         const std::map<std::string, TypePtr>& true_bindings,
         const std::map<std::string, TypePtr>& false_bindings)
@@ -408,39 +337,31 @@ struct type_inference_visitor : public ast_visitor<TypePtr> {
     }
 
     TypePtr visit(for_statement& node) override {
-        // Analyze iterable
         auto iterable_type = dispatch(*node.iterable);
         auto element_type = fresh();
+        constraints.add_iterable(iterable_type, element_type, "for loop at " + source_loc(node));
 
-        constraints.add_iterable(iterable_type, element_type,
-            "for loop at " + source_loc(node));
-
-        // Create new scope for loop variables
         push_scope();
         auto old_ctx = ctx;
         ctx = ctx.enter_loop();
 
-        // Bind loop variable(s)
         if (is_stmt<identifier>(node.loopvar)) {
             auto* id = cast_stmt<identifier>(node.loopvar);
             env->bind(id->val, element_type);
         } else if (is_stmt<tuple_literal>(node.loopvar)) {
             auto* tuple = cast_stmt<tuple_literal>(node.loopvar);
-            // Element must be a tuple/array for unpacking
             for (size_t i = 0; i < tuple->val.size(); ++i) {
                 if (is_stmt<identifier>(tuple->val[i])) {
                     auto* id = cast_stmt<identifier>(tuple->val[i]);
                     auto var_type = fresh();
                     env->bind(id->val, var_type);
-                    // Add constraint: element_type[i] = var_type
                     constraints.add_array_element(element_type, var_type,
                         "tuple unpack element " + std::to_string(i));
                 }
             }
         }
 
-        // Built-in loop object
-        auto loop_obj = std::make_shared<object_type>(false);  // not extensible
+        auto loop_obj = std::make_shared<object_type>(false);
         loop_obj->add_field("index", make_int());
         loop_obj->add_field("index0", make_int());
         loop_obj->add_field("first", make_bool());
@@ -452,7 +373,6 @@ struct type_inference_visitor : public ast_visitor<TypePtr> {
         loop_obj->add_field("nextitem", make_optional(element_type));
         env->bind("loop", loop_obj);
 
-        // Visit body - expressions in loop body are output expressions
         for (auto& stmt : node.body) {
             visit_body_statement(*stmt);
         }
@@ -460,7 +380,6 @@ struct type_inference_visitor : public ast_visitor<TypePtr> {
         ctx = old_ctx;
         pop_scope();
 
-        // Visit default block (outside loop scope)
         for (auto& stmt : node.default_block) {
             visit_body_statement(*stmt);
         }
@@ -468,12 +387,7 @@ struct type_inference_visitor : public ast_visitor<TypePtr> {
         return make_null();
     }
 
-    /**
-     * Helper to visit a statement that may contain output expressions
-     * Adds output coercion constraints for expression statements
-     */
     void visit_body_statement(statement& stmt) {
-        // Check if this is an expression statement (output context)
         bool is_output_expr = dynamic_cast<expression*>(&stmt) != nullptr &&
                               !dynamic_cast<if_statement*>(&stmt) &&
                               !dynamic_cast<for_statement*>(&stmt) &&
@@ -498,20 +412,15 @@ struct type_inference_visitor : public ast_visitor<TypePtr> {
         if (node.val) {
             rhs_type = dispatch(*node.val);
         } else if (!node.body.empty()) {
-            // Block set: {% set x %}...{% endset %}
-            for (auto& stmt : node.body) {
-                dispatch(*stmt);
-            }
-            rhs_type = make_string();  // Block set produces string
+            for (auto& stmt : node.body) dispatch(*stmt);
+            rhs_type = make_string();
         } else {
             rhs_type = make_null();
         }
 
         if (is_stmt<identifier>(node.assignee)) {
-            auto* id = cast_stmt<identifier>(node.assignee);
-            env->bind(id->val, rhs_type);
+            env->bind(cast_stmt<identifier>(node.assignee)->val, rhs_type);
         } else if (is_stmt<tuple_literal>(node.assignee)) {
-            // Tuple unpacking in set
             auto* tuple = cast_stmt<tuple_literal>(node.assignee);
             for (size_t i = 0; i < tuple->val.size(); ++i) {
                 if (is_stmt<identifier>(tuple->val[i])) {
@@ -523,7 +432,6 @@ struct type_inference_visitor : public ast_visitor<TypePtr> {
                 }
             }
         } else if (is_stmt<member_expression>(node.assignee)) {
-            // Setting a field: {% set obj.field = value %}
             dispatch(*node.assignee);
         }
 
@@ -531,7 +439,6 @@ struct type_inference_visitor : public ast_visitor<TypePtr> {
     }
 
     TypePtr visit(macro_statement& node) override {
-        // Create function type
         std::vector<TypePtr> param_types;
         push_scope();
 
@@ -540,30 +447,21 @@ struct type_inference_visitor : public ast_visitor<TypePtr> {
             param_types.push_back(param_type);
 
             if (is_stmt<identifier>(arg)) {
-                auto* id = cast_stmt<identifier>(arg);
-                env->bind(id->val, param_type);
+                env->bind(cast_stmt<identifier>(arg)->val, param_type);
             } else if (is_stmt<keyword_argument_expression>(arg)) {
                 auto* kwarg = cast_stmt<keyword_argument_expression>(arg);
                 if (is_stmt<identifier>(kwarg->key)) {
-                    auto* id = cast_stmt<identifier>(kwarg->key);
-                    env->bind(id->val, param_type);
+                    env->bind(cast_stmt<identifier>(kwarg->key)->val, param_type);
                 }
             }
         }
 
-        // Visit body
-        for (auto& stmt : node.body) {
-            dispatch(*stmt);
-        }
-
+        for (auto& stmt : node.body) dispatch(*stmt);
         pop_scope();
 
-        // Bind macro name in outer scope
         if (is_stmt<identifier>(node.name)) {
-            auto* name_id = cast_stmt<identifier>(node.name);
-            auto ft = std::make_shared<function_type>(
-                std::move(param_types), make_string());
-            env->bind(name_id->val, ft);
+            env->bind(cast_stmt<identifier>(node.name)->val,
+                std::make_shared<function_type>(std::move(param_types), make_string()));
         }
 
         return make_null();
@@ -591,29 +489,19 @@ struct type_inference_visitor : public ast_visitor<TypePtr> {
 
     TypePtr visit(call_statement& node) override {
         dispatch(*node.call);
-        for (auto& arg : node.caller_args) {
-            dispatch(*arg);
-        }
+        for (auto& arg : node.caller_args) dispatch(*arg);
         push_scope();
-        // Bind 'caller' function
         env->bind("caller", make_function({}, make_string()));
-        for (auto& stmt : node.body) {
-            dispatch(*stmt);
-        }
+        for (auto& stmt : node.body) dispatch(*stmt);
         pop_scope();
         return make_null();
     }
-
-    // === Expression visitors ===
 
     TypePtr visit(identifier& node) override {
         auto type = env->lookup(node.val);
         if (type) return type;
 
-        // Unknown identifier - create a type variable for it
-        // This is a "root" variable that needs to be inferred from usage
         auto var_type = fresh();
-        // Bind in root environment so it persists
         root_env->bind(node.val, var_type);
         return var_type;
     }
@@ -622,31 +510,24 @@ struct type_inference_visitor : public ast_visitor<TypePtr> {
         auto object_type = dispatch(*node.object);
 
         if (!node.computed) {
-            // dot access: obj.field
             if (is_stmt<identifier>(node.property)) {
                 auto* prop_id = cast_stmt<identifier>(node.property);
                 auto field_type = fresh();
-
                 constraints.add_field(object_type, prop_id->val, field_type,
                     ctx.in_conditional, "member access ." + prop_id->val + " at " + source_loc(node));
-
                 return field_type;
             }
         } else {
-            // bracket access: obj[key]
             if (is_stmt<slice_expression>(node.property)) {
-                // Slicing: obj[start:stop:step]
                 auto* slice = cast_stmt<slice_expression>(node.property);
                 if (slice->start_expr) dispatch(*slice->start_expr);
                 if (slice->stop_expr) dispatch(*slice->stop_expr);
                 if (slice->step_expr) dispatch(*slice->step_expr);
-                // Slice returns same array type
                 return object_type;
             }
 
-            auto key_type = dispatch(*node.property);
+            dispatch(*node.property);
 
-            // Check if key is a string literal (dictionary access)
             if (is_stmt<string_literal>(node.property)) {
                 auto* str_lit = cast_stmt<string_literal>(node.property);
                 auto field_type = fresh();
@@ -655,19 +536,14 @@ struct type_inference_visitor : public ast_visitor<TypePtr> {
                 return field_type;
             }
 
-            // Integer access (array indexing)
             if (is_stmt<integer_literal>(node.property)) {
                 auto elem_type = fresh();
-                constraints.add_array_element(object_type, elem_type,
-                    "array index at " + source_loc(node));
+                constraints.add_array_element(object_type, elem_type, "array index at " + source_loc(node));
                 return elem_type;
             }
 
-            // Dynamic access - could be array or object
             auto result_type = fresh();
-            // Assume array access for now
-            constraints.add_array_element(object_type, result_type,
-                "dynamic access at " + source_loc(node));
+            constraints.add_array_element(object_type, result_type, "dynamic access at " + source_loc(node));
             return result_type;
         }
 
@@ -735,28 +611,18 @@ struct type_inference_visitor : public ast_visitor<TypePtr> {
     TypePtr visit(binary_expression& node) override {
         auto left_type = dispatch(*node.left);
         auto right_type = dispatch(*node.right);
-
         const std::string& op = node.op.value;
 
-        // Comparison operators return bool
-        // Also infer operand types from literal comparisons
         if (op == "==" || op == "!=" || op == "<" || op == ">" ||
             op == "<=" || op == ">=" || op == "in" || op == "not in") {
 
-            // For 'in'/'not in', the container can be string, array, or object
-            // so we cannot infer container type from element type
-            // Example: "abc" in x could mean x is string ("abcdef") or object ({"abc": 1})
-            bool is_containment_check = (op == "in" || op == "not in");
+            bool is_containment = (op == "in" || op == "not in");
+            bool is_equality = (op == "==" || op == "!=");
 
-            // If comparing with literals using == or !=, emit literal constraints
-            // For ordering comparisons (<, >, etc), use equality constraints with base type
-            bool is_equality_check = (op == "==" || op == "!=");
-
-            if (!is_containment_check) {
-                // String literal comparisons
+            if (!is_containment) {
                 if (is_stmt<string_literal>(node.left)) {
                     auto* str_lit = cast_stmt<string_literal>(node.left);
-                    if (is_equality_check) {
+                    if (is_equality) {
                         constraints.add_literal(right_type, make_literal_string(str_lit->val),
                             "equality with string literal at " + source_loc(node));
                     } else {
@@ -765,7 +631,7 @@ struct type_inference_visitor : public ast_visitor<TypePtr> {
                     }
                 } else if (is_stmt<string_literal>(node.right)) {
                     auto* str_lit = cast_stmt<string_literal>(node.right);
-                    if (is_equality_check) {
+                    if (is_equality) {
                         constraints.add_literal(left_type, make_literal_string(str_lit->val),
                             "equality with string literal at " + source_loc(node));
                     } else {
@@ -774,10 +640,9 @@ struct type_inference_visitor : public ast_visitor<TypePtr> {
                     }
                 }
 
-                // Integer literal comparisons
                 if (is_stmt<integer_literal>(node.left)) {
                     auto* int_lit = cast_stmt<integer_literal>(node.left);
-                    if (is_equality_check) {
+                    if (is_equality) {
                         constraints.add_literal(right_type, make_literal_int(int_lit->val),
                             "equality with int literal at " + source_loc(node));
                     } else {
@@ -786,7 +651,7 @@ struct type_inference_visitor : public ast_visitor<TypePtr> {
                     }
                 } else if (is_stmt<integer_literal>(node.right)) {
                     auto* int_lit = cast_stmt<integer_literal>(node.right);
-                    if (is_equality_check) {
+                    if (is_equality) {
                         constraints.add_literal(left_type, make_literal_int(int_lit->val),
                             "equality with int literal at " + source_loc(node));
                     } else {
@@ -799,68 +664,43 @@ struct type_inference_visitor : public ast_visitor<TypePtr> {
             return make_bool();
         }
 
-        // Logical operators
         if (op == "and" || op == "or") {
-            // Short-circuit: result type depends on operands
             auto u = std::make_shared<union_type>();
             u->add_alternative(left_type);
             u->add_alternative(right_type);
             return u;
         }
 
-        // String concatenation - operands are coerced to strings
         if (op == "~") {
-            constraints.add_string_operand(left_type,
-                "string concat lhs at " + source_loc(node));
-            constraints.add_string_operand(right_type,
-                "string concat rhs at " + source_loc(node));
+            constraints.add_string_operand(left_type, "string concat lhs at " + source_loc(node));
+            constraints.add_string_operand(right_type, "string concat rhs at " + source_loc(node));
             return make_string();
         }
 
-        // The + operator can be string concat, array concat, or numeric addition
         if (op == "+") {
-            // If either operand is a string literal, it's string concatenation
-            // Add output_coercion_constraint for the non-literal operand - this is a soft
-            // constraint that defaults to string in finalization, but only if no other
-            // type was inferred (e.g., from literal comparisons). This preserves literal
-            // type inference for fields like role while still inferring string for
-            // fields like content that have no literal comparisons.
             if (is_stmt<string_literal>(node.left)) {
-                constraints.add_output_coercion(right_type,
-                    "string concat rhs at " + source_loc(node));
+                constraints.add_output_coercion(right_type, "string concat rhs at " + source_loc(node));
                 return make_string();
             } else if (is_stmt<string_literal>(node.right)) {
-                constraints.add_output_coercion(left_type,
-                    "string concat lhs at " + source_loc(node));
+                constraints.add_output_coercion(left_type, "string concat lhs at " + source_loc(node));
                 return make_string();
             }
-            // Otherwise could be numeric or array concat - return fresh type variable
             return fresh();
         }
 
-        // Arithmetic operators: -, *, /, %, // are numeric only
         if (op == "-" || op == "*" || op == "/" || op == "%" || op == "//") {
-            // These are numeric operations
-            return fresh();  // Could be int or float
+            return fresh();
         }
 
         return fresh();
     }
 
     TypePtr visit(filter_expression& node) override {
-        TypePtr input_type;
-        if (node.operand) {
-            input_type = dispatch(*node.operand);
-        } else {
-            input_type = make_string();  // From filter_statement
-        }
+        TypePtr input_type = node.operand ? dispatch(*node.operand) : make_string();
 
-        // Handle common filters with known types
         if (is_stmt<identifier>(node.filter)) {
-            auto* filter_id = cast_stmt<identifier>(node.filter);
-            const auto& name = filter_id->val;
+            const auto& name = cast_stmt<identifier>(node.filter)->val;
 
-            // String-returning filters
             if (name == "tojson" || name == "trim" || name == "strip" ||
                 name == "upper" || name == "lower" || name == "title" ||
                 name == "capitalize" || name == "safe" || name == "e" ||
@@ -868,182 +708,106 @@ struct type_inference_visitor : public ast_visitor<TypePtr> {
                 return make_string();
             }
 
-            // Integer-returning filters
             if (name == "length" || name == "count" || name == "int" || name == "abs") {
                 return make_int();
             }
 
-            // Float-returning filters
-            if (name == "float" || name == "round") {
-                return make_float();
-            }
+            if (name == "float" || name == "round") return make_float();
+            if (name == "bool") return make_bool();
+            if (name == "default" || name == "d") return input_type;
 
-            // Bool-returning filters
-            if (name == "bool") {
-                return make_bool();
-            }
-
-            // Array-preserving filters (maintain element type)
-            if (name == "list" || name == "sort" || name == "reverse" || name == "unique") {
+            if (name == "list" || name == "sort" || name == "reverse" || name == "unique" || name == "slice") {
                 auto elem = fresh();
-                constraints.add_iterable(input_type, elem,
-                    "filter " + name + " at " + source_loc(node));
+                constraints.add_iterable(input_type, elem, "filter " + name + " at " + source_loc(node));
                 return make_array(elem);
             }
 
-            // Slice without args returns array with same element type
-            if (name == "slice") {
-                auto elem = fresh();
-                constraints.add_iterable(input_type, elem,
-                    "filter slice at " + source_loc(node));
-                return make_array(elem);
-            }
-
-            // Batch returns array of arrays
             if (name == "batch") {
                 auto elem = fresh();
-                constraints.add_iterable(input_type, elem,
-                    "filter batch at " + source_loc(node));
+                constraints.add_iterable(input_type, elem, "filter batch at " + source_loc(node));
                 return make_array(make_array(elem));
             }
 
-            // Element-returning filters (from array)
             if (name == "first" || name == "last" || name == "random") {
                 auto elem = fresh();
-                constraints.add_array_element(input_type, elem,
-                    "filter " + name + " at " + source_loc(node));
+                constraints.add_array_element(input_type, elem, "filter " + name + " at " + source_loc(node));
                 return elem;
             }
 
-            // Default filter
-            if (name == "default" || name == "d") {
-                return input_type;  // Returns input or default value
-            }
-
-            // Join returns string (input must be iterable)
             if (name == "join") {
                 auto elem = fresh();
-                constraints.add_iterable(input_type, elem,
-                    "filter join at " + source_loc(node));
+                constraints.add_iterable(input_type, elem, "filter join at " + source_loc(node));
                 return make_string();
             }
 
-            // Filtering filters (preserve element type)
-            if (name == "select" || name == "reject") {
+            if (name == "select" || name == "reject" || name == "selectattr" || name == "rejectattr" || name == "map") {
                 auto elem = fresh();
-                constraints.add_iterable(input_type, elem,
-                    "filter " + name + " at " + source_loc(node));
-                return make_array(elem);
-            }
-
-            // Attribute filtering filters (preserve element type)
-            if (name == "selectattr" || name == "rejectattr") {
-                auto elem = fresh();
-                constraints.add_iterable(input_type, elem,
-                    "filter " + name + " at " + source_loc(node));
-                return make_array(elem);
-            }
-
-            // Map without args - preserve element type
-            if (name == "map") {
-                auto elem = fresh();
-                constraints.add_iterable(input_type, elem,
-                    "filter map at " + source_loc(node));
+                constraints.add_iterable(input_type, elem, "filter " + name + " at " + source_loc(node));
                 return make_array(elem);
             }
         }
 
-        // Filter with call expression (filter has arguments)
         if (is_stmt<call_expression>(node.filter)) {
             auto* call = cast_stmt<call_expression>(node.filter);
             if (is_stmt<identifier>(call->callee)) {
-                auto* filter_id = cast_stmt<identifier>(call->callee);
-                const auto& name = filter_id->val;
+                const auto& name = cast_stmt<identifier>(call->callee)->val;
 
-                // Helper to find keyword argument value
                 auto find_kwarg = [&](const std::string& key) -> statement* {
                     for (auto& arg : call->args) {
                         if (auto* kw = cast_stmt<keyword_argument_expression>(arg)) {
                             if (auto* kid = cast_stmt<identifier>(kw->key)) {
-                                if (kid->val == key) {
-                                    return kw->val.get();
-                                }
+                                if (kid->val == key) return kw->val.get();
                             }
                         }
                     }
                     return nullptr;
                 };
 
-                // Visit arguments
-                for (auto& arg : call->args) {
-                    dispatch(*arg);
-                }
+                for (auto& arg : call->args) dispatch(*arg);
 
-                // String-returning filters (most don't need input constraints)
-                if (name == "tojson" || name == "trim" || name == "indent" ||
-                    name == "replace") {
+                if (name == "tojson" || name == "trim" || name == "indent" || name == "replace") {
                     return make_string();
                 }
 
-                // Join returns string and requires iterable input
                 if (name == "join") {
                     auto elem = fresh();
-                    constraints.add_iterable(input_type, elem,
-                        "filter join at " + source_loc(node));
+                    constraints.add_iterable(input_type, elem, "filter join at " + source_loc(node));
                     return make_string();
                 }
 
-                // Default filter - returns input type
-                if (name == "default" || name == "d") {
-                    return input_type;
-                }
+                if (name == "default" || name == "d") return input_type;
 
-                // Slice with args - preserve element type
-                if (name == "slice") {
+                if (name == "slice" || name == "sort" || name == "reverse" || name == "unique" || name == "list") {
                     auto elem = fresh();
-                    constraints.add_iterable(input_type, elem,
-                        "filter slice at " + source_loc(node));
+                    constraints.add_iterable(input_type, elem, "filter " + name + " at " + source_loc(node));
                     return make_array(elem);
                 }
 
-                // Batch - returns array of arrays
                 if (name == "batch") {
                     auto elem = fresh();
-                    constraints.add_iterable(input_type, elem,
-                        "filter batch at " + source_loc(node));
+                    constraints.add_iterable(input_type, elem, "filter batch at " + source_loc(node));
                     return make_array(make_array(elem));
                 }
 
-                // Map with attribute - extract attribute type from elements
                 if (name == "map") {
                     auto elem = fresh();
-                    constraints.add_iterable(input_type, elem,
-                        "filter map at " + source_loc(node));
-
-                    // Check for attribute='...' argument
+                    constraints.add_iterable(input_type, elem, "filter map at " + source_loc(node));
                     if (auto* attr_arg = find_kwarg("attribute")) {
                         if (auto* attr_str = dynamic_cast<string_literal*>(attr_arg)) {
-                            // map(attribute='name') extracts .name from each element
                             auto attr_type = fresh();
                             constraints.add_field(elem, attr_str->val, attr_type, false,
                                 "map attribute '" + attr_str->val + "' at " + source_loc(node));
                             return make_array(attr_type);
                         }
                     }
-                    // map without attribute - preserve element type
                     return make_array(elem);
                 }
 
-                // selectattr/rejectattr with attribute - preserve element type
                 if (name == "selectattr" || name == "rejectattr") {
                     auto elem = fresh();
-                    constraints.add_iterable(input_type, elem,
-                        "filter " + name + " at " + source_loc(node));
-
-                    // First positional arg is the attribute name
+                    constraints.add_iterable(input_type, elem, "filter " + name + " at " + source_loc(node));
                     if (!call->args.empty()) {
                         if (auto* attr_str = cast_stmt<string_literal>(call->args[0])) {
-                            // Add constraint that elements have this attribute
                             auto attr_type = fresh();
                             constraints.add_field(elem, attr_str->val, attr_type, false,
                                 name + " attribute '" + attr_str->val + "' at " + source_loc(node));
@@ -1052,70 +816,40 @@ struct type_inference_visitor : public ast_visitor<TypePtr> {
                     return make_array(elem);
                 }
 
-                // select/reject with test - preserve element type
                 if (name == "select" || name == "reject") {
                     auto elem = fresh();
-                    constraints.add_iterable(input_type, elem,
-                        "filter " + name + " at " + source_loc(node));
+                    constraints.add_iterable(input_type, elem, "filter " + name + " at " + source_loc(node));
                     return make_array(elem);
                 }
 
-                // sort/reverse/unique/list - preserve element type
-                if (name == "sort" || name == "reverse" || name == "unique" || name == "list") {
-                    auto elem = fresh();
-                    constraints.add_iterable(input_type, elem,
-                        "filter " + name + " at " + source_loc(node));
-                    return make_array(elem);
-                }
-
-                // first/last/random - return element type
                 if (name == "first" || name == "last" || name == "random") {
                     auto elem = fresh();
-                    constraints.add_array_element(input_type, elem,
-                        "filter " + name + " at " + source_loc(node));
+                    constraints.add_array_element(input_type, elem, "filter " + name + " at " + source_loc(node));
                     return elem;
                 }
             }
         }
 
-        // Unknown filter - return fresh type
         return fresh();
     }
 
     TypePtr visit(select_expression& node) override {
         auto input_type = dispatch(*node.lhs);
         dispatch(*node.test);
-        // Select expression filters elements, preserving element type
         auto elem = fresh();
-        constraints.add_iterable(input_type, elem,
-            "select expression at " + source_loc(node));
+        constraints.add_iterable(input_type, elem, "select expression at " + source_loc(node));
         return make_array(elem);
     }
 
     TypePtr visit(test_expression& node) override {
-        auto operand_type = dispatch(*node.operand);
-
-        // "is defined" and "is not defined" are common patterns
-        if (is_stmt<identifier>(node.test)) {
-            auto* test_id = cast_stmt<identifier>(node.test);
-            // These tests return bool
-            return make_bool();
-        }
-
+        dispatch(*node.operand);
         return make_bool();
     }
 
     TypePtr visit(unary_expression& node) override {
         auto arg_type = dispatch(*node.argument);
-
-        if (node.op.value == "not") {
-            return make_bool();
-        }
-        if (node.op.value == "-") {
-            // Numeric negation - could be int or float
-            return arg_type;
-        }
-
+        if (node.op.value == "not") return make_bool();
+        if (node.op.value == "-") return arg_type;
         return fresh();
     }
 
@@ -1123,7 +857,7 @@ struct type_inference_visitor : public ast_visitor<TypePtr> {
         if (node.start_expr) dispatch(*node.start_expr);
         if (node.stop_expr) dispatch(*node.stop_expr);
         if (node.step_expr) dispatch(*node.step_expr);
-        return fresh();  // Slice of array/string
+        return fresh();
     }
 
     TypePtr visit(keyword_argument_expression& node) override {
@@ -1136,16 +870,11 @@ struct type_inference_visitor : public ast_visitor<TypePtr> {
 
     TypePtr visit(ternary_expression& node) override {
         dispatch(*node.condition);
-
         auto old_ctx = ctx;
         ctx = ctx.enter_conditional();
-
         auto true_type = dispatch(*node.true_expr);
         auto false_type = dispatch(*node.false_expr);
-
         ctx = old_ctx;
-
-        // Result is union of both branches
         auto u = std::make_shared<union_type>();
         u->add_alternative(true_type);
         u->add_alternative(false_type);
