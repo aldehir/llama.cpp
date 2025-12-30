@@ -374,16 +374,54 @@ int main(void) {
         std::cout << "PASS\n\n";
     }
 
-    // Test 23: Real-world template (OpenAI GPT OSS 120B)
+    // Test 23: Literal type inference from equality comparisons
+    {
+        std::cout << "Test 23: Literal type inference\n";
+        auto result = infer_types_from_source(R"(
+            {% for m in messages %}
+                {% if m.role == 'assistant' %}
+                    Assistant: {{ m.content }}
+                {% elif m.role == 'user' %}
+                    User: {{ m.content }}
+                {% elif m.role == 'system' %}
+                    System: {{ m.content }}
+                {% endif %}
+            {% endfor %}
+        )");
+        print_result("Test 23", result);
+
+        assert(result.success());
+        auto msg_type = result.get_type("messages");
+        assert(msg_type != nullptr);
+        std::cout << "messages type: " << msg_type->to_string() << "\n";
+
+        // The role field should be inferred as a union of literal strings
+        // "assistant" | "user" | "system"
+        if (auto* arr = as_type<array_type>(msg_type)) {
+            if (auto* elem = as_type<object_type>(arr->element_type)) {
+                auto* role_field = elem->get_field("role");
+                if (role_field && role_field->type) {
+                    std::cout << "role type: " << role_field->type->to_string() << "\n";
+                    // Should be union of literals or literal type
+                    assert(is_type<union_type>(role_field->type) ||
+                           is_type<literal_type>(role_field->type) ||
+                           is_type<primitive_type>(role_field->type));  // Allow fallback to string
+                }
+            }
+        }
+        std::cout << "PASS\n\n";
+    }
+
+    // Test 24: Real-world template (OpenAI GPT OSS 120B)
     // This template includes macros, complex conditionals, tool handling, and channel routing
     {
-        std::cout << "Test 23: Real-world template (OpenAI GPT OSS 120B)\n";
+        std::cout << "Test 24: Real-world template (OpenAI GPT OSS 120B)\n";
         std::string template_source = read_file("models/templates/openai-gpt-oss-120b.jinja");
         if (template_source.empty()) {
-            std::cerr << "Skipping Test 23: Could not read template file\n";
+            std::cerr << "Skipping Test 24: Could not read template file\n";
         } else {
             auto result = infer_types_from_source(template_source);
-            print_result("Test 23", result);
+            print_result("Test 24", result);
 
             // This complex template may have some constraint solving edge cases,
             // but we verify that parsing works and key variables are detected

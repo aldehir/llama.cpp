@@ -266,6 +266,55 @@ struct type_variable : public Type {
 };
 
 /**
+ * Literal type: represents a specific literal value
+ * Example: literal<"assistant"> or literal<42>
+ * Used to track exact values from comparisons like `x == "assistant"`
+ */
+struct literal_type : public Type {
+    enum Kind { String, Int };
+    Kind lit_kind;
+    std::string string_val;  // For string literals
+    int64_t int_val;         // For int literals
+
+    explicit literal_type(const std::string& val)
+        : lit_kind(String), string_val(val), int_val(0) {}
+    explicit literal_type(int64_t val)
+        : lit_kind(Int), string_val(), int_val(val) {}
+
+    std::string to_string() const override {
+        if (lit_kind == String) {
+            return "\"" + string_val + "\"";
+        }
+        return std::to_string(int_val);
+    }
+
+    bool equals(const TypePtr& other) const override {
+        auto* lit = dynamic_cast<literal_type*>(other.get());
+        if (!lit) return false;
+        if (lit->lit_kind != lit_kind) return false;
+        if (lit_kind == String) return lit->string_val == string_val;
+        return lit->int_val == int_val;
+    }
+
+    TypePtr clone() const override {
+        if (lit_kind == String) {
+            return std::make_shared<literal_type>(string_val);
+        }
+        return std::make_shared<literal_type>(int_val);
+    }
+
+    std::string kind() const override { return "literal"; }
+
+    // Get base type (string or int)
+    TypePtr base_type() const {
+        if (lit_kind == String) {
+            return std::make_shared<primitive_type>(primitive_type::String);
+        }
+        return std::make_shared<primitive_type>(primitive_type::Int);
+    }
+};
+
+/**
  * Function type (for macros and filters)
  */
 struct function_type : public Type {
@@ -357,6 +406,14 @@ inline TypePtr make_typevar(const std::string& name) {
 
 inline TypePtr make_function(std::vector<TypePtr> params, TypePtr ret) {
     return std::make_shared<function_type>(std::move(params), std::move(ret));
+}
+
+inline TypePtr make_literal_string(const std::string& val) {
+    return std::make_shared<literal_type>(val);
+}
+
+inline TypePtr make_literal_int(int64_t val) {
+    return std::make_shared<literal_type>(val);
 }
 
 // Helper for optional types (T | null)

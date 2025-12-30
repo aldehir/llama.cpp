@@ -26,6 +26,13 @@ struct constraint_solver {
     // Type variables that were used in string operand context (hard constraint to string)
     std::set<std::string> string_operand_types;
 
+    // Literal values collected for type variables (for building union literal types)
+    // Maps type variable name -> set of literal values
+    std::map<std::string, std::vector<TypePtr>> literal_values;
+
+    // Maximum number of literals before collapsing to base type (e.g., string)
+    static constexpr size_t MAX_LITERALS = 10;
+
     /**
      * Solve all constraints
      * Returns true if successful, false if errors occurred
@@ -34,6 +41,7 @@ struct constraint_solver {
         errors.clear();
         output_coerced_types.clear();
         string_operand_types.clear();
+        literal_values.clear();
 
         for (const auto& constraint : constraints.constraints) {
             std::visit([this](const auto& c) { solve_constraint(c); }, constraint);
@@ -49,14 +57,76 @@ struct constraint_solver {
      * Finalization pass - resolve unbound type variables based on usage context
      */
     void finalize_types() {
-        // First, resolve type variables used as string operands
+        // First, aggregate literals from all equivalent type variables
+        // Type variables get unified during constraint solving, so literals may be
+        // spread across multiple variable names that all resolve to the same root
+        std::map<std::string, std::vector<TypePtr>> aggregated_literals;
+
+        for (const auto& [var_name, literals] : literal_values) {
+            // Find the root type variable for this var_name by following the chain
+            std::string root_var = var_name;
+            auto it = subst.find(var_name);
+            while (it != subst.end()) {
+                if (auto* tv = as_type<type_variable>(it->second)) {
+                    root_var = tv->name;
+                    it = subst.find(tv->name);
+                } else {
+                    // Bound to a concrete type, not a type variable
+                    root_var.clear();  // Signal that this is resolved
+                    break;
+                }
+            }
+
+            if (root_var.empty()) {
+                continue;  // Already resolved to concrete type
+            }
+
+            // Aggregate literals under the root variable
+            auto& root_literals = aggregated_literals[root_var];
+            for (const auto& lit : literals) {
+                bool found = false;
+                for (const auto& existing : root_literals) {
+                    if (existing->equals(lit)) {
+                        found = true;
+                        break;
+                    }
+                }
+                if (!found) {
+                    root_literals.push_back(lit);
+                }
+            }
+        }
+
+        // Now resolve using aggregated literals
+        for (const auto& [var_name, literals] : aggregated_literals) {
+            if (subst.find(var_name) == subst.end() && !literals.empty()) {
+                if (literals.size() == 1) {
+                    // Single literal - use it directly
+                    subst[var_name] = literals[0];
+                } else if (literals.size() <= MAX_LITERALS) {
+                    // Multiple literals - create union of literals
+                    auto u = std::make_shared<union_type>();
+                    for (const auto& lit : literals) {
+                        u->add_alternative(lit);
+                    }
+                    subst[var_name] = u;
+                } else {
+                    // Too many literals - collapse to base type
+                    if (auto* lit = as_type<literal_type>(literals[0])) {
+                        subst[var_name] = lit->base_type();
+                    }
+                }
+            }
+        }
+
+        // Then, resolve type variables used as string operands
         for (const auto& var_name : string_operand_types) {
             if (subst.find(var_name) == subst.end()) {
                 subst[var_name] = make_string();
             }
         }
 
-        // Then, resolve type variables used in output context to string
+        // Finally, resolve type variables used in output context to string
         // (only if still unbound after other constraints)
         for (const auto& var_name : output_coerced_types) {
             if (subst.find(var_name) == subst.end()) {
@@ -287,6 +357,35 @@ private:
             }
         }
         // If already bound to something else, that's fine - Jinja will coerce
+    }
+
+    void solve_constraint(const literal_constraint& c) {
+        // Literal constraint: type is compared to a literal value
+        // Collect literal values per type variable for later resolution
+        auto resolved = apply(c.type);
+
+        if (auto* tv = as_type<type_variable>(resolved)) {
+            // Collect this literal value for the type variable
+            auto& literals = literal_values[tv->name];
+
+            // Only add if not already present (avoid duplicates)
+            bool found = false;
+            for (const auto& existing : literals) {
+                if (existing->equals(c.literal_value)) {
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) {
+                literals.push_back(c.literal_value);
+            }
+        } else if (auto* obj = as_type<object_type>(resolved)) {
+            // Type is already resolved to an object - this means we have a nested field
+            // that's being compared. We should trace back to find the field type variable.
+            // For now, we just ignore - the field type will be handled separately.
+        }
+        // If already bound to something concrete, check compatibility
+        // (but be lenient - Jinja allows comparing any types)
     }
 
     // === Unification algorithm ===

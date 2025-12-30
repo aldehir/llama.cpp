@@ -111,6 +111,20 @@ struct string_operand_constraint {
     }
 };
 
+// Literal constraint: T is compared to a literal value
+// Used to infer literal types like literal<"assistant", "user", ...>
+struct literal_constraint {
+    TypePtr type;           // The type being constrained
+    TypePtr literal_value;  // A literal_type with the specific value
+    std::string source;
+
+    std::string to_string() const {
+        return (type ? type->to_string() : "null") + " == " +
+               (literal_value ? literal_value->to_string() : "null") +
+               " (from: " + source + ")";
+    }
+};
+
 // Union of all constraint types
 using constraint = std::variant<
     equality_constraint,
@@ -119,7 +133,8 @@ using constraint = std::variant<
     iterable_constraint,
     callable_constraint,
     output_coercion_constraint,
-    string_operand_constraint
+    string_operand_constraint,
+    literal_constraint
 >;
 
 /**
@@ -164,6 +179,10 @@ struct constraint_set {
 
     void add_string_operand(TypePtr type, const std::string& source) {
         constraints.push_back(string_operand_constraint{std::move(type), source});
+    }
+
+    void add_literal(TypePtr type, TypePtr literal_value, const std::string& source) {
+        constraints.push_back(literal_constraint{std::move(type), std::move(literal_value), source});
     }
 
     void clear() {

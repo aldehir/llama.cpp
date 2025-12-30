@@ -700,24 +700,51 @@ struct type_inference_visitor : public ast_visitor<TypePtr> {
             // Example: "abc" in x could mean x is string ("abcdef") or object ({"abc": 1})
             bool is_containment_check = (op == "in" || op == "not in");
 
-            // If comparing with a string literal, the other operand is likely a string
-            // (only for equality/ordering comparisons, not containment checks)
+            // If comparing with literals using == or !=, emit literal constraints
+            // For ordering comparisons (<, >, etc), use equality constraints with base type
+            bool is_equality_check = (op == "==" || op == "!=");
+
             if (!is_containment_check) {
+                // String literal comparisons
                 if (is_stmt<string_literal>(node.left)) {
-                    constraints.add_equality(right_type, make_string(),
-                        "comparison with string literal at " + source_loc(node));
+                    auto* str_lit = cast_stmt<string_literal>(node.left);
+                    if (is_equality_check) {
+                        constraints.add_literal(right_type, make_literal_string(str_lit->val),
+                            "equality with string literal at " + source_loc(node));
+                    } else {
+                        constraints.add_equality(right_type, make_string(),
+                            "comparison with string literal at " + source_loc(node));
+                    }
                 } else if (is_stmt<string_literal>(node.right)) {
-                    constraints.add_equality(left_type, make_string(),
-                        "comparison with string literal at " + source_loc(node));
+                    auto* str_lit = cast_stmt<string_literal>(node.right);
+                    if (is_equality_check) {
+                        constraints.add_literal(left_type, make_literal_string(str_lit->val),
+                            "equality with string literal at " + source_loc(node));
+                    } else {
+                        constraints.add_equality(left_type, make_string(),
+                            "comparison with string literal at " + source_loc(node));
+                    }
                 }
 
-                // If comparing with an integer literal, the other operand is likely int
+                // Integer literal comparisons
                 if (is_stmt<integer_literal>(node.left)) {
-                    constraints.add_equality(right_type, make_int(),
-                        "comparison with int literal at " + source_loc(node));
+                    auto* int_lit = cast_stmt<integer_literal>(node.left);
+                    if (is_equality_check) {
+                        constraints.add_literal(right_type, make_literal_int(int_lit->val),
+                            "equality with int literal at " + source_loc(node));
+                    } else {
+                        constraints.add_equality(right_type, make_int(),
+                            "comparison with int literal at " + source_loc(node));
+                    }
                 } else if (is_stmt<integer_literal>(node.right)) {
-                    constraints.add_equality(left_type, make_int(),
-                        "comparison with int literal at " + source_loc(node));
+                    auto* int_lit = cast_stmt<integer_literal>(node.right);
+                    if (is_equality_check) {
+                        constraints.add_literal(left_type, make_literal_int(int_lit->val),
+                            "equality with int literal at " + source_loc(node));
+                    } else {
+                        constraints.add_equality(left_type, make_int(),
+                            "comparison with int literal at " + source_loc(node));
+                    }
                 }
             }
 
