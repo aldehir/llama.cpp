@@ -551,6 +551,61 @@ struct type_inference_visitor : public ast_visitor<TypePtr> {
     }
 
     TypePtr visit(call_expression& node) override {
+        // Check if this is a string method call like content.startswith(...)
+        if (is_stmt<member_expression>(node.callee)) {
+            auto* member = cast_stmt<member_expression>(node.callee);
+            if (!member->computed && is_stmt<identifier>(member->property)) {
+                auto* method_id = cast_stmt<identifier>(member->property);
+                const std::string& method_name = method_id->val;
+
+                // Known string methods
+                static const std::set<std::string> string_methods_bool = {
+                    "startswith", "endswith", "isalpha", "isdigit", "isalnum",
+                    "isspace", "isupper", "islower", "isnumeric", "isdecimal"
+                };
+                static const std::set<std::string> string_methods_string = {
+                    "strip", "lstrip", "rstrip", "lower", "upper", "title",
+                    "capitalize", "swapcase", "center", "ljust", "rjust",
+                    "zfill", "replace", "format"
+                };
+                static const std::set<std::string> string_methods_int = {
+                    "find", "rfind", "index", "rindex", "count"
+                };
+                static const std::set<std::string> string_methods_array_string = {
+                    "split", "rsplit", "splitlines"
+                };
+
+                bool is_string_method = string_methods_bool.count(method_name) ||
+                                        string_methods_string.count(method_name) ||
+                                        string_methods_int.count(method_name) ||
+                                        string_methods_array_string.count(method_name);
+
+                if (is_string_method) {
+                    // Visit the object, but constrain it to be a string
+                    auto object_type = dispatch(*member->object);
+                    constraints.add_equality(object_type, make_string(),
+                        "string method ." + method_name + "() at " + source_loc(node));
+
+                    // Visit arguments (for their side effects on type inference)
+                    for (auto& arg : node.args) {
+                        dispatch(*arg);
+                    }
+
+                    // Return the appropriate type based on the method
+                    if (string_methods_bool.count(method_name)) {
+                        return make_bool();
+                    } else if (string_methods_string.count(method_name)) {
+                        return make_string();
+                    } else if (string_methods_int.count(method_name)) {
+                        return make_int();
+                    } else if (string_methods_array_string.count(method_name)) {
+                        return make_array(make_string());
+                    }
+                }
+            }
+        }
+
+        // Default handling for non-string-method calls
         auto callee_type = dispatch(*node.callee);
         std::vector<TypePtr> arg_types;
 
