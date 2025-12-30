@@ -707,10 +707,28 @@ struct TypeInferenceVisitor : public ASTVisitor<TypePtr> {
                 return make_bool();
             }
 
-            // Array-returning filters
-            if (name == "list" || name == "sort" || name == "reverse" ||
-                name == "unique" || name == "batch" || name == "slice") {
-                return make_array(fresh());
+            // Array-preserving filters (maintain element type)
+            if (name == "list" || name == "sort" || name == "reverse" || name == "unique") {
+                auto elem = fresh();
+                constraints.add_iterable(input_type, elem,
+                    "filter " + name + " at " + source_loc(node));
+                return make_array(elem);
+            }
+
+            // Slice without args returns array with same element type
+            if (name == "slice") {
+                auto elem = fresh();
+                constraints.add_iterable(input_type, elem,
+                    "filter slice at " + source_loc(node));
+                return make_array(elem);
+            }
+
+            // Batch returns array of arrays
+            if (name == "batch") {
+                auto elem = fresh();
+                constraints.add_iterable(input_type, elem,
+                    "filter batch at " + source_loc(node));
+                return make_array(make_array(elem));
             }
 
             // Element-returning filters (from array)
@@ -726,40 +744,160 @@ struct TypeInferenceVisitor : public ASTVisitor<TypePtr> {
                 return input_type;  // Returns input or default value
             }
 
-            // Join returns string
+            // Join returns string (input must be iterable)
             if (name == "join") {
+                auto elem = fresh();
+                constraints.add_iterable(input_type, elem,
+                    "filter join at " + source_loc(node));
                 return make_string();
             }
 
-            // Map/select return arrays
-            if (name == "map" || name == "select" || name == "reject" ||
-                name == "selectattr" || name == "rejectattr") {
-                return make_array(fresh());
+            // Filtering filters (preserve element type)
+            if (name == "select" || name == "reject") {
+                auto elem = fresh();
+                constraints.add_iterable(input_type, elem,
+                    "filter " + name + " at " + source_loc(node));
+                return make_array(elem);
+            }
+
+            // Attribute filtering filters (preserve element type)
+            if (name == "selectattr" || name == "rejectattr") {
+                auto elem = fresh();
+                constraints.add_iterable(input_type, elem,
+                    "filter " + name + " at " + source_loc(node));
+                return make_array(elem);
+            }
+
+            // Map without args - preserve element type
+            if (name == "map") {
+                auto elem = fresh();
+                constraints.add_iterable(input_type, elem,
+                    "filter map at " + source_loc(node));
+                return make_array(elem);
             }
         }
 
-        // Filter with call expression
+        // Filter with call expression (filter has arguments)
         if (is_stmt<call_expression>(node.filter)) {
             auto* call = cast_stmt<call_expression>(node.filter);
             if (is_stmt<identifier>(call->callee)) {
                 auto* filter_id = cast_stmt<identifier>(call->callee);
                 const auto& name = filter_id->val;
 
+                // Helper to find keyword argument value
+                auto find_kwarg = [&](const std::string& key) -> statement* {
+                    for (auto& arg : call->args) {
+                        if (auto* kw = cast_stmt<keyword_argument_expression>(arg)) {
+                            if (auto* kid = cast_stmt<identifier>(kw->key)) {
+                                if (kid->val == key) {
+                                    return kw->val.get();
+                                }
+                            }
+                        }
+                    }
+                    return nullptr;
+                };
+
                 // Visit arguments
                 for (auto& arg : call->args) {
                     dispatch(*arg);
                 }
 
-                // Apply same filter type rules
+                // String-returning filters (most don't need input constraints)
                 if (name == "tojson" || name == "trim" || name == "indent" ||
-                    name == "join" || name == "replace") {
+                    name == "replace") {
                     return make_string();
                 }
+
+                // Join returns string and requires iterable input
+                if (name == "join") {
+                    auto elem = fresh();
+                    constraints.add_iterable(input_type, elem,
+                        "filter join at " + source_loc(node));
+                    return make_string();
+                }
+
+                // Default filter - returns input type
                 if (name == "default" || name == "d") {
                     return input_type;
                 }
-                if (name == "slice" || name == "batch") {
-                    return make_array(fresh());
+
+                // Slice with args - preserve element type
+                if (name == "slice") {
+                    auto elem = fresh();
+                    constraints.add_iterable(input_type, elem,
+                        "filter slice at " + source_loc(node));
+                    return make_array(elem);
+                }
+
+                // Batch - returns array of arrays
+                if (name == "batch") {
+                    auto elem = fresh();
+                    constraints.add_iterable(input_type, elem,
+                        "filter batch at " + source_loc(node));
+                    return make_array(make_array(elem));
+                }
+
+                // Map with attribute - extract attribute type from elements
+                if (name == "map") {
+                    auto elem = fresh();
+                    constraints.add_iterable(input_type, elem,
+                        "filter map at " + source_loc(node));
+
+                    // Check for attribute='...' argument
+                    if (auto* attr_arg = find_kwarg("attribute")) {
+                        if (auto* attr_str = dynamic_cast<string_literal*>(attr_arg)) {
+                            // map(attribute='name') extracts .name from each element
+                            auto attr_type = fresh();
+                            constraints.add_field(elem, attr_str->val, attr_type, false,
+                                "map attribute '" + attr_str->val + "' at " + source_loc(node));
+                            return make_array(attr_type);
+                        }
+                    }
+                    // map without attribute - preserve element type
+                    return make_array(elem);
+                }
+
+                // selectattr/rejectattr with attribute - preserve element type
+                if (name == "selectattr" || name == "rejectattr") {
+                    auto elem = fresh();
+                    constraints.add_iterable(input_type, elem,
+                        "filter " + name + " at " + source_loc(node));
+
+                    // First positional arg is the attribute name
+                    if (!call->args.empty()) {
+                        if (auto* attr_str = cast_stmt<string_literal>(call->args[0])) {
+                            // Add constraint that elements have this attribute
+                            auto attr_type = fresh();
+                            constraints.add_field(elem, attr_str->val, attr_type, false,
+                                name + " attribute '" + attr_str->val + "' at " + source_loc(node));
+                        }
+                    }
+                    return make_array(elem);
+                }
+
+                // select/reject with test - preserve element type
+                if (name == "select" || name == "reject") {
+                    auto elem = fresh();
+                    constraints.add_iterable(input_type, elem,
+                        "filter " + name + " at " + source_loc(node));
+                    return make_array(elem);
+                }
+
+                // sort/reverse/unique/list - preserve element type
+                if (name == "sort" || name == "reverse" || name == "unique" || name == "list") {
+                    auto elem = fresh();
+                    constraints.add_iterable(input_type, elem,
+                        "filter " + name + " at " + source_loc(node));
+                    return make_array(elem);
+                }
+
+                // first/last/random - return element type
+                if (name == "first" || name == "last" || name == "random") {
+                    auto elem = fresh();
+                    constraints.add_array_element(input_type, elem,
+                        "filter " + name + " at " + source_loc(node));
+                    return elem;
                 }
             }
         }
@@ -769,9 +907,13 @@ struct TypeInferenceVisitor : public ASTVisitor<TypePtr> {
     }
 
     TypePtr visit(select_expression& node) override {
-        dispatch(*node.lhs);
+        auto input_type = dispatch(*node.lhs);
         dispatch(*node.test);
-        return make_array(fresh());
+        // Select expression filters elements, preserving element type
+        auto elem = fresh();
+        constraints.add_iterable(input_type, elem,
+            "select expression at " + source_loc(node));
+        return make_array(elem);
     }
 
     TypePtr visit(test_expression& node) override {

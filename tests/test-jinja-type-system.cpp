@@ -230,6 +230,118 @@ int main(void) {
         std::cout << "PASS\n\n";
     }
 
+    // Test 15: Sort filter preserves element type
+    {
+        std::cout << "Test 15: Sort filter\n";
+        auto result = infer_types_from_source(
+            "{% for m in messages | sort %}{{ m.content }}{% endfor %}"
+        );
+        print_result("Test 15", result);
+
+        assert(result.success());
+        auto msg_type = result.get_type("messages");
+        assert(msg_type != nullptr);
+        // messages should be array with content field propagated
+        std::cout << "messages type: " << msg_type->to_string() << "\n";
+        std::cout << "PASS\n\n";
+    }
+
+    // Test 16: First filter extracts element type
+    {
+        std::cout << "Test 16: First filter\n";
+        auto result = infer_types_from_source(
+            "{{ messages | first | upper }}"
+        );
+        print_result("Test 16", result);
+
+        assert(result.success());
+        auto msg_type = result.get_type("messages");
+        assert(msg_type != nullptr);
+        // messages should be array (element used as string via upper)
+        std::cout << "messages type: " << msg_type->to_string() << "\n";
+        std::cout << "PASS\n\n";
+    }
+
+    // Test 17: Map filter with attribute extracts field type
+    {
+        std::cout << "Test 17: Map with attribute\n";
+        auto result = infer_types_from_source(
+            "{% for name in users | map(attribute='name') %}{{ name }}{% endfor %}"
+        );
+        print_result("Test 17", result);
+
+        assert(result.success());
+        auto users_type = result.get_type("users");
+        assert(users_type != nullptr);
+        // users should be array<{name: string}>
+        std::cout << "users type: " << users_type->to_string() << "\n";
+        std::cout << "PASS\n\n";
+    }
+
+    // Test 18: Selectattr filter preserves element type
+    {
+        std::cout << "Test 18: Selectattr filter\n";
+        auto result = infer_types_from_source(
+            "{% for u in users | selectattr('active') %}{{ u.name }}{% endfor %}"
+        );
+        print_result("Test 18", result);
+
+        assert(result.success());
+        auto users_type = result.get_type("users");
+        assert(users_type != nullptr);
+        // users should be array<{active: ?, name: string}>
+        std::cout << "users type: " << users_type->to_string() << "\n";
+        std::cout << "PASS\n\n";
+    }
+
+    // Test 19: Batch filter returns array of arrays
+    {
+        std::cout << "Test 19: Batch filter\n";
+        auto result = infer_types_from_source(
+            "{% for batch in items | batch(3) %}{% for item in batch %}{{ item.x }}{% endfor %}{% endfor %}"
+        );
+        print_result("Test 19", result);
+
+        assert(result.success());
+        auto items_type = result.get_type("items");
+        assert(items_type != nullptr);
+        // items should be array<{x: string}>
+        std::cout << "items type: " << items_type->to_string() << "\n";
+        std::cout << "PASS\n\n";
+    }
+
+    // Test 20: Filter chain type propagation
+    {
+        std::cout << "Test 20: Filter chain\n";
+        auto result = infer_types_from_source(
+            "{% for m in messages | selectattr('visible') | sort | reverse %}{{ m.content }}{% endfor %}"
+        );
+        print_result("Test 20", result);
+
+        assert(result.success());
+        auto msg_type = result.get_type("messages");
+        assert(msg_type != nullptr);
+        // messages should be array with visible and content fields
+        std::cout << "messages type: " << msg_type->to_string() << "\n";
+        std::cout << "PASS\n\n";
+    }
+
+    // Test 21: Join filter with element access
+    {
+        std::cout << "Test 21: Join filter\n";
+        auto result = infer_types_from_source(
+            "{{ names | join(', ') }}"
+        );
+        print_result("Test 21", result);
+
+        assert(result.success());
+        auto names_type = result.get_type("names");
+        assert(names_type != nullptr);
+        // names should be array (iterable constraint added)
+        std::cout << "names type: " << names_type->to_string() << "\n";
+        std::cout << "PASS\n\n";
+    }
+
     std::cout << "\n=== ALL JINJA TYPE SYSTEM TESTS PASSED ===\n";
     return 0;
 }
