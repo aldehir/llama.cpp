@@ -20,18 +20,49 @@ struct ConstraintSolver {
     // Errors encountered during solving
     std::vector<std::string> errors;
 
+    // Type variables that were used in output context (soft constraint to string)
+    std::set<std::string> output_coerced_types;
+
+    // Type variables that were used in string operand context (hard constraint to string)
+    std::set<std::string> string_operand_types;
+
     /**
      * Solve all constraints
      * Returns true if successful, false if errors occurred
      */
     bool solve(const ConstraintSet& constraints) {
         errors.clear();
+        output_coerced_types.clear();
+        string_operand_types.clear();
 
         for (const auto& constraint : constraints.constraints) {
             std::visit([this](const auto& c) { solve_constraint(c); }, constraint);
         }
 
+        // Finalization pass: resolve remaining type variables
+        finalize_types();
+
         return errors.empty();
+    }
+
+    /**
+     * Finalization pass - resolve unbound type variables based on usage context
+     */
+    void finalize_types() {
+        // First, resolve type variables used as string operands
+        for (const auto& var_name : string_operand_types) {
+            if (subst.find(var_name) == subst.end()) {
+                subst[var_name] = make_string();
+            }
+        }
+
+        // Then, resolve type variables used in output context to string
+        // (only if still unbound after other constraints)
+        for (const auto& var_name : output_coerced_types) {
+            if (subst.find(var_name) == subst.end()) {
+                subst[var_name] = make_string();
+            }
+        }
     }
 
     /**
@@ -200,6 +231,32 @@ private:
             subst[tv->name] = make_function(c.arg_types, c.return_type);
         }
         // Built-in functions/filters are handled by returning fresh types
+    }
+
+    void solve_constraint(const OutputCoercionConstraint& c) {
+        // Output coercion is a soft constraint - it marks types that should be
+        // string-coercible. We track these for the finalization pass.
+        auto resolved = apply(c.type);
+
+        if (auto* tv = as_type<TypeVariable>(resolved)) {
+            // Mark this type variable as used in output context
+            // During finalization, unbound type vars with output coercion
+            // will default to string
+            output_coerced_types.insert(tv->name);
+        }
+    }
+
+    void solve_constraint(const StringOperandConstraint& c) {
+        // String operand is a strong constraint - the value is used as a string
+        auto resolved = apply(c.type);
+
+        if (auto* tv = as_type<TypeVariable>(resolved)) {
+            // If type variable is unbound, bind to string
+            if (subst.find(tv->name) == subst.end()) {
+                subst[tv->name] = make_string();
+            }
+        }
+        // If already bound to something else, that's fine - Jinja will coerce
     }
 
     // === Unification algorithm ===

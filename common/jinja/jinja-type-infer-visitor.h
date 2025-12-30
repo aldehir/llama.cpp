@@ -50,19 +50,40 @@ struct TypeEnvironment {
 };
 
 /**
+ * Type guard - captures type narrowing information from test expressions
+ * Example: "x is string" produces TypeGuard{x, string}
+ */
+struct TypeGuard {
+    std::string variable;  // The variable being narrowed
+    TypePtr narrowed_type; // The type it's narrowed to
+    bool negated = false;  // True if this is from "is not" or "not (x is ...)"
+
+    TypeGuard() = default;
+    TypeGuard(const std::string& var, TypePtr type, bool neg = false)
+        : variable(var), narrowed_type(std::move(type)), negated(neg) {}
+
+    bool valid() const { return !variable.empty() && narrowed_type != nullptr; }
+};
+
+/**
  * Context tracking for conditional access analysis
  */
 struct InferenceContext {
     bool in_conditional = false;  // Inside if/ternary
     bool in_loop = false;         // Inside for loop
+    bool in_output = false;       // Inside output expression {{ }}
     int depth = 0;                // Nesting depth
 
     InferenceContext enter_conditional() const {
-        return InferenceContext{true, in_loop, depth + 1};
+        return InferenceContext{true, in_loop, in_output, depth + 1};
     }
 
     InferenceContext enter_loop() const {
-        return InferenceContext{in_conditional, true, depth + 1};
+        return InferenceContext{in_conditional, true, in_output, depth + 1};
+    }
+
+    InferenceContext enter_output() const {
+        return InferenceContext{in_conditional, in_loop, true, depth};
     }
 };
 
@@ -82,6 +103,117 @@ struct TypeInferenceVisitor : public ASTVisitor<TypePtr> {
 
     TypeInferenceVisitor(ConstraintSet& cs, TypeEnvironment* root)
         : constraints(cs), env(root), ctx(), root_env(root) {}
+
+    // === Type guard extraction ===
+
+    /**
+     * Extract a type guard from a test expression like "x is string"
+     * Returns an invalid guard if no narrowing can be inferred
+     */
+    TypeGuard extract_type_guard(statement& test_node, bool negated = false) {
+        // Handle "not (x is y)" - extract inner test and flip negation
+        if (auto* unary = dynamic_cast<unary_expression*>(&test_node)) {
+            if (unary->op.value == "not") {
+                return extract_type_guard(*unary->argument, !negated);
+            }
+        }
+
+        // Handle "x is y" test expressions
+        if (auto* test = dynamic_cast<test_expression*>(&test_node)) {
+            // Get the variable being tested
+            std::string var_name;
+            if (auto* id = dynamic_cast<identifier*>(test->operand.get())) {
+                var_name = id->val;
+            } else {
+                return TypeGuard{}; // Can only narrow simple identifiers for now
+            }
+
+            // Get the test name
+            std::string test_name;
+            if (auto* test_id = dynamic_cast<identifier*>(test->test.get())) {
+                test_name = test_id->val;
+            } else if (auto* call = dynamic_cast<call_expression*>(test->test.get())) {
+                if (auto* callee_id = dynamic_cast<identifier*>(call->callee.get())) {
+                    test_name = callee_id->val;
+                }
+            }
+
+            // Handle "is not" by flipping negation
+            if (test->negate) {
+                negated = !negated;
+            }
+
+            // Map test names to types
+            TypePtr narrowed_type = nullptr;
+            if (test_name == "string") {
+                narrowed_type = make_string();
+            } else if (test_name == "number" || test_name == "integer") {
+                narrowed_type = make_int();
+            } else if (test_name == "float") {
+                narrowed_type = make_float();
+            } else if (test_name == "boolean") {
+                narrowed_type = make_bool();
+            } else if (test_name == "none" || test_name == "null") {
+                narrowed_type = make_null();
+            } else if (test_name == "defined") {
+                // "is defined" means variable exists and is non-null
+                // For negated (is not defined), we can't narrow
+                if (!negated) {
+                    // Variable is defined - mark as non-null by giving it its current type
+                    auto current = env->lookup(var_name);
+                    if (current) {
+                        narrowed_type = current;
+                    }
+                }
+            } else if (test_name == "iterable" || test_name == "sequence") {
+                narrowed_type = make_array(fresh());
+            } else if (test_name == "mapping") {
+                narrowed_type = make_object(true);
+            }
+
+            if (narrowed_type) {
+                return TypeGuard(var_name, narrowed_type, negated);
+            }
+        }
+
+        // Handle truthiness check: "if x" or "if x.field"
+        // This implies x (or x.field) is truthy/non-null
+        if (auto* id = dynamic_cast<identifier*>(&test_node)) {
+            // "if x" - x is truthy, meaning it's defined and non-null
+            // We don't narrow the type, but we know it's not null
+            // Return guard with current type to indicate "is defined"
+            auto current = env->lookup(id->val);
+            if (current && !negated) {
+                return TypeGuard(id->val, current, false);
+            }
+        }
+
+        return TypeGuard{}; // No narrowing possible
+    }
+
+    /**
+     * Apply a type guard to the current environment
+     * Creates a new binding with the narrowed type
+     */
+    void apply_type_guard(const TypeGuard& guard) {
+        if (!guard.valid()) return;
+
+        if (guard.negated) {
+            // For negated guards like "x is not string", we can't easily narrow
+            // In the future, we could create exclusion types
+            return;
+        }
+
+        // Bind the variable to its narrowed type in current scope
+        env->bind(guard.variable, guard.narrowed_type);
+
+        // Also add an equality constraint to help the solver
+        auto existing = root_env->lookup(guard.variable);
+        if (existing) {
+            constraints.add_equality(existing, guard.narrowed_type,
+                "type guard narrowing " + guard.variable);
+        }
+    }
 
     // Scope management
     void push_scope() {
@@ -111,25 +243,43 @@ struct TypeInferenceVisitor : public ASTVisitor<TypePtr> {
 
     TypePtr visit(program& node) override {
         for (auto& stmt : node.body) {
-            dispatch(*stmt);
+            visit_body_statement(*stmt);
         }
         return make_null();
     }
 
     TypePtr visit(if_statement& node) override {
-        // Visit test expression
+        // Visit test expression first (generates constraints)
         auto test_type = dispatch(*node.test);
 
-        // Visit body in conditional context
+        // Extract type guard from the test
+        auto guard = extract_type_guard(*node.test);
+
         auto old_ctx = ctx;
         ctx = ctx.enter_conditional();
 
+        // Visit body with type guard applied (true branch)
+        push_scope();
+        if (guard.valid() && !guard.negated) {
+            apply_type_guard(guard);
+        }
         for (auto& stmt : node.body) {
-            dispatch(*stmt);
+            visit_body_statement(*stmt);
+        }
+        pop_scope();
+
+        // Visit alternate with inverted guard (false branch)
+        push_scope();
+        if (guard.valid()) {
+            // In the else branch, the guard is negated
+            TypeGuard inverted_guard(guard.variable, guard.narrowed_type, !guard.negated);
+            // For now, we don't apply negated guards (would need exclusion types)
+            // But we still create the scope for proper scoping
         }
         for (auto& stmt : node.alternate) {
-            dispatch(*stmt);
+            visit_body_statement(*stmt);
         }
+        pop_scope();
 
         ctx = old_ctx;
         return make_null();
@@ -180,9 +330,9 @@ struct TypeInferenceVisitor : public ASTVisitor<TypePtr> {
         loop_obj->add_field("nextitem", make_optional(element_type));
         env->bind("loop", loop_obj);
 
-        // Visit body
+        // Visit body - expressions in loop body are output expressions
         for (auto& stmt : node.body) {
-            dispatch(*stmt);
+            visit_body_statement(*stmt);
         }
 
         ctx = old_ctx;
@@ -190,10 +340,35 @@ struct TypeInferenceVisitor : public ASTVisitor<TypePtr> {
 
         // Visit default block (outside loop scope)
         for (auto& stmt : node.default_block) {
-            dispatch(*stmt);
+            visit_body_statement(*stmt);
         }
 
         return make_null();
+    }
+
+    /**
+     * Helper to visit a statement that may contain output expressions
+     * Adds output coercion constraints for expression statements
+     */
+    void visit_body_statement(statement& stmt) {
+        // Check if this is an expression statement (output context)
+        bool is_output_expr = dynamic_cast<expression*>(&stmt) != nullptr &&
+                              !dynamic_cast<if_statement*>(&stmt) &&
+                              !dynamic_cast<for_statement*>(&stmt) &&
+                              !dynamic_cast<set_statement*>(&stmt) &&
+                              !dynamic_cast<macro_statement*>(&stmt) &&
+                              !dynamic_cast<filter_statement*>(&stmt) &&
+                              !dynamic_cast<call_statement*>(&stmt);
+
+        if (is_output_expr) {
+            auto old_ctx = ctx;
+            ctx = ctx.enter_output();
+            auto expr_type = dispatch(stmt);
+            constraints.add_output_coercion(expr_type, "output expression at " + source_loc(stmt));
+            ctx = old_ctx;
+        } else {
+            dispatch(stmt);
+        }
     }
 
     TypePtr visit(set_statement& node) override {
@@ -442,8 +617,28 @@ struct TypeInferenceVisitor : public ASTVisitor<TypePtr> {
         const std::string& op = node.op.value;
 
         // Comparison operators return bool
+        // Also infer operand types from literal comparisons
         if (op == "==" || op == "!=" || op == "<" || op == ">" ||
             op == "<=" || op == ">=" || op == "in" || op == "not in") {
+
+            // If comparing with a string literal, the other operand is likely a string
+            if (is_stmt<string_literal>(node.left)) {
+                constraints.add_equality(right_type, make_string(),
+                    "comparison with string literal at " + source_loc(node));
+            } else if (is_stmt<string_literal>(node.right)) {
+                constraints.add_equality(left_type, make_string(),
+                    "comparison with string literal at " + source_loc(node));
+            }
+
+            // If comparing with an integer literal, the other operand is likely int
+            if (is_stmt<integer_literal>(node.left)) {
+                constraints.add_equality(right_type, make_int(),
+                    "comparison with int literal at " + source_loc(node));
+            } else if (is_stmt<integer_literal>(node.right)) {
+                constraints.add_equality(left_type, make_int(),
+                    "comparison with int literal at " + source_loc(node));
+            }
+
             return make_bool();
         }
 
@@ -456,8 +651,12 @@ struct TypeInferenceVisitor : public ASTVisitor<TypePtr> {
             return u;
         }
 
-        // String concatenation
+        // String concatenation - operands are coerced to strings
         if (op == "~") {
+            constraints.add_string_operand(left_type,
+                "string concat lhs at " + source_loc(node));
+            constraints.add_string_operand(right_type,
+                "string concat rhs at " + source_loc(node));
             return make_string();
         }
 

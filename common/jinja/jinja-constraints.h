@@ -86,13 +86,40 @@ struct CallableConstraint {
     }
 };
 
+// Output coercion constraint: T is used in output context (will be coerced to string)
+// This is a "soft" constraint - it suggests the type should be string-like
+// but doesn't force it (since any type can be stringified in Jinja)
+struct OutputCoercionConstraint {
+    TypePtr type;
+    std::string source;
+
+    std::string to_string() const {
+        return (type ? type->to_string() : "null") + " -> output" +
+               " (from: " + source + ")";
+    }
+};
+
+// String operand constraint: T is used in string context (e.g., ~ operator)
+// This is stronger than output coercion - the value is definitely a string
+struct StringOperandConstraint {
+    TypePtr type;
+    std::string source;
+
+    std::string to_string() const {
+        return (type ? type->to_string() : "null") + " : string" +
+               " (from: " + source + ")";
+    }
+};
+
 // Union of all constraint types
 using Constraint = std::variant<
     EqualityConstraint,
     HasFieldConstraint,
     ArrayElementConstraint,
     IterableConstraint,
-    CallableConstraint
+    CallableConstraint,
+    OutputCoercionConstraint,
+    StringOperandConstraint
 >;
 
 /**
@@ -129,6 +156,14 @@ struct ConstraintSet {
         constraints.push_back(CallableConstraint{
             std::move(callee), std::move(args), std::move(ret), source
         });
+    }
+
+    void add_output_coercion(TypePtr type, const std::string& source) {
+        constraints.push_back(OutputCoercionConstraint{std::move(type), source});
+    }
+
+    void add_string_operand(TypePtr type, const std::string& source) {
+        constraints.push_back(StringOperandConstraint{std::move(type), source});
     }
 
     void clear() {
