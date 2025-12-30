@@ -772,13 +772,9 @@ struct type_inference_visitor : public ast_visitor<TypePtr> {
         // The + operator can be string concat, array concat, or numeric addition
         if (op == "+") {
             // If either operand is a string literal, it's string concatenation
-            if (is_stmt<string_literal>(node.left)) {
-                constraints.add_equality(right_type, make_string(),
-                    "string concat (+ with string literal) at " + source_loc(node));
-                return make_string();
-            } else if (is_stmt<string_literal>(node.right)) {
-                constraints.add_equality(left_type, make_string(),
-                    "string concat (+ with string literal) at " + source_loc(node));
+            // Don't constrain the other operand's type - Jinja coerces to string at runtime
+            // This preserves literal type inference for fields used in string concat
+            if (is_stmt<string_literal>(node.left) || is_stmt<string_literal>(node.right)) {
                 return make_string();
             }
             // Otherwise could be numeric or array concat - return fresh type variable

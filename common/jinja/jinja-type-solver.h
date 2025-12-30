@@ -139,12 +139,23 @@ struct constraint_solver {
      * Apply substitution to resolve all type variables in a type
      */
     TypePtr apply(const TypePtr& type) const {
+        std::set<const Type*> visited;
+        return apply_impl(type, visited);
+    }
+
+    TypePtr apply_impl(const TypePtr& type, std::set<const Type*>& visited) const {
         if (!type) return nullptr;
+
+        // Cycle detection - if we've seen this exact type pointer, return it as-is
+        if (visited.count(type.get()) > 0) {
+            return type;
+        }
+        visited.insert(type.get());
 
         if (auto* tv = as_type<type_variable>(type)) {
             auto it = subst.find(tv->name);
             if (it != subst.end()) {
-                return apply(it->second);
+                return apply_impl(it->second, visited);
             }
             return type;
         }
@@ -152,7 +163,7 @@ struct constraint_solver {
         if (auto* arr = as_type<array_type>(type)) {
             auto result = std::make_shared<array_type>();
             if (arr->element_type) {
-                result->element_type = apply(arr->element_type);
+                result->element_type = apply_impl(arr->element_type, visited);
             }
             return result;
         }
@@ -160,7 +171,7 @@ struct constraint_solver {
         if (auto* obj = as_type<object_type>(type)) {
             auto result = std::make_shared<object_type>(obj->extensible);
             for (const auto& [name, field] : obj->fields) {
-                result->add_field(name, apply(field.type), field.optional);
+                result->add_field(name, apply_impl(field.type, visited), field.optional);
             }
             return result;
         }
@@ -168,7 +179,7 @@ struct constraint_solver {
         if (auto* u = as_type<union_type>(type)) {
             auto result = std::make_shared<union_type>();
             for (const auto& alt : u->alternatives) {
-                result->add_alternative(apply(alt));
+                result->add_alternative(apply_impl(alt, visited));
             }
             return result;
         }
@@ -176,10 +187,10 @@ struct constraint_solver {
         if (auto* func = as_type<function_type>(type)) {
             std::vector<TypePtr> params;
             for (const auto& p : func->param_types) {
-                params.push_back(apply(p));
+                params.push_back(apply_impl(p, visited));
             }
             return std::make_shared<function_type>(
-                std::move(params), apply(func->return_type));
+                std::move(params), apply_impl(func->return_type, visited));
         }
 
         return type;  // Primitives are unchanged
@@ -243,7 +254,6 @@ private:
         } else if (auto* ut = as_type<union_type>(current)) {
             // Union type - add field constraint to ALL alternatives
             for (auto& alt : ut->alternatives) {
-                // Create a new has_field_constraint for each alternative
                 has_field_constraint alt_constraint{alt, c.field_name, c.field_type, c.optional, c.source};
                 solve_constraint(alt_constraint);
             }
@@ -294,6 +304,12 @@ private:
             } else {
                 arr->element_type = c.element_type;
             }
+        } else if (auto* ut = as_type<union_type>(current)) {
+            // Union type - add constraint to ALL alternatives
+            for (auto& alt : ut->alternatives) {
+                array_element_constraint alt_constraint{alt, c.element_type, c.source};
+                solve_constraint(alt_constraint);
+            }
         }
         // Object used as array is fine - element_type represents value type
     }
@@ -310,6 +326,12 @@ private:
                 unify(arr->element_type, c.element_type);
             } else {
                 arr->element_type = c.element_type;
+            }
+        } else if (auto* ut = as_type<union_type>(current)) {
+            // Union type - add iterable constraint to ALL alternatives
+            for (auto& alt : ut->alternatives) {
+                iterable_constraint alt_constraint{alt, c.element_type, c.source};
+                solve_constraint(alt_constraint);
             }
         }
         // Object iteration yields values - element_type could be anything
