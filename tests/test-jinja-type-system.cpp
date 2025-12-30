@@ -11,6 +11,9 @@
 #ifdef _WIN32
 #define NOMINMAX
 #include <windows.h>
+#include <io.h>
+#else
+#include <unistd.h>
 #endif
 
 using namespace jinja::types;
@@ -20,16 +23,33 @@ using namespace jinja::types;
 // ============================================================================
 
 namespace color {
-    const char* GREEN  = "\033[32m";
-    const char* RED    = "\033[31m";
-    const char* CYAN   = "\033[36m";
-    const char* YELLOW = "\033[33m";
-    const char* DIM    = "\033[2m";
-    const char* RESET  = "\033[0m";
-    const char* BOLD   = "\033[1m";
+    static bool colors_enabled = true;
 
-    void enable_windows_ansi() {
+    const char* GREEN()  { return colors_enabled ? "\033[32m" : ""; }
+    const char* RED()    { return colors_enabled ? "\033[31m" : ""; }
+    const char* CYAN()   { return colors_enabled ? "\033[36m" : ""; }
+    const char* YELLOW() { return colors_enabled ? "\033[33m" : ""; }
+    const char* DIM()    { return colors_enabled ? "\033[2m"  : ""; }
+    const char* RESET()  { return colors_enabled ? "\033[0m"  : ""; }
+    const char* BOLD()   { return colors_enabled ? "\033[1m"  : ""; }
+
+    bool is_tty() {
 #ifdef _WIN32
+        return _isatty(_fileno(stdout)) != 0;
+#else
+        return isatty(fileno(stdout)) != 0;
+#endif
+    }
+
+    void init() {
+        // Disable colors if stdout is not a TTY (e.g., piped to another command)
+        if (!is_tty()) {
+            colors_enabled = false;
+            return;
+        }
+
+#ifdef _WIN32
+        // Enable ANSI escape codes on Windows
         HANDLE hOut = GetStdHandle(STD_OUTPUT_HANDLE);
         DWORD mode = 0;
         GetConsoleMode(hOut, &mode);
@@ -77,22 +97,22 @@ void print_usage(const char* program_name) {
 }
 
 int analyze_file(const std::string& path) {
-    std::cout << color::BOLD << "=== JINJA TYPE INFERENCE ===" << color::RESET << "\n\n";
+    std::cout << color::BOLD() << "=== JINJA TYPE INFERENCE ===" << color::RESET() << "\n\n";
 
     std::string source = read_file(path);
     if (source.empty()) {
-        std::cerr << color::RED << "Error: Could not read file: " << path << color::RESET << "\n";
+        std::cerr << color::RED() << "Error: Could not read file: " << path << color::RESET() << "\n";
         return 1;
     }
 
-    std::cout << color::DIM << "File: " << path << color::RESET << "\n\n";
+    std::cout << color::DIM() << "File: " << path << color::RESET() << "\n\n";
 
     auto result = infer_types_from_source(source);
 
     // Print schema
-    std::cout << color::BOLD << "Inferred Schema:" << color::RESET << "\n";
+    std::cout << color::BOLD() << "Inferred Schema:" << color::RESET() << "\n";
     for (const auto& [name, type] : result.variable_types) {
-        std::cout << "  " << color::CYAN << name << color::RESET << ":";
+        std::cout << "  " << color::CYAN() << name << color::RESET() << ":";
         if (type) {
             if (type->is_simple()) {
                 std::cout << " " << type->to_string() << "\n";
@@ -106,35 +126,35 @@ int analyze_file(const std::string& path) {
 
     // Print constraints if verbose
     if (g_ctx.verbose) {
-        std::cout << "\n" << color::BOLD << "Constraints (" << result.constraints.size() << "):" << color::RESET << "\n";
+        std::cout << "\n" << color::BOLD() << "Constraints (" << result.constraints.size() << "):" << color::RESET() << "\n";
         for (const auto& c : result.constraints.constraints) {
-            std::cout << color::DIM << "  ";
+            std::cout << color::DIM() << "  ";
             std::visit([](const auto& cst) {
                 std::cout << cst.to_string();
             }, c);
-            std::cout << color::RESET << "\n";
+            std::cout << color::RESET() << "\n";
         }
     }
 
     // Print errors if any
     if (!result.errors.empty()) {
-        std::cout << "\n" << color::YELLOW << "Warnings/Errors:" << color::RESET << "\n";
+        std::cout << "\n" << color::YELLOW() << "Warnings/Errors:" << color::RESET() << "\n";
         for (const auto& err : result.errors) {
-            std::cout << color::DIM << "  - " << err << color::RESET << "\n";
+            std::cout << color::DIM() << "  - " << err << color::RESET() << "\n";
         }
     }
 
-    std::cout << "\n" << color::GREEN << "Analysis complete." << color::RESET << "\n";
+    std::cout << "\n" << color::GREEN() << "Analysis complete." << color::RESET() << "\n";
     return 0;
 }
 
 void print_header(int num, const std::string& name) {
-    std::cout << color::BOLD << "Test " << num << ": " << name << color::RESET << "\n";
+    std::cout << color::BOLD() << "Test " << num << ": " << name << color::RESET() << "\n";
 }
 
 void print_schema(const inference_result& result) {
     for (const auto& [name, type] : result.variable_types) {
-        std::cout << "  " << color::CYAN << name << color::RESET << ":";
+        std::cout << "  " << color::CYAN() << name << color::RESET() << ":";
         if (type) {
             if (type->is_simple()) {
                 std::cout << " " << type->to_string() << "\n";
@@ -149,7 +169,7 @@ void print_schema(const inference_result& result) {
 }
 
 void print_constraints(const inference_result& result) {
-    std::cout << color::DIM;
+    std::cout << color::DIM();
     std::cout << "  Constraints (" << result.constraints.size() << "):\n";
     for (const auto& c : result.constraints.constraints) {
         std::cout << "    ";
@@ -158,34 +178,34 @@ void print_constraints(const inference_result& result) {
         }, c);
         std::cout << "\n";
     }
-    std::cout << color::RESET;
+    std::cout << color::RESET();
 }
 
 void print_pass(const inference_result& result) {
-    std::cout << color::GREEN << "  PASS" << color::RESET
-              << color::DIM << " (" << result.constraints.size() << " constraints)"
-              << color::RESET << "\n\n";
+    std::cout << color::GREEN() << "  PASS" << color::RESET()
+              << color::DIM() << " (" << result.constraints.size() << " constraints)"
+              << color::RESET() << "\n\n";
     g_ctx.passed++;
 }
 
 void print_fail(const std::string& reason) {
-    std::cout << color::RED << "  FAIL: " << reason << color::RESET << "\n\n";
+    std::cout << color::RED() << "  FAIL: " << reason << color::RESET() << "\n\n";
     g_ctx.failed++;
 }
 
 void print_skip(const std::string& reason) {
-    std::cout << color::YELLOW << "  SKIP: " << reason << color::RESET << "\n\n";
+    std::cout << color::YELLOW() << "  SKIP: " << reason << color::RESET() << "\n\n";
     g_ctx.skipped++;
 }
 
 void print_summary() {
-    std::cout << color::BOLD << "=== SUMMARY ===" << color::RESET << "\n";
-    std::cout << color::GREEN << g_ctx.passed << " passed" << color::RESET;
+    std::cout << color::BOLD() << "=== SUMMARY ===" << color::RESET() << "\n";
+    std::cout << color::GREEN() << g_ctx.passed << " passed" << color::RESET();
     if (g_ctx.failed > 0) {
-        std::cout << ", " << color::RED << g_ctx.failed << " failed" << color::RESET;
+        std::cout << ", " << color::RED() << g_ctx.failed << " failed" << color::RESET();
     }
     if (g_ctx.skipped > 0) {
-        std::cout << ", " << color::YELLOW << g_ctx.skipped << " skipped" << color::RESET;
+        std::cout << ", " << color::YELLOW() << g_ctx.skipped << " skipped" << color::RESET();
     }
     std::cout << "\n";
 }
@@ -195,7 +215,7 @@ void print_summary() {
 // ============================================================================
 
 int main(int argc, char* argv[]) {
-    color::enable_windows_ansi();
+    color::init();
 
     // Parse command line
     for (int i = 1; i < argc; i++) {
@@ -209,7 +229,7 @@ int main(int argc, char* argv[]) {
             // Assume it's a file path
             g_ctx.input_file = arg;
         } else {
-            std::cerr << color::RED << "Unknown option: " << arg << color::RESET << "\n";
+            std::cerr << color::RED() << "Unknown option: " << arg << color::RESET() << "\n";
             print_usage(argv[0]);
             return 1;
         }
@@ -220,7 +240,7 @@ int main(int argc, char* argv[]) {
         return analyze_file(g_ctx.input_file);
     }
 
-    std::cout << color::BOLD << "=== JINJA TYPE SYSTEM TESTS ===" << color::RESET << "\n\n";
+    std::cout << color::BOLD() << "=== JINJA TYPE SYSTEM TESTS ===" << color::RESET() << "\n\n";
 
     // Test 1: Simple variable
     {
@@ -614,9 +634,9 @@ int main(int argc, char* argv[]) {
             if (g_ctx.verbose) print_constraints(result);
 
             if (!result.success()) {
-                std::cout << color::DIM << "  Note: Constraint errors (expected for complex templates):" << color::RESET << "\n";
+                std::cout << color::DIM() << "  Note: Constraint errors (expected for complex templates):" << color::RESET() << "\n";
                 for (const auto& err : result.errors) {
-                    std::cout << color::DIM << "    - " << err << color::RESET << "\n";
+                    std::cout << color::DIM() << "    - " << err << color::RESET() << "\n";
                 }
             }
 
