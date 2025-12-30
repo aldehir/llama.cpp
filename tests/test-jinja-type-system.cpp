@@ -342,6 +342,21 @@ int main(void) {
         std::cout << "PASS\n\n";
     }
 
+    // Test 22: Multiple array index accesses should merge element type
+    {
+        std::cout << "Test 22: Array index field merging\n";
+        auto result = infer_types_from_source(
+            "{{ messages[0].role }}{{ messages[0].content }}"
+        );
+        print_result("Test 22", result);
+
+        assert(result.success());
+        auto msg_type = result.get_type("messages");
+        assert(msg_type != nullptr);
+        std::cout << "messages type: " << msg_type->to_string() << "\n";
+        std::cout << "PASS\n\n";
+    }
+
     std::cout << "\n=== ALL JINJA TYPE SYSTEM TESTS PASSED ===\n";
     return 0;
 }

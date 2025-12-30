@@ -139,7 +139,6 @@ struct ObjectType : public Type {
             if (field.optional) result += "?";
             result += ": " + (field.type ? field.type->to_string() : "unknown");
         }
-        if (extensible && !fields.empty()) result += ", ...";
         result += "}";
         return result;
     }

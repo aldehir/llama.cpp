@@ -129,6 +129,25 @@ struct ConstraintSolver {
     }
 
 private:
+    /**
+     * Follow substitution chain to get the actual stored type (no copying)
+     * Returns the final type and the last type variable name in the chain
+     */
+    std::pair<TypePtr, std::string> follow_chain(const TypePtr& type) {
+        TypePtr current = type;
+        std::string last_var;
+        while (auto* tv = as_type<TypeVariable>(current)) {
+            last_var = tv->name;
+            auto it = subst.find(tv->name);
+            if (it != subst.end()) {
+                current = it->second;
+            } else {
+                break;  // Unbound type variable
+            }
+        }
+        return {current, last_var};
+    }
+
     // === Constraint solving methods ===
 
     void solve_constraint(const EqualityConstraint& c) {
@@ -141,15 +160,15 @@ private:
     }
 
     void solve_constraint(const HasFieldConstraint& c) {
-        auto resolved = apply(c.object_type);
+        auto [current, last_var] = follow_chain(c.object_type);
 
-        if (auto* tv = as_type<TypeVariable>(resolved)) {
+        if (auto* tv = as_type<TypeVariable>(current)) {
             // Object type is still unknown - create object type with field
             auto new_obj = std::make_shared<ObjectType>(true);
             new_obj->add_field(c.field_name, c.field_type, c.optional);
             subst[tv->name] = new_obj;
-        } else if (auto* existing_obj = as_type<ObjectType>(resolved)) {
-            // Check if field already exists
+        } else if (auto* existing_obj = as_type<ObjectType>(current)) {
+            // Modify the existing object directly (not a copy!)
             auto* existing = existing_obj->get_field(c.field_name);
             if (existing) {
                 // Unify field types
@@ -162,57 +181,53 @@ private:
                     existing->optional = false;
                 }
             } else {
-                // Add new field
+                // Add new field to the original object
                 existing_obj->add_field(c.field_name, c.field_type, c.optional);
             }
         } else {
-            // Non-object type with field access - error
-            // But we'll be lenient and create an object type
+            // Non-object type with field access - create an object type
             auto fallback_obj = std::make_shared<ObjectType>(true);
             fallback_obj->add_field(c.field_name, c.field_type, c.optional);
 
-            // If the resolved type is a type variable in substitution, update it
-            if (auto* orig_tv = as_type<TypeVariable>(c.object_type)) {
-                subst[orig_tv->name] = fallback_obj;
+            // Update the last type variable to point to this object
+            if (!last_var.empty()) {
+                subst[last_var] = fallback_obj;
             }
         }
     }
 
     void solve_constraint(const ArrayElementConstraint& c) {
-        auto resolved = apply(c.array_type);
+        auto [current, last_var] = follow_chain(c.array_type);
 
-        if (auto* tv = as_type<TypeVariable>(resolved)) {
-            // Create array type
+        if (auto* tv = as_type<TypeVariable>(current)) {
+            // Unbound type variable - create array type
             subst[tv->name] = make_array(c.element_type);
-        } else if (auto* arr = as_type<ArrayType>(resolved)) {
-            // Unify element types
+        } else if (auto* arr = as_type<ArrayType>(current)) {
+            // Unify element types directly on the original array
             if (arr->element_type) {
                 unify(arr->element_type, c.element_type);
             } else {
                 arr->element_type = c.element_type;
             }
-        } else if (auto* obj = as_type<ObjectType>(resolved)) {
-            // Object used as array (e.g., in iteration) - that's fine
-            // The element_type represents the value type when iterating over object
         }
+        // Object used as array is fine - element_type represents value type
     }
 
     void solve_constraint(const IterableConstraint& c) {
-        auto resolved = apply(c.type);
+        auto [current, last_var] = follow_chain(c.type);
 
-        if (auto* tv = as_type<TypeVariable>(resolved)) {
-            // Default to array type
+        if (auto* tv = as_type<TypeVariable>(current)) {
+            // Unbound type variable - create array type
             subst[tv->name] = make_array(c.element_type);
-        } else if (auto* arr = as_type<ArrayType>(resolved)) {
+        } else if (auto* arr = as_type<ArrayType>(current)) {
+            // Unify element types directly on the original array
             if (arr->element_type) {
                 unify(arr->element_type, c.element_type);
             } else {
                 arr->element_type = c.element_type;
             }
-        } else if (auto* obj = as_type<ObjectType>(resolved)) {
-            // Object iteration yields values (or [key, value] pairs)
-            // For now, element_type could be anything from the object
         }
+        // Object iteration yields values - element_type could be anything
     }
 
     void solve_constraint(const CallableConstraint& c) {
@@ -264,29 +279,32 @@ private:
     /**
      * Unify two types - make them equivalent
      * Returns true if successful
+     * Uses follow_chain to avoid copying structured types
      */
     bool unify(TypePtr t1, TypePtr t2) {
         if (!t1 || !t2) return true;  // Null types unify with anything
 
-        t1 = apply(t1);
-        t2 = apply(t2);
+        // Follow chains without copying to get the actual stored types
+        auto [resolved1, var1] = follow_chain(t1);
+        auto [resolved2, var2] = follow_chain(t2);
 
-        // Same type
-        if (t1->equals(t2)) return true;
+        // Same type (pointer equality for shared objects)
+        if (resolved1 == resolved2) return true;
+        if (resolved1->equals(resolved2)) return true;
 
-        // Type variable on left
-        if (auto* tv1 = as_type<TypeVariable>(t1)) {
-            return unify_var(tv1->name, t2);
+        // Type variable on left (still unbound)
+        if (auto* tv1 = as_type<TypeVariable>(resolved1)) {
+            return unify_var(tv1->name, resolved2);
         }
 
-        // Type variable on right
-        if (auto* tv2 = as_type<TypeVariable>(t2)) {
-            return unify_var(tv2->name, t1);
+        // Type variable on right (still unbound)
+        if (auto* tv2 = as_type<TypeVariable>(resolved2)) {
+            return unify_var(tv2->name, resolved1);
         }
 
-        // Both arrays
-        if (auto* arr1 = as_type<ArrayType>(t1)) {
-            if (auto* arr2 = as_type<ArrayType>(t2)) {
+        // Both arrays - unify element types
+        if (auto* arr1 = as_type<ArrayType>(resolved1)) {
+            if (auto* arr2 = as_type<ArrayType>(resolved2)) {
                 if (arr1->element_type && arr2->element_type) {
                     return unify(arr1->element_type, arr2->element_type);
                 }
@@ -300,16 +318,22 @@ private:
             }
         }
 
-        // Both objects - merge fields
-        if (auto* obj1 = as_type<ObjectType>(t1)) {
-            if (auto* obj2 = as_type<ObjectType>(t2)) {
-                return unify_objects(obj1, obj2);
+        // Both objects - merge fields into the first one
+        if (auto* obj1 = as_type<ObjectType>(resolved1)) {
+            if (auto* obj2 = as_type<ObjectType>(resolved2)) {
+                // Merge obj2's fields into obj1
+                if (!unify_objects(obj1, obj2)) return false;
+                // Point var2 to obj1 so all references see the merged object
+                if (!var2.empty()) {
+                    subst[var2] = resolved1;
+                }
+                return true;
             }
         }
 
         // Both unions - unify alternatives
-        if (auto* u1 = as_type<UnionType>(t1)) {
-            if (auto* u2 = as_type<UnionType>(t2)) {
+        if (auto* u1 = as_type<UnionType>(resolved1)) {
+            if (auto* u2 = as_type<UnionType>(resolved2)) {
                 // Merge alternatives
                 for (const auto& alt : u2->alternatives) {
                     u1->add_alternative(alt);
@@ -319,8 +343,8 @@ private:
         }
 
         // Both functions
-        if (auto* f1 = as_type<FunctionType>(t1)) {
-            if (auto* f2 = as_type<FunctionType>(t2)) {
+        if (auto* f1 = as_type<FunctionType>(resolved1)) {
+            if (auto* f2 = as_type<FunctionType>(resolved2)) {
                 if (f1->param_types.size() != f2->param_types.size()) {
                     return false;
                 }
@@ -334,8 +358,8 @@ private:
         }
 
         // Primitives must match exactly
-        if (auto* p1 = as_type<PrimitiveType>(t1)) {
-            if (auto* p2 = as_type<PrimitiveType>(t2)) {
+        if (auto* p1 = as_type<PrimitiveType>(resolved1)) {
+            if (auto* p2 = as_type<PrimitiveType>(resolved2)) {
                 return p1->prim_kind == p2->prim_kind;
             }
         }
