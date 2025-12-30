@@ -30,6 +30,10 @@ struct constraint_solver {
     // Maps type variable name -> set of literal values
     std::map<std::string, std::vector<TypePtr>> literal_values;
 
+    // Type alternatives collected from type guards (for building union types)
+    // Maps type variable name -> set of alternative types
+    std::map<std::string, std::vector<TypePtr>> type_alternatives;
+
     // Maximum number of literals before collapsing to base type (e.g., string)
     static constexpr size_t MAX_LITERALS = 10;
 
@@ -42,6 +46,7 @@ struct constraint_solver {
         output_coerced_types.clear();
         string_operand_types.clear();
         literal_values.clear();
+        type_alternatives.clear();
 
         for (const auto& constraint : constraints.constraints) {
             std::visit([this](const auto& c) { solve_constraint(c); }, constraint);
@@ -57,7 +62,46 @@ struct constraint_solver {
      * Finalization pass - resolve unbound type variables based on usage context
      */
     void finalize_types() {
-        // First, aggregate literals from all equivalent type variables
+        // First, handle type alternatives (from type guards like "x is string")
+        // If a type variable has alternatives AND is bound to something else, create a union
+        for (const auto& [var_name, alternatives] : type_alternatives) {
+            if (alternatives.empty()) continue;
+
+            // Find what this type variable is currently bound to
+            auto it = subst.find(var_name);
+            if (it != subst.end()) {
+                // Already bound to something - create union with alternatives
+                TypePtr current_type = it->second;
+
+                // Skip if already a union that includes the alternative
+                if (auto* existing_union = as_type<union_type>(current_type)) {
+                    for (const auto& alt : alternatives) {
+                        existing_union->add_alternative(alt);
+                    }
+                } else {
+                    // Create a new union with current type and all alternatives
+                    auto u = std::make_shared<union_type>();
+                    u->add_alternative(current_type);
+                    for (const auto& alt : alternatives) {
+                        u->add_alternative(alt);
+                    }
+                    subst[var_name] = u;
+                }
+            } else {
+                // Unbound - if only one alternative, use it; otherwise create union
+                if (alternatives.size() == 1) {
+                    subst[var_name] = alternatives[0];
+                } else {
+                    auto u = std::make_shared<union_type>();
+                    for (const auto& alt : alternatives) {
+                        u->add_alternative(alt);
+                    }
+                    subst[var_name] = u;
+                }
+            }
+        }
+
+        // Then, aggregate literals from all equivalent type variables
         // Type variables get unified during constraint solving, so literals may be
         // spread across multiple variable names that all resolve to the same root
         std::map<std::string, std::vector<TypePtr>> aggregated_literals;
@@ -408,6 +452,30 @@ private:
         }
         // If already bound to something concrete, check compatibility
         // (but be lenient - Jinja allows comparing any types)
+    }
+
+    void solve_constraint(const type_alternative_constraint& c) {
+        // Type alternative constraint: type could be the alternative
+        // This is used for type guards like "x is string" where x could be string or other types
+        auto resolved = apply(c.type);
+
+        if (auto* tv = as_type<type_variable>(resolved)) {
+            // Collect this alternative for the type variable
+            auto& alternatives = type_alternatives[tv->name];
+
+            // Only add if not already present (avoid duplicates)
+            bool found = false;
+            for (const auto& existing : alternatives) {
+                if (existing->equals(c.alternative)) {
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) {
+                alternatives.push_back(c.alternative);
+            }
+        }
+        // If already bound to something concrete, the alternative is already captured
     }
 
     // === Unification algorithm ===

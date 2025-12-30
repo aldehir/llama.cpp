@@ -125,6 +125,20 @@ struct literal_constraint {
     }
 };
 
+// Type alternative constraint: T could be type A (used for type guards like "is string")
+// Creates union types when a type could be multiple alternatives
+struct type_alternative_constraint {
+    TypePtr type;           // The type being constrained
+    TypePtr alternative;    // A possible type for T
+    std::string source;
+
+    std::string to_string() const {
+        return (type ? type->to_string() : "null") + " includes " +
+               (alternative ? alternative->to_string() : "null") +
+               " (from: " + source + ")";
+    }
+};
+
 // Union of all constraint types
 using constraint = std::variant<
     equality_constraint,
@@ -134,7 +148,8 @@ using constraint = std::variant<
     callable_constraint,
     output_coercion_constraint,
     string_operand_constraint,
-    literal_constraint
+    literal_constraint,
+    type_alternative_constraint
 >;
 
 /**
@@ -183,6 +198,10 @@ struct constraint_set {
 
     void add_literal(TypePtr type, TypePtr literal_value, const std::string& source) {
         constraints.push_back(literal_constraint{std::move(type), std::move(literal_value), source});
+    }
+
+    void add_type_alternative(TypePtr type, TypePtr alternative, const std::string& source) {
+        constraints.push_back(type_alternative_constraint{std::move(type), std::move(alternative), source});
     }
 
     void clear() {

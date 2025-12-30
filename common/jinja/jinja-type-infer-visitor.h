@@ -53,17 +53,28 @@ struct type_environment {
 /**
  * Type guard - captures type narrowing information from test expressions
  * Example: "x is string" produces type_guard{x, string}
+ * Example: "message.content is string" produces a field guard with object_type and field_name
  */
 struct type_guard {
-    std::string variable;  // The variable being narrowed
-    TypePtr narrowed_type; // The type it's narrowed to
-    bool negated = false;  // True if this is from "is not" or "not (x is ...)"
+    std::string variable;      // The variable being narrowed (for simple identifiers)
+    TypePtr object_type;       // The object type (for member expression guards)
+    std::string field_name;    // The field name (for member expression guards)
+    TypePtr narrowed_type;     // The type it's narrowed to
+    bool negated = false;      // True if this is from "is not" or "not (x is ...)"
 
     type_guard() = default;
+
+    // Constructor for simple variable guards
     type_guard(const std::string& var, TypePtr type, bool neg = false)
         : variable(var), narrowed_type(std::move(type)), negated(neg) {}
 
-    bool valid() const { return !variable.empty() && narrowed_type != nullptr; }
+    // Constructor for member expression (field) guards
+    type_guard(TypePtr obj_type, const std::string& field, TypePtr type, bool neg = false)
+        : object_type(std::move(obj_type)), field_name(field), narrowed_type(std::move(type)), negated(neg) {}
+
+    bool is_field_guard() const { return object_type != nullptr && !field_name.empty(); }
+    bool is_variable_guard() const { return !variable.empty(); }
+    bool valid() const { return (is_variable_guard() || is_field_guard()) && narrowed_type != nullptr; }
 };
 
 /**
@@ -121,12 +132,36 @@ struct type_inference_visitor : public ast_visitor<TypePtr> {
 
         // Handle "x is y" test expressions
         if (auto* test = dynamic_cast<test_expression*>(&test_node)) {
-            // Get the variable being tested
+            // Get the variable or member expression being tested
             std::string var_name;
+            TypePtr member_object_type;
+            std::string member_field_name;
+
             if (auto* id = dynamic_cast<identifier*>(test->operand.get())) {
                 var_name = id->val;
+            } else if (auto* member = dynamic_cast<member_expression*>(test->operand.get())) {
+                // Handle member expressions like message.content or message['content']
+                // First, visit the operand to get its type and register constraints
+                member_object_type = dispatch(*test->operand);
+
+                // Get the field name
+                if (!member->computed) {
+                    // dot access: obj.field
+                    if (auto* prop_id = dynamic_cast<identifier*>(member->property.get())) {
+                        member_field_name = prop_id->val;
+                    }
+                } else {
+                    // bracket access: obj['field']
+                    if (auto* str_lit = dynamic_cast<string_literal*>(member->property.get())) {
+                        member_field_name = str_lit->val;
+                    }
+                }
+
+                if (member_field_name.empty()) {
+                    return type_guard{}; // Dynamic access, can't narrow
+                }
             } else {
-                return type_guard{}; // Can only narrow simple identifiers for now
+                return type_guard{}; // Can only narrow identifiers and member expressions
             }
 
             // Get the test name
@@ -173,7 +208,12 @@ struct type_inference_visitor : public ast_visitor<TypePtr> {
             }
 
             if (narrowed_type) {
-                return type_guard(var_name, narrowed_type, negated);
+                // Return appropriate guard type
+                if (!var_name.empty()) {
+                    return type_guard(var_name, narrowed_type, negated);
+                } else if (!member_field_name.empty()) {
+                    return type_guard(member_object_type, member_field_name, narrowed_type, negated);
+                }
             }
         }
 
@@ -205,14 +245,22 @@ struct type_inference_visitor : public ast_visitor<TypePtr> {
             return;
         }
 
-        // Bind the variable to its narrowed type in current scope
-        env->bind(guard.variable, guard.narrowed_type);
+        if (guard.is_variable_guard()) {
+            // Simple variable guard: bind the variable to its narrowed type in current scope
+            env->bind(guard.variable, guard.narrowed_type);
 
-        // Also add an equality constraint to help the solver
-        auto existing = root_env->lookup(guard.variable);
-        if (existing) {
-            constraints.add_equality(existing, guard.narrowed_type,
-                "type guard narrowing " + guard.variable);
+            // Also add an equality constraint to help the solver
+            auto existing = root_env->lookup(guard.variable);
+            if (existing) {
+                constraints.add_equality(existing, guard.narrowed_type,
+                    "type guard narrowing " + guard.variable);
+            }
+        } else if (guard.is_field_guard()) {
+            // Member expression guard: add constraint that field type includes narrowed type
+            // guard.object_type is the type of the field (from visiting the member expression)
+            // This allows the field to have multiple types (e.g., string | array<...>)
+            constraints.add_type_alternative(guard.object_type, guard.narrowed_type,
+                "type guard narrowing field " + guard.field_name);
         }
     }
 
