@@ -742,12 +742,26 @@ struct TypeInferenceVisitor : public ASTVisitor<TypePtr> {
             return make_string();
         }
 
-        // Arithmetic operators: +, -, *, /, %, //
-        // + can also be string concatenation or array concatenation
-        if (op == "+" || op == "-" || op == "*" || op == "/" ||
-            op == "%" || op == "//") {
-            // Could be numeric or string - return fresh type variable
+        // The + operator can be string concat, array concat, or numeric addition
+        if (op == "+") {
+            // If either operand is a string literal, it's string concatenation
+            if (is_stmt<string_literal>(node.left)) {
+                constraints.add_equality(right_type, make_string(),
+                    "string concat (+ with string literal) at " + source_loc(node));
+                return make_string();
+            } else if (is_stmt<string_literal>(node.right)) {
+                constraints.add_equality(left_type, make_string(),
+                    "string concat (+ with string literal) at " + source_loc(node));
+                return make_string();
+            }
+            // Otherwise could be numeric or array concat - return fresh type variable
             return fresh();
+        }
+
+        // Arithmetic operators: -, *, /, %, // are numeric only
+        if (op == "-" || op == "*" || op == "/" || op == "%" || op == "//") {
+            // These are numeric operations
+            return fresh();  // Could be int or float
         }
 
         return fresh();

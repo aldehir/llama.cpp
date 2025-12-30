@@ -357,6 +357,29 @@ private:
             }
         }
 
+        // Union on left, non-union on right: all alternatives must unify with right
+        // e.g., (string | 'T99) = string means string='string' AND 'T99=string
+        if (auto* u1 = as_type<UnionType>(resolved1)) {
+            bool all_ok = true;
+            for (const auto& alt : u1->alternatives) {
+                if (!unify(alt, resolved2)) {
+                    all_ok = false;
+                }
+            }
+            return all_ok;
+        }
+
+        // Union on right, non-union on left: same logic, reversed
+        if (auto* u2 = as_type<UnionType>(resolved2)) {
+            bool all_ok = true;
+            for (const auto& alt : u2->alternatives) {
+                if (!unify(resolved1, alt)) {
+                    all_ok = false;
+                }
+            }
+            return all_ok;
+        }
+
         // Both functions
         if (auto* f1 = as_type<FunctionType>(resolved1)) {
             if (auto* f2 = as_type<FunctionType>(resolved2)) {
