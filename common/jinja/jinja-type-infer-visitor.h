@@ -695,22 +695,30 @@ struct TypeInferenceVisitor : public ASTVisitor<TypePtr> {
         if (op == "==" || op == "!=" || op == "<" || op == ">" ||
             op == "<=" || op == ">=" || op == "in" || op == "not in") {
 
-            // If comparing with a string literal, the other operand is likely a string
-            if (is_stmt<string_literal>(node.left)) {
-                constraints.add_equality(right_type, make_string(),
-                    "comparison with string literal at " + source_loc(node));
-            } else if (is_stmt<string_literal>(node.right)) {
-                constraints.add_equality(left_type, make_string(),
-                    "comparison with string literal at " + source_loc(node));
-            }
+            // For 'in'/'not in', the container can be string, array, or object
+            // so we cannot infer container type from element type
+            // Example: "abc" in x could mean x is string ("abcdef") or object ({"abc": 1})
+            bool is_containment_check = (op == "in" || op == "not in");
 
-            // If comparing with an integer literal, the other operand is likely int
-            if (is_stmt<integer_literal>(node.left)) {
-                constraints.add_equality(right_type, make_int(),
-                    "comparison with int literal at " + source_loc(node));
-            } else if (is_stmt<integer_literal>(node.right)) {
-                constraints.add_equality(left_type, make_int(),
-                    "comparison with int literal at " + source_loc(node));
+            // If comparing with a string literal, the other operand is likely a string
+            // (only for equality/ordering comparisons, not containment checks)
+            if (!is_containment_check) {
+                if (is_stmt<string_literal>(node.left)) {
+                    constraints.add_equality(right_type, make_string(),
+                        "comparison with string literal at " + source_loc(node));
+                } else if (is_stmt<string_literal>(node.right)) {
+                    constraints.add_equality(left_type, make_string(),
+                        "comparison with string literal at " + source_loc(node));
+                }
+
+                // If comparing with an integer literal, the other operand is likely int
+                if (is_stmt<integer_literal>(node.left)) {
+                    constraints.add_equality(right_type, make_int(),
+                        "comparison with int literal at " + source_loc(node));
+                } else if (is_stmt<integer_literal>(node.right)) {
+                    constraints.add_equality(left_type, make_int(),
+                        "comparison with int literal at " + source_loc(node));
+                }
             }
 
             return make_bool();
