@@ -213,13 +213,25 @@ struct type_inference_visitor : public ast_visitor<TypePtr> {
             env->bind(guard.variable, guard.narrowed_type);
             auto existing = root_env->lookup(guard.variable);
             if (existing) {
-                constraints.add_equality(existing, guard.narrowed_type,
+                constraints.add_type_alternative(existing, guard.narrowed_type,
                     "type guard narrowing " + guard.variable);
             }
         } else if (guard.is_field_guard()) {
             constraints.add_type_alternative(guard.object_type, guard.narrowed_type,
                 "type guard narrowing field " + guard.field_name);
         }
+    }
+
+    // Create an inverted guard (flip the negated flag)
+    type_guard invert_guard(const type_guard& guard) const {
+        if (!guard.valid()) return type_guard{};
+
+        if (guard.is_variable_guard()) {
+            return type_guard(guard.variable, guard.narrowed_type, !guard.negated);
+        } else if (guard.is_field_guard()) {
+            return type_guard(guard.object_type, guard.field_name, guard.narrowed_type, !guard.negated);
+        }
+        return type_guard{};
     }
 
     void push_scope() {
@@ -255,6 +267,7 @@ struct type_inference_visitor : public ast_visitor<TypePtr> {
         auto old_ctx = ctx;
         ctx = ctx.enter_conditional();
 
+        // TRUE branch: apply guard if not negated
         push_scope();
         if (guard.valid() && !guard.negated) {
             apply_type_guard(guard);
@@ -265,7 +278,13 @@ struct type_inference_visitor : public ast_visitor<TypePtr> {
         auto true_branch_bindings = env->local_bindings();
         pop_scope();
 
+        // FALSE/ELSE branch: apply inverted guard
+        // e.g., "if x is not string" -> in else, x IS string
         push_scope();
+        if (guard.valid()) {
+            auto inverted = invert_guard(guard);
+            apply_type_guard(inverted);  // apply_type_guard checks negated internally
+        }
         for (auto& stmt : node.alternate) {
             visit_body_statement(*stmt);
         }
