@@ -361,7 +361,8 @@ private:
     }
 
     void solve_constraint(const type_alternative_constraint& c) {
-        auto resolved = apply(c.type);
+        auto [resolved, var_name] = follow_chain(c.type);
+
         if (auto* tv = as_type<type_variable>(resolved)) {
             auto& alternatives = type_alternatives[tv->name];
             bool found = false;
@@ -369,6 +370,19 @@ private:
                 if (existing->equals(c.alternative)) { found = true; break; }
             }
             if (!found) alternatives.push_back(c.alternative);
+        } else if (!var_name.empty()) {
+            if (auto* existing_union = as_type<union_type>(resolved)) {
+                bool found = false;
+                for (const auto& alt : existing_union->alternatives) {
+                    if (alt->equals(c.alternative)) { found = true; break; }
+                }
+                if (!found) existing_union->add_alternative(c.alternative);
+            } else {
+                auto u = std::make_shared<union_type>();
+                u->add_alternative(resolved);
+                u->add_alternative(c.alternative);
+                subst[var_name] = u;
+            }
         }
     }
 
@@ -394,6 +408,9 @@ private:
             return unify_var(tv1->name, resolved2);
         }
         if (auto* tv2 = as_type<type_variable>(resolved2)) {
+            if (!var1.empty() && as_type<type_variable>(t1)) {
+                return unify_var(tv2->name, t1);
+            }
             return unify_var(tv2->name, resolved1);
         }
 
@@ -421,22 +438,25 @@ private:
                 for (const auto& alt : u2->alternatives) u1->add_alternative(alt);
                 return true;
             }
-        }
-
-        if (auto* u1 = as_type<union_type>(resolved1)) {
-            bool all_ok = true;
-            for (const auto& alt : u1->alternatives) {
-                if (!unify(alt, resolved2)) all_ok = false;
+            if (!var2.empty()) {
+                subst[var2] = resolved1;
+                return true;
             }
-            return all_ok;
+            for (const auto& alt : u1->alternatives) {
+                if (alt->equals(resolved2)) return true;
+            }
+            return false;
         }
 
         if (auto* u2 = as_type<union_type>(resolved2)) {
-            bool all_ok = true;
-            for (const auto& alt : u2->alternatives) {
-                if (!unify(resolved1, alt)) all_ok = false;
+            if (!var1.empty()) {
+                subst[var1] = resolved2;
+                return true;
             }
-            return all_ok;
+            for (const auto& alt : u2->alternatives) {
+                if (alt->equals(resolved1)) return true;
+            }
+            return false;
         }
 
         if (auto* f1 = as_type<function_type>(resolved1)) {

@@ -200,10 +200,10 @@ struct type_inference_visitor : public ast_visitor<TypePtr> {
         if (!guard.valid() || guard.negated) return;
 
         if (guard.is_variable_guard()) {
+            auto existing = env->lookup(guard.variable);
             env->bind(guard.variable, guard.narrowed_type);
-            auto existing = root_env->lookup(guard.variable);
             if (existing) {
-                constraints.add_equality(existing, guard.narrowed_type,
+                constraints.add_type_alternative(existing, guard.narrowed_type,
                     "type guard narrowing " + guard.variable);
             }
         } else if (guard.is_field_guard()) {
