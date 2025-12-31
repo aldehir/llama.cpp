@@ -10,8 +10,6 @@ namespace jinja {
 struct value_t;
 using value = std::shared_ptr<value_t>;
 
-// this is used as a hint for chat parsing
-// it is not a 1-to-1 mapping to value_t derived types
 enum class inferred_type {
     numeric, // int, float
     string,

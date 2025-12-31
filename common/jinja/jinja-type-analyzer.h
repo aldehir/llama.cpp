@@ -18,13 +18,8 @@ namespace types {
  * Result of type inference analysis
  */
 struct inference_result {
-    // Inferred types for top-level variables
     std::map<std::string, TypePtr> variable_types;
-
-    // All generated constraints (for debugging)
     constraint_set constraints;
-
-    // Any errors encountered
     std::vector<std::string> errors;
 
     bool success() const { return errors.empty(); }
@@ -91,33 +86,22 @@ class type_analyzer {
 public:
     type_analyzer() = default;
 
-    /**
-     * Analyze a parsed Jinja program and infer types
-     */
     inference_result analyze(program& ast) {
         inference_result result;
         type_var_generator::reset();
 
-        // Create root environment
         type_environment root_env;
-
-        // Add built-in globals
         setup_builtins(root_env);
 
-        // Generate constraints
         type_inference_visitor visitor(result.constraints, &root_env);
         visitor.dispatch(ast);
 
-        // Solve constraints
         constraint_solver solver;
         if (!solver.solve(result.constraints)) {
             result.errors = solver.errors;
         }
 
-        // Extract final types (resolve all type variables)
         auto resolved = solver.get_resolved_types(root_env.local_bindings());
-
-        // Filter to only show "interesting" variables (not built-ins)
         filter_builtins(resolved);
 
         result.variable_types = std::move(resolved);
@@ -127,12 +111,9 @@ public:
 
 private:
     void setup_builtins(type_environment& env) {
-        // Standard Jinja built-ins
         env.bind("true", make_bool());
         env.bind("false", make_bool());
         env.bind("none", make_null());
-
-        // Built-in functions (these return specific types)
         env.bind("range", make_function({make_int()}, make_array(make_int())));
         env.bind("dict", make_function({}, make_object()));
         env.bind("cycler", make_function({}, make_object()));

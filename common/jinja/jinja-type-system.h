@@ -9,11 +9,9 @@
 namespace jinja {
 namespace types {
 
-// Forward declarations
 struct Type;
 using TypePtr = std::shared_ptr<Type>;
 
-// Type variable name generator
 struct type_var_generator {
     static inline int counter = 0;
     static std::string fresh() { return "T" + std::to_string(++counter); }
@@ -30,12 +28,10 @@ struct Type {
     virtual TypePtr clone() const = 0;
     virtual std::string kind() const = 0;
 
-    // Pretty printing with indentation (default delegates to to_string)
     virtual std::string to_string_pretty(int indent = 0, int indent_size = 2) const {
         return to_string();
     }
 
-    // Check if this type is "simple" enough to stay inline
     virtual bool is_simple() const { return true; }
 
 protected:
@@ -93,7 +89,6 @@ struct array_type : public Type {
         if (!element_type || element_type->is_simple()) {
             return to_string();
         }
-        // Element is complex - expand it
         return "array<\n" +
                make_indent(indent + 1, indent_size) +
                element_type->to_string_pretty(indent + 1, indent_size) +
@@ -127,7 +122,7 @@ struct object_type : public Type {
     struct Field {
         std::string name;
         TypePtr type;
-        bool optional;  // true if field might not exist (accessed in conditional)
+        bool optional;
 
         Field() : optional(false) {}
         Field(const std::string& n, TypePtr t, bool opt = false)
@@ -135,7 +130,7 @@ struct object_type : public Type {
     };
 
     std::map<std::string, Field> fields;
-    bool extensible;  // true if object may have additional unknown fields
+    bool extensible;
 
     explicit object_type(bool ext = true) : extensible(ext) {}
 
@@ -196,7 +191,6 @@ struct object_type : public Type {
     }
 
     bool is_simple() const override {
-        // Simple if 3 or fewer fields and all field types are simple
         if (fields.size() > 3) return false;
         for (const auto& [name, field] : fields) {
             if (field.type && !field.type->is_simple()) return false;
@@ -263,7 +257,6 @@ struct union_type : public Type {
         if (is_simple()) {
             return to_string();
         }
-        // Complex union - put each alternative on its own line
         std::string result;
         for (size_t i = 0; i < alternatives.size(); ++i) {
             if (i > 0) {
@@ -275,7 +268,6 @@ struct union_type : public Type {
     }
 
     bool is_simple() const override {
-        // Simple if all alternatives are literals or primitives
         for (const auto& alt : alternatives) {
             if (!alt->is_simple()) return false;
         }
@@ -286,7 +278,6 @@ struct union_type : public Type {
         auto* u = dynamic_cast<union_type*>(other.get());
         if (!u) return false;
         if (alternatives.size() != u->alternatives.size()) return false;
-        // Order-independent comparison
         for (const auto& alt : alternatives) {
             bool found = false;
             for (const auto& ualt : u->alternatives) {
@@ -314,7 +305,7 @@ struct union_type : public Type {
  */
 struct type_variable : public Type {
     std::string name;
-    TypePtr bound;  // If solved, this holds the concrete type
+    TypePtr bound;
 
     explicit type_variable(const std::string& n) : name(n), bound(nullptr) {}
 
@@ -322,7 +313,6 @@ struct type_variable : public Type {
 
     TypePtr resolve() const {
         if (!bound) return nullptr;
-        // Follow chain of type variables
         if (auto* tv = dynamic_cast<type_variable*>(bound.get())) {
             return tv->resolve();
         }
@@ -357,8 +347,8 @@ struct type_variable : public Type {
 struct literal_type : public Type {
     enum Kind { String, Int };
     Kind lit_kind;
-    std::string string_val;  // For string literals
-    int64_t int_val;         // For int literals
+    std::string string_val;
+    int64_t int_val;
 
     explicit literal_type(const std::string& val)
         : lit_kind(String), string_val(val), int_val(0) {}
@@ -389,7 +379,6 @@ struct literal_type : public Type {
 
     std::string kind() const override { return "literal"; }
 
-    // Get base type (string or int)
     TypePtr base_type() const {
         if (lit_kind == String) {
             return std::make_shared<primitive_type>(primitive_type::String);
@@ -423,7 +412,6 @@ struct function_type : public Type {
         if (is_simple()) {
             return to_string();
         }
-        // Complex function - format params and return type
         std::string result = "(";
         bool has_complex_param = false;
         for (const auto& p : param_types) {
@@ -514,11 +502,10 @@ struct any_type : public Type {
 
 /**
  * Unknown type: represents an unresolved type variable
- * Used when type inference couldn't determine the type
- * This indicates a gap in inference, not an explicit "any"
+ * Indicates a gap in inference, not an explicit "any"
  */
 struct unknown_type : public Type {
-    std::string original_typevar;  // Optional: the original type variable name
+    std::string original_typevar;
 
     unknown_type() = default;
     explicit unknown_type(const std::string& tv) : original_typevar(tv) {}
@@ -596,7 +583,6 @@ inline TypePtr make_unknown(const std::string& original_typevar = "") {
     return std::make_shared<unknown_type>(original_typevar);
 }
 
-// Helper for optional types (T | null)
 inline TypePtr make_optional(TypePtr type) {
     auto u = std::make_shared<union_type>();
     u->add_alternative(std::move(type));

@@ -12,11 +12,10 @@ namespace types {
  * Type constraints generated during AST traversal
  */
 
-// Equality constraint: T1 = T2
 struct equality_constraint {
     TypePtr left;
     TypePtr right;
-    std::string source;  // Debug info: where this constraint came from
+    std::string source;
 
     std::string to_string() const {
         return (left ? left->to_string() : "null") + " = " +
@@ -25,12 +24,11 @@ struct equality_constraint {
     }
 };
 
-// Field access constraint: T1 has field 'name' of type T2
 struct has_field_constraint {
     TypePtr object_type;
     std::string field_name;
     TypePtr field_type;
-    bool optional;  // true if accessed in conditional context
+    bool optional;
     std::string source;
 
     std::string to_string() const {
@@ -41,7 +39,6 @@ struct has_field_constraint {
     }
 };
 
-// Array element constraint: T1 is array with element type T2
 struct array_element_constraint {
     TypePtr array_type;
     TypePtr element_type;
@@ -54,10 +51,9 @@ struct array_element_constraint {
     }
 };
 
-// Iterable constraint: T can be iterated (array or object)
 struct iterable_constraint {
     TypePtr type;
-    TypePtr element_type;  // Type of iteration variable
+    TypePtr element_type;
     std::string source;
 
     std::string to_string() const {
@@ -67,7 +63,6 @@ struct iterable_constraint {
     }
 };
 
-// Callable constraint: T is callable with return type R
 struct callable_constraint {
     TypePtr callee_type;
     std::vector<TypePtr> arg_types;
@@ -86,9 +81,6 @@ struct callable_constraint {
     }
 };
 
-// Output coercion constraint: T is used in output context (will be coerced to string)
-// This is a "soft" constraint - it suggests the type should be string-like
-// but doesn't force it (since any type can be stringified in Jinja)
 struct output_coercion_constraint {
     TypePtr type;
     std::string source;
@@ -99,8 +91,6 @@ struct output_coercion_constraint {
     }
 };
 
-// String operand constraint: T is used in string context (e.g., ~ operator)
-// This is stronger than output coercion - the value is definitely a string
 struct string_operand_constraint {
     TypePtr type;
     std::string source;
@@ -111,11 +101,9 @@ struct string_operand_constraint {
     }
 };
 
-// Literal constraint: T is compared to a literal value
-// Used to infer literal types like literal<"assistant", "user", ...>
 struct literal_constraint {
-    TypePtr type;           // The type being constrained
-    TypePtr literal_value;  // A literal_type with the specific value
+    TypePtr type;
+    TypePtr literal_value;
     std::string source;
 
     std::string to_string() const {
@@ -125,11 +113,9 @@ struct literal_constraint {
     }
 };
 
-// Type alternative constraint: T could be type A (used for type guards like "is string")
-// Creates union types when a type could be multiple alternatives
 struct type_alternative_constraint {
-    TypePtr type;           // The type being constrained
-    TypePtr alternative;    // A possible type for T
+    TypePtr type;
+    TypePtr alternative;
     std::string source;
 
     std::string to_string() const {
@@ -139,7 +125,6 @@ struct type_alternative_constraint {
     }
 };
 
-// Union of all constraint types
 using constraint = std::variant<
     equality_constraint,
     has_field_constraint,

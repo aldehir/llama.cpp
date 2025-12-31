@@ -51,24 +51,20 @@ struct type_environment {
 };
 
 /**
- * Type guard - captures type narrowing information from test expressions
- * Example: "x is string" produces type_guard{x, string}
- * Example: "message.content is string" produces a field guard with object_type and field_name
+ * Type guard - captures type narrowing from test expressions like "x is string"
  */
 struct type_guard {
-    std::string variable;      // The variable being narrowed (for simple identifiers)
-    TypePtr object_type;       // The object type (for member expression guards)
-    std::string field_name;    // The field name (for member expression guards)
-    TypePtr narrowed_type;     // The type it's narrowed to
-    bool negated = false;      // True if this is from "is not" or "not (x is ...)"
+    std::string variable;
+    TypePtr object_type;
+    std::string field_name;
+    TypePtr narrowed_type;
+    bool negated = false;
 
     type_guard() = default;
 
-    // Constructor for simple variable guards
     type_guard(const std::string& var, TypePtr type, bool neg = false)
         : variable(var), narrowed_type(std::move(type)), negated(neg) {}
 
-    // Constructor for member expression (field) guards
     type_guard(TypePtr obj_type, const std::string& field, TypePtr type, bool neg = false)
         : object_type(std::move(obj_type)), field_name(field), narrowed_type(std::move(type)), negated(neg) {}
 
@@ -77,14 +73,11 @@ struct type_guard {
     bool valid() const { return (is_variable_guard() || is_field_guard()) && narrowed_type != nullptr; }
 };
 
-/**
- * Context tracking for conditional access analysis
- */
 struct inference_context {
-    bool in_conditional = false;  // Inside if/ternary
-    bool in_loop = false;         // Inside for loop
-    bool in_output = false;       // Inside output expression {{ }}
-    int depth = 0;                // Nesting depth
+    bool in_conditional = false;
+    bool in_loop = false;
+    bool in_output = false;
+    int depth = 0;
 
     inference_context enter_conditional() const {
         return inference_context{true, in_loop, in_output, depth + 1};
@@ -107,10 +100,7 @@ struct type_inference_visitor : public ast_visitor<TypePtr> {
     type_environment* env;
     inference_context ctx;
 
-    // Stack of environments for scoping
     std::vector<std::unique_ptr<type_environment>> env_stack;
-
-    // Root environment (kept separate for final result extraction)
     type_environment* root_env;
 
     type_inference_visitor(constraint_set& cs, type_environment* root)
@@ -222,7 +212,6 @@ struct type_inference_visitor : public ast_visitor<TypePtr> {
         }
     }
 
-    // Create an inverted guard (flip the negated flag)
     type_guard invert_guard(const type_guard& guard) const {
         if (!guard.valid()) return type_guard{};
 
@@ -267,7 +256,6 @@ struct type_inference_visitor : public ast_visitor<TypePtr> {
         auto old_ctx = ctx;
         ctx = ctx.enter_conditional();
 
-        // TRUE branch: apply guard if not negated
         push_scope();
         if (guard.valid() && !guard.negated) {
             apply_type_guard(guard);
@@ -278,12 +266,10 @@ struct type_inference_visitor : public ast_visitor<TypePtr> {
         auto true_branch_bindings = env->local_bindings();
         pop_scope();
 
-        // FALSE/ELSE branch: apply inverted guard
-        // e.g., "if x is not string" -> in else, x IS string
         push_scope();
         if (guard.valid()) {
             auto inverted = invert_guard(guard);
-            apply_type_guard(inverted);  // apply_type_guard checks negated internally
+            apply_type_guard(inverted);
         }
         for (auto& stmt : node.alternate) {
             visit_body_statement(*stmt);
@@ -312,13 +298,11 @@ struct type_inference_visitor : public ast_visitor<TypePtr> {
             TypePtr true_type = (true_it != true_bindings.end()) ? true_it->second : nullptr;
             TypePtr false_type = (false_it != false_bindings.end()) ? false_it->second : nullptr;
 
-            // Get original type from parent scope (if exists)
             TypePtr original_type = env->lookup(var_name);
 
             TypePtr merged_type;
 
             if (true_type && false_type) {
-                // Set in both branches - union of both
                 if (true_type == false_type || (true_type && false_type && true_type->equals(false_type))) {
                     merged_type = true_type;
                 } else {
@@ -328,7 +312,6 @@ struct type_inference_visitor : public ast_visitor<TypePtr> {
                     merged_type = u;
                 }
             } else if (true_type) {
-                // Set only in true branch - union with original (or just true_type if no original)
                 if (original_type && original_type != true_type && !original_type->equals(true_type)) {
                     auto u = std::make_shared<union_type>();
                     u->add_alternative(true_type);
@@ -338,7 +321,6 @@ struct type_inference_visitor : public ast_visitor<TypePtr> {
                     merged_type = true_type;
                 }
             } else if (false_type) {
-                // Set only in false branch - union with original
                 if (original_type && original_type != false_type && !original_type->equals(false_type)) {
                     auto u = std::make_shared<union_type>();
                     u->add_alternative(false_type);
@@ -600,17 +582,14 @@ struct type_inference_visitor : public ast_visitor<TypePtr> {
                                         string_methods_array_string.count(method_name);
 
                 if (is_string_method) {
-                    // Visit the object, but constrain it to be a string
                     auto object_type = dispatch(*member->object);
                     constraints.add_equality(object_type, make_string(),
                         "string method ." + method_name + "() at " + source_loc(node));
 
-                    // Visit arguments (for their side effects on type inference)
                     for (auto& arg : node.args) {
                         dispatch(*arg);
                     }
 
-                    // Return the appropriate type based on the method
                     if (string_methods_bool.count(method_name)) {
                         return make_bool();
                     } else if (string_methods_string.count(method_name)) {
@@ -624,7 +603,6 @@ struct type_inference_visitor : public ast_visitor<TypePtr> {
             }
         }
 
-        // Default handling for non-string-method calls
         auto callee_type = dispatch(*node.callee);
         std::vector<TypePtr> arg_types;
 
@@ -662,7 +640,6 @@ struct type_inference_visitor : public ast_visitor<TypePtr> {
     }
 
     TypePtr visit(tuple_literal& node) override {
-        // Treat same as array for type inference
         return visit(static_cast<array_literal&>(node));
     }
 
@@ -670,7 +647,6 @@ struct type_inference_visitor : public ast_visitor<TypePtr> {
         auto obj = std::make_shared<object_type>(false);
         for (auto& [key_stmt, val_stmt] : node.val) {
             auto val_type = dispatch(*val_stmt);
-            // Key could be string literal or identifier
             if (is_stmt<string_literal>(key_stmt)) {
                 auto* str = cast_stmt<string_literal>(key_stmt);
                 obj->add_field(str->val, val_type);

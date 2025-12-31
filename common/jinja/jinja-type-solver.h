@@ -138,8 +138,6 @@ struct constraint_solver {
         if (auto* tv = as_type<type_variable>(type)) {
             auto it = subst.find(tv->name);
             if (it != subst.end()) return apply_impl(it->second, visited);
-            // Leave unresolved type variables as-is for now
-            // (unknown conversion happens later if needed)
             return type;
         }
 
@@ -181,7 +179,6 @@ struct constraint_solver {
         return result;
     }
 
-    // Convert remaining unresolved type variables to 'unknown' type
     TypePtr convert_typevars_to_unknown(const TypePtr& type) const {
         if (!type) return nullptr;
 
@@ -384,8 +381,6 @@ private:
         if (resolved1 == resolved2) return true;
         if (resolved1->equals(resolved2)) return true;
 
-        // any_type absorbs any other type
-        // If unifying with 'any', the type variable becomes 'any'
         if (is_type<any_type>(resolved1)) {
             if (!var2.empty()) subst[var2] = resolved1;
             return true;
@@ -519,7 +514,7 @@ private:
             return occurs_in(var, func->return_type);
         }
 
-        return false;  // Primitives don't contain type variables
+        return false;
     }
 };
 
