@@ -643,12 +643,247 @@ int main(int argc, char* argv[]) {
             assert(result.has_variable("messages"));
             assert(result.has_variable("tools"));
             assert(result.has_variable("add_generation_prompt"));
+            assert(result.has_variable("builtin_tools"));
+
+            auto msg_type = result.get_type("messages");
+            assert(msg_type != nullptr);
+            assert(result.get_type("tools") != nullptr);
+
+            if (auto* arr = as_type<array_type>(msg_type)) {
+                if (auto* elem = as_type<object_type>(arr->element_type)) {
+                    assert(elem->get_field("role") != nullptr);
+                    assert(elem->get_field("content") != nullptr);
+                }
+            }
+
+            print_pass(result);
+        }
+    }
+
+    // Test 25: Qwen-Qwen3-0.6B template
+    {
+        print_header(25, "Qwen-Qwen3-0.6B template");
+        std::string template_source = read_file("models/templates/Qwen-Qwen3-0.6B.jinja");
+        if (template_source.empty()) {
+            print_skip("Could not read template file");
+        } else {
+            auto result = infer_types_from_source(template_source);
+            print_schema(result);
+            if (g_ctx.verbose) print_constraints(result);
+
+            if (!result.success()) {
+                std::cout << color::DIM() << "  Note: Constraint errors:" << color::RESET() << "\n";
+                for (const auto& err : result.errors) {
+                    std::cout << color::DIM() << "    - " << err << color::RESET() << "\n";
+                }
+            }
+
+            assert(result.has_variable("messages"));
+            assert(result.has_variable("tools"));
+            assert(result.has_variable("add_generation_prompt"));
+            assert(result.has_variable("enable_thinking"));
 
             auto msg_type = result.get_type("messages");
             assert(msg_type != nullptr);
 
+            if (auto* arr = as_type<array_type>(msg_type)) {
+                if (auto* elem = as_type<object_type>(arr->element_type)) {
+                    auto* role_field = elem->get_field("role");
+                    assert(role_field != nullptr);
+                    if (role_field->type) {
+                        std::string role_str = role_field->type->to_string();
+                        assert(role_str.find("user") != std::string::npos ||
+                               role_str.find("assistant") != std::string::npos ||
+                               role_str.find("system") != std::string::npos ||
+                               role_str == "string");
+                    }
+
+                    assert(elem->get_field("content") != nullptr);
+                    assert(elem->get_field("reasoning_content") != nullptr);
+
+                    auto* tool_calls_field = elem->get_field("tool_calls");
+                    assert(tool_calls_field != nullptr);
+
+                    if (auto* tc_arr = as_type<array_type>(tool_calls_field->type)) {
+                        if (auto* tc_elem = as_type<object_type>(tc_arr->element_type)) {
+                            assert(tc_elem->get_field("function") != nullptr ||
+                                   tc_elem->get_field("name") != nullptr);
+                        }
+                    }
+                }
+            }
+
+            assert(result.get_type("tools") != nullptr);
+            print_pass(result);
+        }
+    }
+
+    // Test 26: Mistral-Ministral-3-14B-Reasoning template
+    {
+        print_header(26, "Mistral-Ministral-3-14B-Reasoning template");
+        std::string template_source = read_file("models/templates/mistralai-Ministral-3-14B-Reasoning-2512.jinja");
+        if (template_source.empty()) {
+            print_skip("Could not read template file");
+        } else {
+            auto result = infer_types_from_source(template_source);
+            print_schema(result);
+            if (g_ctx.verbose) print_constraints(result);
+
+            if (!result.success()) {
+                std::cout << color::DIM() << "  Note: Constraint errors:" << color::RESET() << "\n";
+                for (const auto& err : result.errors) {
+                    std::cout << color::DIM() << "    - " << err << color::RESET() << "\n";
+                }
+            }
+
+            assert(result.has_variable("messages"));
+            assert(result.has_variable("tools"));
+            assert(result.has_variable("bos_token"));
+            assert(result.has_variable("eos_token"));
+
+            auto msg_type = result.get_type("messages");
+            assert(msg_type != nullptr);
+
+            if (auto* arr = as_type<array_type>(msg_type)) {
+                if (auto* elem = as_type<object_type>(arr->element_type)) {
+                    assert(elem->get_field("role") != nullptr);
+                    assert(elem->get_field("content") != nullptr);
+                    assert(elem->get_field("tool_calls") != nullptr);
+
+                    auto* content_field = elem->get_field("content");
+                    if (content_field->type) {
+                        std::string content_str = content_field->type->to_string();
+                        assert(content_str.find("string") != std::string::npos ||
+                               content_str.find("array") != std::string::npos);
+                    }
+                }
+            }
+
+            print_pass(result);
+        }
+    }
+
+    // Test 27: NVIDIA-Nemotron-3-Nano template
+    {
+        print_header(27, "NVIDIA-Nemotron-3-Nano template");
+        std::string template_source = read_file("models/templates/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16.jinja");
+        if (template_source.empty()) {
+            print_skip("Could not read template file");
+        } else {
+            auto result = infer_types_from_source(template_source);
+            print_schema(result);
+            if (g_ctx.verbose) print_constraints(result);
+
+            if (!result.success()) {
+                std::cout << color::DIM() << "  Note: Constraint errors:" << color::RESET() << "\n";
+                for (const auto& err : result.errors) {
+                    std::cout << color::DIM() << "    - " << err << color::RESET() << "\n";
+                }
+            }
+
+            assert(result.has_variable("messages"));
+            assert(result.has_variable("tools"));
+            assert(result.has_variable("add_generation_prompt"));
+            assert(result.has_variable("enable_thinking"));
+            assert(result.has_variable("truncate_history_thinking"));
+
+            auto msg_type = result.get_type("messages");
+            assert(msg_type != nullptr);
+
+            if (auto* arr = as_type<array_type>(msg_type)) {
+                if (auto* elem = as_type<object_type>(arr->element_type)) {
+                    auto* role_field = elem->get_field("role");
+                    assert(role_field != nullptr);
+                    if (role_field->type) {
+                        std::string role_str = role_field->type->to_string();
+                        assert(role_str.find("user") != std::string::npos ||
+                               role_str.find("assistant") != std::string::npos ||
+                               role_str.find("system") != std::string::npos ||
+                               role_str.find("tool") != std::string::npos ||
+                               role_str == "string");
+                    }
+
+                    assert(elem->get_field("content") != nullptr);
+                    assert(elem->get_field("reasoning_content") != nullptr);
+                    assert(elem->get_field("tool_calls") != nullptr);
+                }
+            }
+
             auto tools_type = result.get_type("tools");
             assert(tools_type != nullptr);
+            if (auto* arr = as_type<array_type>(tools_type)) {
+                if (auto* elem = as_type<object_type>(arr->element_type)) {
+                    assert(elem->get_field("function") != nullptr ||
+                           elem->get_field("name") != nullptr);
+                }
+            }
+
+            print_pass(result);
+        }
+    }
+
+    // Test 28: MiniMax-M2 template
+    {
+        print_header(28, "MiniMax-M2 template");
+        std::string template_source = read_file("models/templates/MiniMax-M2.jinja");
+        if (template_source.empty()) {
+            print_skip("Could not read template file");
+        } else {
+            auto result = infer_types_from_source(template_source);
+            print_schema(result);
+            if (g_ctx.verbose) print_constraints(result);
+
+            if (!result.success()) {
+                std::cout << color::DIM() << "  Note: Constraint errors:" << color::RESET() << "\n";
+                for (const auto& err : result.errors) {
+                    std::cout << color::DIM() << "    - " << err << color::RESET() << "\n";
+                }
+            }
+
+            assert(result.has_variable("messages"));
+            assert(result.has_variable("tools"));
+            assert(result.has_variable("add_generation_prompt"));
+
+            auto msg_type = result.get_type("messages");
+            assert(msg_type != nullptr);
+
+            if (auto* arr = as_type<array_type>(msg_type)) {
+                if (auto* elem = as_type<object_type>(arr->element_type)) {
+                    auto* role_field = elem->get_field("role");
+                    assert(role_field != nullptr);
+                    if (role_field->type) {
+                        std::string role_str = role_field->type->to_string();
+                        assert(role_str.find("system") != std::string::npos ||
+                               role_str.find("user") != std::string::npos ||
+                               role_str.find("assistant") != std::string::npos ||
+                               role_str.find("tool") != std::string::npos ||
+                               role_str == "string");
+                    }
+
+                    auto* content_field = elem->get_field("content");
+                    assert(content_field != nullptr);
+                    if (content_field->type) {
+                        std::string content_str = content_field->type->to_string();
+                        assert(content_str.find("string") != std::string::npos ||
+                               content_str.find("array") != std::string::npos);
+                    }
+
+                    assert(elem->get_field("tool_calls") != nullptr);
+                    assert(elem->get_field("reasoning_content") != nullptr);
+                }
+            }
+
+            auto tools_type = result.get_type("tools");
+            assert(tools_type != nullptr);
+            if (auto* arr = as_type<array_type>(tools_type)) {
+                if (auto* elem = as_type<object_type>(arr->element_type)) {
+                    assert(elem->get_field("function") != nullptr);
+                }
+            }
+
+            assert(result.has_variable("visible_text"));
+            assert(result.get_type("visible_text") != nullptr);
+            assert(is_type<function_type>(result.get_type("visible_text")));
 
             print_pass(result);
         }
