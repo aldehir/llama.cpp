@@ -138,6 +138,8 @@ struct constraint_solver {
         if (auto* tv = as_type<type_variable>(type)) {
             auto it = subst.find(tv->name);
             if (it != subst.end()) return apply_impl(it->second, visited);
+            // Leave unresolved type variables as-is for now
+            // (unknown conversion happens later if needed)
             return type;
         }
 
@@ -172,8 +174,57 @@ struct constraint_solver {
 
     std::map<std::string, TypePtr> get_resolved_types(const std::map<std::string, TypePtr>& env) const {
         std::map<std::string, TypePtr> result;
-        for (const auto& [name, type] : env) result[name] = apply(type);
+        for (const auto& [name, type] : env) {
+            auto resolved = apply(type);
+            result[name] = convert_typevars_to_unknown(resolved);
+        }
         return result;
+    }
+
+    // Convert remaining unresolved type variables to 'unknown' type
+    TypePtr convert_typevars_to_unknown(const TypePtr& type) const {
+        if (!type) return nullptr;
+
+        if (auto* tv = as_type<type_variable>(type)) {
+            return make_unknown(tv->name);
+        }
+
+        if (auto* arr = as_type<array_type>(type)) {
+            auto result = std::make_shared<array_type>();
+            if (arr->element_type) {
+                result->element_type = convert_typevars_to_unknown(arr->element_type);
+            }
+            return result;
+        }
+
+        if (auto* obj = as_type<object_type>(type)) {
+            auto result = std::make_shared<object_type>(obj->extensible);
+            for (const auto& [name, field] : obj->fields) {
+                result->add_field(name, convert_typevars_to_unknown(field.type), field.optional);
+            }
+            return result;
+        }
+
+        if (auto* u = as_type<union_type>(type)) {
+            auto result = std::make_shared<union_type>();
+            for (const auto& alt : u->alternatives) {
+                result->add_alternative(convert_typevars_to_unknown(alt));
+            }
+            return result;
+        }
+
+        if (auto* func = as_type<function_type>(type)) {
+            std::vector<TypePtr> params;
+            for (const auto& p : func->param_types) {
+                params.push_back(convert_typevars_to_unknown(p));
+            }
+            return std::make_shared<function_type>(
+                std::move(params),
+                convert_typevars_to_unknown(func->return_type)
+            );
+        }
+
+        return type;
     }
 
 private:
@@ -332,6 +383,17 @@ private:
 
         if (resolved1 == resolved2) return true;
         if (resolved1->equals(resolved2)) return true;
+
+        // any_type absorbs any other type
+        // If unifying with 'any', the type variable becomes 'any'
+        if (is_type<any_type>(resolved1)) {
+            if (!var2.empty()) subst[var2] = resolved1;
+            return true;
+        }
+        if (is_type<any_type>(resolved2)) {
+            if (!var1.empty()) subst[var1] = resolved2;
+            return true;
+        }
 
         if (auto* tv1 = as_type<type_variable>(resolved1)) {
             return unify_var(tv1->name, resolved2);

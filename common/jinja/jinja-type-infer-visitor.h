@@ -213,7 +213,7 @@ struct type_inference_visitor : public ast_visitor<TypePtr> {
             env->bind(guard.variable, guard.narrowed_type);
             auto existing = root_env->lookup(guard.variable);
             if (existing) {
-                constraints.add_type_alternative(existing, guard.narrowed_type,
+                constraints.add_equality(existing, guard.narrowed_type,
                     "type guard narrowing " + guard.variable);
             }
         } else if (guard.is_field_guard()) {
@@ -775,7 +775,14 @@ struct type_inference_visitor : public ast_visitor<TypePtr> {
         if (is_stmt<identifier>(node.filter)) {
             const auto& name = cast_stmt<identifier>(node.filter)->val;
 
-            if (name == "tojson" || name == "trim" || name == "strip" ||
+            // tojson accepts any type - mark input as 'any'
+            if (name == "tojson") {
+                constraints.add_equality(input_type, make_any(),
+                    "tojson input accepts any type at " + source_loc(node));
+                return make_string();
+            }
+
+            if (name == "trim" || name == "strip" ||
                 name == "upper" || name == "lower" || name == "title" ||
                 name == "capitalize" || name == "safe" || name == "e" ||
                 name == "escape" || name == "string" || name == "indent") {
@@ -839,7 +846,13 @@ struct type_inference_visitor : public ast_visitor<TypePtr> {
 
                 for (auto& arg : call->args) dispatch(*arg);
 
-                if (name == "tojson" || name == "trim" || name == "indent" || name == "replace") {
+                if (name == "tojson") {
+                    constraints.add_equality(input_type, make_any(),
+                        "tojson input accepts any type at " + source_loc(node));
+                    return make_string();
+                }
+
+                if (name == "trim" || name == "indent" || name == "replace") {
                     return make_string();
                 }
 

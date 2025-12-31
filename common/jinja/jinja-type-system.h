@@ -491,6 +491,51 @@ struct function_type : public Type {
     std::string kind() const override { return "function"; }
 };
 
+/**
+ * Any type: explicitly accepts any type
+ * Used when a value can legitimately be any type (e.g., input to |tojson)
+ * This is a resolved type - we know it accepts anything
+ */
+struct any_type : public Type {
+    any_type() = default;
+
+    std::string to_string() const override { return "any"; }
+
+    bool equals(const TypePtr& other) const override {
+        return dynamic_cast<any_type*>(other.get()) != nullptr;
+    }
+
+    TypePtr clone() const override {
+        return std::make_shared<any_type>();
+    }
+
+    std::string kind() const override { return "any"; }
+};
+
+/**
+ * Unknown type: represents an unresolved type variable
+ * Used when type inference couldn't determine the type
+ * This indicates a gap in inference, not an explicit "any"
+ */
+struct unknown_type : public Type {
+    std::string original_typevar;  // Optional: the original type variable name
+
+    unknown_type() = default;
+    explicit unknown_type(const std::string& tv) : original_typevar(tv) {}
+
+    std::string to_string() const override { return "unknown"; }
+
+    bool equals(const TypePtr& other) const override {
+        return dynamic_cast<unknown_type*>(other.get()) != nullptr;
+    }
+
+    TypePtr clone() const override {
+        return std::make_shared<unknown_type>(original_typevar);
+    }
+
+    std::string kind() const override { return "unknown"; }
+};
+
 // ============================================================================
 // Factory functions
 // ============================================================================
@@ -541,6 +586,14 @@ inline TypePtr make_literal_string(const std::string& val) {
 
 inline TypePtr make_literal_int(int64_t val) {
     return std::make_shared<literal_type>(val);
+}
+
+inline TypePtr make_any() {
+    return std::make_shared<any_type>();
+}
+
+inline TypePtr make_unknown(const std::string& original_typevar = "") {
+    return std::make_shared<unknown_type>(original_typevar);
 }
 
 // Helper for optional types (T | null)
