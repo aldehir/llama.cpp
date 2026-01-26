@@ -3,6 +3,7 @@
 #include "llama.h"
 
 #include <map>
+#include <memory>
 #include <regex>
 #include <string>
 #include <vector>
@@ -109,6 +110,206 @@ struct llama_grammar_parser {
 struct llama_grammar_trigger_pattern {
     std::string pattern;
     std::regex  regex;
+};
+
+//
+// AST-based grammar parser
+//
+// The AST provides a structured representation of the grammar before
+// converting it to the flat rule representation used at runtime.
+//
+
+// Forward declarations for AST nodes
+struct llama_grammar_ast_node;
+
+// Character range entry for character classes
+struct llama_grammar_char_range {
+    uint32_t start;
+    uint32_t end;  // same as start for single characters
+
+    llama_grammar_char_range(uint32_t c) : start(c), end(c) {}
+    llama_grammar_char_range(uint32_t s, uint32_t e) : start(s), end(e) {}
+};
+
+// Types of AST nodes
+enum class llama_grammar_ast_type {
+    LITERAL,      // string literal "abc"
+    CHAR_CLASS,   // character class [a-z], [^0-9]
+    CHAR_ANY,     // any character (.)
+    RULE_REF,     // reference to another rule
+    SEQUENCE,     // sequence of elements
+    ALTERNATION,  // alternatives separated by |
+    REPETITION,   // repetition operators *, +, ?, {n,m}
+    GROUP,        // grouped expression (parentheses)
+};
+
+// Base AST node using a variant-like structure with type tag
+struct llama_grammar_ast_node {
+    llama_grammar_ast_type type;
+
+    // Data for different node types (union-like)
+    // LITERAL: characters
+    std::vector<uint32_t> literal_chars;
+
+    // CHAR_CLASS: ranges and negation flag
+    std::vector<llama_grammar_char_range> char_ranges;
+    bool char_class_negated = false;
+
+    // RULE_REF: rule name
+    std::string rule_name;
+
+    // SEQUENCE, ALTERNATION, GROUP: child nodes
+    std::vector<std::shared_ptr<llama_grammar_ast_node>> children;
+
+    // REPETITION: min and max times, and child node
+    uint64_t rep_min = 0;
+    uint64_t rep_max = 0;  // UINT64_MAX for unlimited
+    std::shared_ptr<llama_grammar_ast_node> rep_child;
+
+    // Constructors for different node types
+    static std::shared_ptr<llama_grammar_ast_node> make_literal(const std::vector<uint32_t> & chars) {
+        auto node = std::make_shared<llama_grammar_ast_node>();
+        node->type = llama_grammar_ast_type::LITERAL;
+        node->literal_chars = chars;
+        return node;
+    }
+
+    static std::shared_ptr<llama_grammar_ast_node> make_char_class(
+            const std::vector<llama_grammar_char_range> & ranges,
+            bool negated = false) {
+        auto node = std::make_shared<llama_grammar_ast_node>();
+        node->type = llama_grammar_ast_type::CHAR_CLASS;
+        node->char_ranges = ranges;
+        node->char_class_negated = negated;
+        return node;
+    }
+
+    static std::shared_ptr<llama_grammar_ast_node> make_char_any() {
+        auto node = std::make_shared<llama_grammar_ast_node>();
+        node->type = llama_grammar_ast_type::CHAR_ANY;
+        return node;
+    }
+
+    static std::shared_ptr<llama_grammar_ast_node> make_rule_ref(const std::string & name) {
+        auto node = std::make_shared<llama_grammar_ast_node>();
+        node->type = llama_grammar_ast_type::RULE_REF;
+        node->rule_name = name;
+        return node;
+    }
+
+    static std::shared_ptr<llama_grammar_ast_node> make_sequence(
+            const std::vector<std::shared_ptr<llama_grammar_ast_node>> & elements) {
+        auto node = std::make_shared<llama_grammar_ast_node>();
+        node->type = llama_grammar_ast_type::SEQUENCE;
+        node->children = elements;
+        return node;
+    }
+
+    static std::shared_ptr<llama_grammar_ast_node> make_alternation(
+            const std::vector<std::shared_ptr<llama_grammar_ast_node>> & alternatives) {
+        auto node = std::make_shared<llama_grammar_ast_node>();
+        node->type = llama_grammar_ast_type::ALTERNATION;
+        node->children = alternatives;
+        return node;
+    }
+
+    static std::shared_ptr<llama_grammar_ast_node> make_repetition(
+            std::shared_ptr<llama_grammar_ast_node> child,
+            uint64_t min_times,
+            uint64_t max_times) {
+        auto node = std::make_shared<llama_grammar_ast_node>();
+        node->type = llama_grammar_ast_type::REPETITION;
+        node->rep_child = std::move(child);
+        node->rep_min = min_times;
+        node->rep_max = max_times;
+        return node;
+    }
+
+    static std::shared_ptr<llama_grammar_ast_node> make_group(
+            std::shared_ptr<llama_grammar_ast_node> child) {
+        auto node = std::make_shared<llama_grammar_ast_node>();
+        node->type = llama_grammar_ast_type::GROUP;
+        node->children.push_back(std::move(child));
+        return node;
+    }
+};
+
+using llama_grammar_ast_node_ptr = std::shared_ptr<llama_grammar_ast_node>;
+
+// AST rule: a named rule with its AST definition
+struct llama_grammar_ast_rule {
+    std::string                 name;
+    llama_grammar_ast_node_ptr  definition;
+};
+
+// AST-based grammar parser
+// Parses grammar text into an AST, then emits grammar rules from the AST
+struct llama_grammar_ast_parser {
+    // Parsed AST rules (in order of appearance)
+    std::vector<llama_grammar_ast_rule> ast_rules;
+
+    // Symbol table: rule name -> rule index in ast_rules
+    std::map<std::string, uint32_t> symbol_ids;
+
+    // Output: compiled grammar rules (filled by emit())
+    llama_grammar_rules rules;
+
+    // Parse grammar text into AST
+    bool parse(const char * src);
+
+    // Emit grammar rules from AST
+    // This populates the 'rules' member and updates symbol_ids with generated symbols
+    bool emit();
+
+    // Combined parse + emit
+    bool parse_and_emit(const char * src);
+
+    // Print the AST for debugging
+    void print_ast(FILE * file) const;
+
+    // Print emitted rules (same format as llama_grammar_parser::print)
+    void print(FILE * file) const;
+
+    // Get rule pointers for llama_grammar_init
+    llama_grammar_stack c_rules() const;
+
+private:
+    // Internal counter for generating unique symbol IDs
+    uint32_t next_generated_id = 0;
+
+    // Parsing helpers
+    const char * parse_space(const char * src, bool newline_ok);
+    const char * parse_name(const char * src);
+    const char * parse_int(const char * src);
+    std::pair<uint32_t, const char *> parse_char(const char * src);
+    std::pair<uint32_t, const char *> parse_hex(const char * src, int size);
+
+    // AST parsing
+    const char * parse_rule(const char * src);
+    const char * parse_alternates(const char * src, llama_grammar_ast_node_ptr & out, bool is_nested);
+    const char * parse_sequence(const char * src, llama_grammar_ast_node_ptr & out, bool is_nested);
+    const char * parse_element(const char * src, llama_grammar_ast_node_ptr & out, bool is_nested);
+    const char * parse_repetition(const char * src, llama_grammar_ast_node_ptr & element, bool is_nested);
+
+    // Code emission helpers
+    uint32_t get_symbol_id(const std::string & name);
+    uint32_t generate_symbol_id(const std::string & base_name);
+    void add_rule(uint32_t rule_id, const llama_grammar_rule & rule);
+
+    // Emit a single AST node into a rule, possibly creating auxiliary rules
+    void emit_node(
+        const llama_grammar_ast_node_ptr & node,
+        const std::string                & rule_name,
+        llama_grammar_rule               & rule);
+
+    // Emit a repetition node (handles *, +, ?, {n,m})
+    void emit_repetition(
+        const llama_grammar_ast_node_ptr & node,
+        const std::string                & rule_name,
+        llama_grammar_rule               & rule);
+
+    // Helper to print AST node recursively
+    void print_ast_node(FILE * file, const llama_grammar_ast_node_ptr & node, int indent) const;
 };
 
 struct llama_grammar {
