@@ -183,7 +183,6 @@ tagged_parse_result tagged_peg_parser::parse_anywhere_and_extract(const std::str
     }
     for (size_t i = 0; i < input.size(); i++) {
         common_peg_parse_context ctx(input, false);
-        ctx.debug = debug;
         auto parse_result = arena.parse(ctx, i);
         if (parse_result.success() || i == input.size() - 1) {
             tag_based_peg_mapper mapper;

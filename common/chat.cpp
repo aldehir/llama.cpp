@@ -1392,38 +1392,20 @@ common_chat_msg common_chat_peg_parse(const common_peg_arena &          src_pars
                                       const std::string &               input,
                                       bool                              is_partial,
                                       const common_chat_parser_params & params) {
-    const common_peg_arena & parser = src_parser.empty() ?
-        build_chat_peg_parser([](common_chat_peg_builder & p) { return p.content(p.rest()) + p.end(); }) :
-        src_parser;
-
-        if (src_parser.empty()) {
+    common_peg_arena parser = src_parser;
+    if (src_parser.empty()) {
         LOG_WRN("No parser definition detected, assuming pure content parser.");
+        parser = build_chat_peg_parser([](common_chat_peg_builder & p) {
+            return p.content(p.rest());
+        });
     }
 
     LOG_DBG("Parsing PEG input with format %s: %s\n", common_chat_format_name(params.format), input.c_str());
 
     common_peg_parse_context ctx(input, is_partial);
-    ctx.debug   = params.debug;
     auto result = parser.parse(ctx);
-
     if (result.fail()) {
-        // During partial parsing, return partial results if any AST nodes were captured
-        // This allows streaming to work correctly for formats like FUNC_MARKDOWN_CODE_BLOCK
-        if (is_partial && result.end > 0) {
-            // Try to extract any partial results from what was successfully parsed
-            common_chat_msg msg;
-            msg.role = "assistant";
-            auto mapper = common_chat_peg_mapper(msg);
-            mapper.from_ast(ctx.ast, result);
-
-            if (ctx.debug) {
-                fprintf(stderr, "\nAST for partial parse (fail):\n%s\n", ctx.ast.dump().c_str());
-                fflush(stderr);
-            }
-            return msg;
-        }
-        throw std::runtime_error(std::string("Failed to parse input at pos ") + std::to_string(result.end) + ": " +
-                                 input.substr(result.end));
+        throw std::runtime_error(std::string("Failed to parse input at pos ") + std::to_string(result.end));
     }
 
     common_chat_msg msg;
@@ -1431,12 +1413,6 @@ common_chat_msg common_chat_peg_parse(const common_peg_arena &          src_pars
 
     auto mapper = common_chat_peg_mapper(msg);
     mapper.from_ast(ctx.ast, result);
-
-    if (ctx.debug) {
-        fprintf(stderr, "\nAST for %s parse:\n%s\n", is_partial ? "partial" : "full", ctx.ast.dump().c_str());
-        fflush(stderr);
-    }
-
     if (!is_partial) {
         LOG_DBG("Parsed message: %s\n", common_chat_msgs_to_json_oaicompat({ msg }).at(0).dump().c_str());
     }

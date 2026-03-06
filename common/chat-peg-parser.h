@@ -155,17 +155,6 @@ struct tagged_parse_result {
 
 struct tagged_peg_parser {
     common_peg_arena arena;
-    bool debug = false;
-
-    tagged_peg_parser & withDebug() {
-      debug = true;
-      return *this;
-    }
-
-    tagged_peg_parser & withoutDebug() {
-      debug = false;
-      return *this;
-    }
 
     tagged_parse_result parse_and_extract(const std::string & input, bool is_partial = false) const;
     tagged_parse_result parse_anywhere_and_extract(const std::string & input) const;

@@ -2765,6 +2765,8 @@ int main(int argc, char ** argv) {
         }
     }
 
+    common_peg_debug_set(detailed_debug);
+
     if (only_run_filtered) {
         test_template_output_peg_parsers(detailed_debug);
         std::cout << "\n[chat] All template tests passed!" << '\n';
