@@ -199,6 +199,7 @@ llama_build_and_test(
     peg-parser/testing.h
     peg-parser/tests.h
 )
+llama_build_and_test(test-dfa-utf8.cpp)
 llama_build_and_test(test-regex-partial.cpp)
 
 if (NOT ${CMAKE_SYSTEM_PROCESSOR} MATCHES "s390x")
