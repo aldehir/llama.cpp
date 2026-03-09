@@ -200,6 +200,7 @@ llama_build_and_test(
     peg-parser/tests.h
 )
 llama_build_and_test(test-regex-partial.cpp)
+llama_build_and_test(test-sampling-reasoning-budget.cpp)
 
 if (NOT ${CMAKE_SYSTEM_PROCESSOR} MATCHES "s390x")
     llama_build_and_test(test-thread-safety.cpp ARGS -hf ggml-org/models -hff tinyllamas/stories15M-q4_0.gguf -ngl 99 -p "The meaning of life is" -n 128 -c 256 -ub 32 -np 4 -t 2)
