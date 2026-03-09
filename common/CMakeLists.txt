@@ -58,6 +58,8 @@ add_library(${TARGET} STATIC
     chat.h
     common.cpp
     common.h
+    common-dfa-utf8.cpp
+    common-dfa-utf8.h
     common-sampler-dfa.cpp
     common-sampler-dfa.h
     console.cpp
