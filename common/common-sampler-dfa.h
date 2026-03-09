@@ -20,26 +20,6 @@ struct common_dfa_transition {
     uint8_t  byte_hi;  // byte range high (inclusive)
 };
 
-// Token-limited region: a set of DFA states with a maximum number of
-// accept() calls (i.e., generated tokens) allowed while in the region.
-//
-// When the limit is reached, apply() only permits tokens whose byte-level
-// simulation ends in a state OUTSIDE the region (and not in the dead state).
-// This naturally enforces UTF-8 completeness at the exit boundary — if the
-// DFA is in a mid-UTF-8 continuation state, that state is still inside the
-// region, so the token is rejected.
-//
-// Multiple regions may be active simultaneously. If a state belongs to
-// several regions whose limits are all hit, the masks are intersected: only
-// tokens that exit ALL exhausted regions are allowed.
-//
-// The counter is cumulative across all visits and resets on sampler reset.
-struct common_dfa_token_limit {
-    const uint32_t * states;     // states that belong to this region
-    size_t           n_states;
-    int32_t          max_tokens; // max accept() calls while in this region
-};
-
 // Parameters to construct a byte-level DFA token masking sampler.
 struct common_dfa_params {
     const common_dfa_transition * transitions;
@@ -52,14 +32,25 @@ struct common_dfa_params {
     uint32_t start_state;
     uint32_t dead_state;   // explicit dead/sink state
 
-    const common_dfa_token_limit * token_limits;
-    size_t                         n_token_limits;
+    // Optional token-limited region. When non-null, defines a set of DFA
+    // states with a maximum number of accept() calls (generated tokens).
+    //
+    // When the limit is reached, apply() only permits tokens whose byte-level
+    // simulation ends in a state OUTSIDE the region (and not the dead state).
+    // This naturally enforces UTF-8 completeness at the exit boundary — if
+    // the DFA is in a mid-UTF-8 continuation state, that state is still
+    // inside the region, so the token is rejected.
+    //
+    // The counter is cumulative and resets on sampler reset.
+    const uint32_t * token_limit_states;   // states in the limited region (nullptr = no limit)
+    size_t           n_token_limit_states;
+    int32_t          token_limit;           // max accept() calls while in the region
 };
 
 // Create a byte-level DFA token masking sampler.
 //
 // On apply(), tokens whose byte sequences lead to the dead state have their
-// logits set to -INFINITY. When a token-limited region is exhausted, only
+// logits set to -INFINITY. When the token-limited region is exhausted, only
 // tokens that exit the region are allowed.
 //
 // Uses a lazy adaptive per-state cache (built on first access) so that
