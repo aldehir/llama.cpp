@@ -77,6 +77,8 @@ add_library(${TARGET} STATIC
     regex-partial.h
     sampling.cpp
     sampling.h
+    sampling-reasoning-budget.cpp
+    sampling-reasoning-budget.h
     speculative.cpp
     speculative.h
     unicode.cpp
