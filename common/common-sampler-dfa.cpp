@@ -5,6 +5,7 @@
 #include <cassert>
 #include <cmath>
 #include <cstdint>
+#include <mutex>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -91,7 +92,7 @@ struct dfa_table {
     uint32_t n_states;
     uint32_t start_state;
     uint32_t dead_state;
-    std::unordered_set<uint32_t>      accept_states;
+    std::unordered_set<uint32_t>       accept_states;
     std::vector<std::vector<dfa_edge>> edges; // edges[state] sorted by cp_lo
 };
 
@@ -167,11 +168,12 @@ static dfa_table dfa_build_table(const common_dfa_params & params) {
 // ----------------------------------------------------------------------------
 
 struct dfa_token_info {
-    std::vector<uint32_t> codepoints; // decoded codepoints (empty for special tokens)
+    std::vector<uint32_t> codepoints; // decoded codepoints (empty for special/invalid tokens)
+    bool                  complete_utf8 = false; // true if token decodes to complete UTF-8
 };
 
 // ----------------------------------------------------------------------------
-// Adaptive per-state cache
+// Adaptive per-state cache (lazy)
 // ----------------------------------------------------------------------------
 
 struct dfa_state_cache {
@@ -193,68 +195,77 @@ struct dfa_state_cache {
 struct common_sampler_dfa {
     dfa_table                       dfa;
     uint32_t                        current_state;
-    dfa_partial_utf8                partial_utf8; // partial UTF-8 across token boundaries
 
-    std::vector<dfa_token_info>     token_info;   // per-token decoded codepoints
-    std::vector<dfa_state_cache>    cache;         // per-state adaptive cache
+    std::vector<dfa_token_info>     token_info; // per-token decoded codepoints
+
+    // lazy per-state cache: built on first access
+    std::unordered_map<uint32_t, dfa_state_cache> cache;
 
     int32_t                         n_vocab;
 };
 
-// Build the adaptive cache for all states
-static void dfa_build_cache(common_sampler_dfa * ctx) {
-    const auto & dfa   = ctx->dfa;
+// Build the adaptive cache for a single state on demand
+static const dfa_state_cache & dfa_get_or_build_cache(
+        common_sampler_dfa * ctx, uint32_t state) {
+    auto it = ctx->cache.find(state);
+    if (it != ctx->cache.end()) {
+        return it->second;
+    }
+
+    const auto &  dfa     = ctx->dfa;
     const int32_t n_vocab = ctx->n_vocab;
 
-    ctx->cache.resize(dfa.n_states);
+    dfa_state_cache sc;
 
-    for (uint32_t state = 0; state < dfa.n_states; ++state) {
-        if (state == dfa.dead_state) {
-            // dead state rejects everything – treat as reject-heavy with empty outliers
-            ctx->cache[state].is_accept_heavy = false;
+    if (state == dfa.dead_state) {
+        // dead state rejects everything
+        sc.is_accept_heavy = false;
+        auto [ins, _] = ctx->cache.emplace(state, std::move(sc));
+        return ins->second;
+    }
+
+    // simulate every token from this state
+    std::vector<std::pair<llama_token, uint32_t>> accepted; // (token, next_state)
+    std::vector<llama_token>                      rejected;
+
+    for (int32_t tok = 0; tok < n_vocab; ++tok) {
+        const auto & info = ctx->token_info[tok];
+
+        // reject tokens with no codepoints (special/control) or incomplete UTF-8
+        if (info.codepoints.empty() || !info.complete_utf8) {
+            rejected.push_back(tok);
             continue;
         }
 
-        // simulate every token from this state
-        std::vector<std::pair<llama_token, uint32_t>> accepted; // (token, next_state)
-        std::vector<llama_token>                       rejected;
-
-        for (int32_t tok = 0; tok < n_vocab; ++tok) {
-            const auto & info = ctx->token_info[tok];
-            if (info.codepoints.empty()) {
-                // special / control token with no text → reject
-                rejected.push_back(tok);
-                continue;
-            }
-
-            uint32_t next = dfa_simulate(dfa, state,
-                                         info.codepoints.data(),
-                                         info.codepoints.size());
-            if (next == dfa.dead_state) {
-                rejected.push_back(tok);
-            } else {
-                accepted.push_back({ tok, next });
-            }
-        }
-
-        auto & sc = ctx->cache[state];
-        const bool accept_heavy = accepted.size() > rejected.size();
-        sc.is_accept_heavy = accept_heavy;
-
-        if (accept_heavy) {
-            // store rejected tokens as outliers
-            for (const auto & tok : rejected) {
-                sc.outlier_tokens.insert(tok);
-            }
-            // outlier_next_states stays empty – re-simulate on accept()
+        uint32_t next = dfa_simulate(dfa, state,
+                                     info.codepoints.data(),
+                                     info.codepoints.size());
+        if (next == dfa.dead_state) {
+            rejected.push_back(tok);
         } else {
-            // store accepted tokens as outliers (with their next state)
-            for (const auto & [tok, ns] : accepted) {
-                sc.outlier_tokens.insert(tok);
-                sc.outlier_next_states[tok] = ns;
-            }
+            accepted.push_back({ tok, next });
         }
     }
+
+    const bool accept_heavy = accepted.size() > rejected.size();
+    sc.is_accept_heavy = accept_heavy;
+
+    if (accept_heavy) {
+        // store rejected tokens as outliers
+        for (const auto & tok : rejected) {
+            sc.outlier_tokens.insert(tok);
+        }
+        // outlier_next_states stays empty – re-simulate on accept()
+    } else {
+        // store accepted tokens as outliers (with their next state)
+        for (const auto & [tok, ns] : accepted) {
+            sc.outlier_tokens.insert(tok);
+            sc.outlier_next_states[tok] = ns;
+        }
+    }
+
+    auto [ins, _] = ctx->cache.emplace(state, std::move(sc));
+    return ins->second;
 }
 
 // Decode all vocab tokens to codepoints
@@ -266,6 +277,7 @@ static void dfa_build_token_info(common_sampler_dfa * ctx,
     for (int32_t tok = 0; tok < n_vocab; ++tok) {
         std::string piece = common_token_to_piece(vocab, tok, false);
         if (piece.empty()) {
+            // leave codepoints empty, complete_utf8 = false
             continue;
         }
 
@@ -276,9 +288,8 @@ static void dfa_build_token_info(common_sampler_dfa * ctx,
             cps.pop_back();
         }
 
-        // if there's a partial UTF-8 sequence at the end, we still use
-        // whatever complete codepoints were decoded (partial tokens are rare)
-        ctx->token_info[tok].codepoints = std::move(cps);
+        ctx->token_info[tok].codepoints    = std::move(cps);
+        ctx->token_info[tok].complete_utf8  = (partial.n_remain == 0);
     }
 }
 
@@ -297,7 +308,7 @@ static void dfa_sampler_accept(struct llama_sampler * smpl, llama_token token) {
         return; // stuck in dead state
     }
 
-    const auto & sc = ctx->cache[ctx->current_state];
+    const auto & sc = dfa_get_or_build_cache(ctx, ctx->current_state);
 
     if (!sc.is_accept_heavy) {
         // reject-heavy: accepted tokens (outliers) have cached next_state
@@ -334,7 +345,7 @@ static void dfa_sampler_apply(struct llama_sampler * smpl,
         return;
     }
 
-    const auto & sc = ctx->cache[state];
+    const auto & sc = dfa_get_or_build_cache(ctx, state);
 
     if (sc.is_accept_heavy) {
         // most tokens accepted → mask only the outliers (rejected tokens)
@@ -344,7 +355,7 @@ static void dfa_sampler_apply(struct llama_sampler * smpl,
             }
         }
     } else {
-        // most tokens rejected → mask everything NOT in the outlier set (accepted tokens)
+        // most tokens rejected → mask everything NOT in the outlier set
         for (size_t i = 0; i < cur_p->size; ++i) {
             if (!sc.outlier_tokens.count(cur_p->data[i].id)) {
                 cur_p->data[i].logit = -INFINITY;
@@ -358,7 +369,6 @@ static void dfa_sampler_apply(struct llama_sampler * smpl,
 static void dfa_sampler_reset(struct llama_sampler * smpl) {
     auto * ctx = static_cast<common_sampler_dfa *>(smpl->ctx);
     ctx->current_state = ctx->dfa.start_state;
-    ctx->partial_utf8  = { 0, 0 };
 }
 
 static struct llama_sampler * dfa_sampler_clone(const struct llama_sampler * smpl) {
@@ -404,18 +414,16 @@ struct llama_sampler * common_sampler_init_dfa(
     const int32_t n_vocab = llama_vocab_n_tokens(vocab);
 
     auto * ctx = new common_sampler_dfa();
-    ctx->n_vocab      = n_vocab;
+    ctx->n_vocab       = n_vocab;
     ctx->current_state = params.start_state;
-    ctx->partial_utf8  = { 0, 0 };
 
     // build internal DFA representation
     ctx->dfa = dfa_build_table(params);
 
-    // decode all tokens to codepoints
+    // decode all tokens to codepoints (with UTF-8 completeness flag)
     dfa_build_token_info(ctx, vocab);
 
-    // build adaptive per-state cache
-    dfa_build_cache(ctx);
+    // cache is lazy – built per-state on first access in apply()/accept()
 
     return llama_sampler_init(&dfa_sampler_vtable, ctx);
 }

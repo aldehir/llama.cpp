@@ -35,10 +35,14 @@ struct common_dfa_params {
 // codepoints without entering the dead state, even if no accept state is
 // reached yet.
 //
-// An adaptive per-state cache is built eagerly at init time. For each DFA
-// state, if >50% of vocab tokens are accepted, the cache stores the rejected
-// tokens (outliers); otherwise it stores the accepted tokens. This minimizes
-// memory usage.
+// UTF-8 completeness: tokens that decode to an incomplete trailing UTF-8
+// sequence are always rejected. This guarantees that every token boundary
+// falls on a complete codepoint boundary.
+//
+// Lazy adaptive cache: the per-state cache is built on first access rather
+// than eagerly for all states, making this efficient for large DFAs (e.g.,
+// those with bounded repetition counters). For each cached state, the
+// minority set (accepted or rejected tokens) is stored to minimize memory.
 //
 // The model is needed to decode tokens to their UTF-8 codepoint sequences.
 struct llama_sampler * common_sampler_init_dfa(
