@@ -5,86 +5,18 @@
 #include <cassert>
 #include <cmath>
 #include <cstdint>
-#include <mutex>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
 // ----------------------------------------------------------------------------
-// UTF-8 decoding (mirrors llama-grammar.cpp logic)
+// Internal DFA representation (byte-level)
 // ----------------------------------------------------------------------------
 
-struct dfa_partial_utf8 {
-    uint32_t value;
-    int      n_remain;
-};
-
-static std::pair<std::vector<uint32_t>, dfa_partial_utf8> dfa_decode_utf8(
-        const std::string & src,
-        dfa_partial_utf8    partial_start) {
-    static const int lookup[] = { 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 2, 2, 3, 4 };
-
-    const char *          pos = src.c_str();
-    std::vector<uint32_t> code_points;
-    code_points.reserve(src.size() + 1);
-
-    uint32_t value    = partial_start.value;
-    int      n_remain = partial_start.n_remain;
-
-    // continue previous incomplete sequence
-    while (*pos != 0 && n_remain > 0) {
-        uint8_t next_byte = static_cast<uint8_t>(*pos);
-        if ((next_byte >> 6) != 2) {
-            // invalid continuation – abort
-            code_points.push_back(0);
-            return { std::move(code_points), { 0, -1 } };
-        }
-        value = (value << 6) + (next_byte & 0x3F);
-        ++pos;
-        --n_remain;
-    }
-    if (partial_start.n_remain > 0 && n_remain == 0) {
-        code_points.push_back(value);
-    }
-
-    // decode subsequent full/partial sequences
-    while (*pos != 0) {
-        uint8_t first_byte = static_cast<uint8_t>(*pos);
-        uint8_t highbits   = first_byte >> 4;
-        n_remain = lookup[highbits] - 1;
-
-        if (n_remain < 0) {
-            code_points.clear();
-            code_points.push_back(0);
-            return { std::move(code_points), { 0, n_remain } };
-        }
-
-        uint8_t mask = (1 << (7 - n_remain)) - 1;
-        value = first_byte & mask;
-        ++pos;
-
-        while (*pos != 0 && n_remain > 0) {
-            value = (value << 6) + (static_cast<uint8_t>(*pos) & 0x3F);
-            ++pos;
-            --n_remain;
-        }
-        if (n_remain == 0) {
-            code_points.push_back(value);
-        }
-    }
-
-    return { std::move(code_points), { value, n_remain } };
-}
-
-// ----------------------------------------------------------------------------
-// Internal DFA representation
-// ----------------------------------------------------------------------------
-
-// Per-state: sorted list of (cp_lo, cp_hi, dst) for binary search
 struct dfa_edge {
-    uint32_t cp_lo;
-    uint32_t cp_hi;
+    uint8_t  byte_lo;
+    uint8_t  byte_hi;
     uint32_t dst;
 };
 
@@ -93,38 +25,35 @@ struct dfa_table {
     uint32_t start_state;
     uint32_t dead_state;
     std::unordered_set<uint32_t>       accept_states;
-    std::vector<std::vector<dfa_edge>> edges; // edges[state] sorted by cp_lo
+    std::vector<std::vector<dfa_edge>> edges; // edges[state] sorted by byte_lo
 };
 
-// Step the DFA one codepoint. Returns next state (may be dead_state).
-static uint32_t dfa_step(const dfa_table & dfa, uint32_t state, uint32_t cp) {
+// Step the DFA one byte. Returns next state (may be dead_state).
+static uint32_t dfa_step_byte(const dfa_table & dfa, uint32_t state, uint8_t byte) {
     if (state == dfa.dead_state) {
         return dfa.dead_state;
     }
     const auto & es = dfa.edges[state];
-    // binary search for the edge whose range contains cp
+    // binary search for the edge whose range contains byte
     int lo = 0, hi = (int)es.size() - 1;
     while (lo <= hi) {
         int mid = (lo + hi) / 2;
-        if (cp < es[mid].cp_lo) {
+        if (byte < es[mid].byte_lo) {
             hi = mid - 1;
-        } else if (cp > es[mid].cp_hi) {
+        } else if (byte > es[mid].byte_hi) {
             lo = mid + 1;
         } else {
             return es[mid].dst;
         }
     }
-    // no matching edge → dead state
     return dfa.dead_state;
 }
 
-// Simulate a full codepoint sequence through the DFA.
-// Returns the resulting state after consuming all codepoints, or dead_state if
-// a dead state is reached at any point.
-static uint32_t dfa_simulate(const dfa_table & dfa, uint32_t state,
-                             const uint32_t * cps, size_t n_cps) {
-    for (size_t i = 0; i < n_cps; ++i) {
-        state = dfa_step(dfa, state, cps[i]);
+// Simulate a full byte sequence through the DFA.
+static uint32_t dfa_simulate_bytes(const dfa_table & dfa, uint32_t state,
+                                   const uint8_t * bytes, size_t n_bytes) {
+    for (size_t i = 0; i < n_bytes; ++i) {
+        state = dfa_step_byte(dfa, state, bytes[i]);
         if (state == dfa.dead_state) {
             return dfa.dead_state;
         }
@@ -132,7 +61,6 @@ static uint32_t dfa_simulate(const dfa_table & dfa, uint32_t state,
     return state;
 }
 
-// Build the dfa_table from user params
 static dfa_table dfa_build_table(const common_dfa_params & params) {
     dfa_table dfa;
     dfa.n_states    = params.n_states;
@@ -148,15 +76,14 @@ static dfa_table dfa_build_table(const common_dfa_params & params) {
         const auto & t = params.transitions[i];
         assert(t.src < params.n_states);
         assert(t.dst < params.n_states);
-        assert(t.cp_lo <= t.cp_hi);
-        dfa.edges[t.src].push_back({ t.cp_lo, t.cp_hi, t.dst });
+        assert(t.byte_lo <= t.byte_hi);
+        dfa.edges[t.src].push_back({ t.byte_lo, t.byte_hi, t.dst });
     }
 
-    // sort edges by cp_lo for binary search
     for (uint32_t s = 0; s < params.n_states; ++s) {
         std::sort(dfa.edges[s].begin(), dfa.edges[s].end(),
                   [](const dfa_edge & a, const dfa_edge & b) {
-                      return a.cp_lo < b.cp_lo;
+                      return a.byte_lo < b.byte_lo;
                   });
     }
 
@@ -164,28 +91,44 @@ static dfa_table dfa_build_table(const common_dfa_params & params) {
 }
 
 // ----------------------------------------------------------------------------
-// Per-token decoded codepoints (precomputed at init)
+// Per-token raw bytes (precomputed at init)
 // ----------------------------------------------------------------------------
 
 struct dfa_token_info {
-    std::vector<uint32_t> codepoints; // decoded codepoints (empty for special/invalid tokens)
-    bool                  complete_utf8 = false; // true if token decodes to complete UTF-8
+    std::string piece; // raw byte representation (empty for special tokens)
 };
 
 // ----------------------------------------------------------------------------
-// Adaptive per-state cache (lazy)
+// Token-limited regions
+// ----------------------------------------------------------------------------
+
+struct dfa_region {
+    std::unordered_set<uint32_t> member_states;
+    int32_t                      max_tokens;
+    int32_t                      counter; // current token count
+};
+
+// ----------------------------------------------------------------------------
+// Adaptive per-state caches (lazy)
 // ----------------------------------------------------------------------------
 
 struct dfa_state_cache {
-    bool is_accept_heavy; // true → outliers are REJECTED tokens
-                          // false → outliers are ACCEPTED tokens (with next_state)
+    bool is_accept_heavy;
 
-    // The minority set of token ids
+    // Minority set of token ids
     std::unordered_set<llama_token> outlier_tokens;
 
-    // For reject-heavy states: maps accepted token → resulting DFA state
-    // For accept-heavy states: empty (re-simulate on accept)
+    // For reject-heavy: maps accepted token → resulting DFA state
+    // For accept-heavy: empty (re-simulate on accept)
     std::unordered_map<llama_token, uint32_t> outlier_next_states;
+};
+
+struct dfa_exit_cache_entry {
+    bool is_exit_heavy; // true → most accepted tokens exit → outliers STAY
+
+    // If is_exit_heavy: contains tokens that are accepted but STAY in region
+    // If !is_exit_heavy: contains tokens that are accepted and EXIT region
+    std::unordered_set<llama_token> outlier_tokens;
 };
 
 // ----------------------------------------------------------------------------
@@ -193,18 +136,27 @@ struct dfa_state_cache {
 // ----------------------------------------------------------------------------
 
 struct common_sampler_dfa {
-    dfa_table                       dfa;
-    uint32_t                        current_state;
+    dfa_table                    dfa;
+    uint32_t                     current_state;
 
-    std::vector<dfa_token_info>     token_info; // per-token decoded codepoints
+    std::vector<dfa_token_info>  token_info;
+    int32_t                      n_vocab;
 
-    // lazy per-state cache: built on first access
-    std::unordered_map<uint32_t, dfa_state_cache> cache;
+    // regions & per-state region membership
+    std::vector<dfa_region>                regions;
+    std::vector<std::vector<uint32_t>>     state_regions; // state → region indices
 
-    int32_t                         n_vocab;
+    // lazy caches
+    std::unordered_map<uint32_t, dfa_state_cache>  cache;
+
+    // exit cache keyed by (state << 32 | region_idx)
+    std::unordered_map<uint64_t, dfa_exit_cache_entry> exit_cache;
 };
 
-// Build the adaptive cache for a single state on demand
+// ----------------------------------------------------------------------------
+// Lazy cache builders
+// ----------------------------------------------------------------------------
+
 static const dfa_state_cache & dfa_get_or_build_cache(
         common_sampler_dfa * ctx, uint32_t state) {
     auto it = ctx->cache.find(state);
@@ -218,28 +170,24 @@ static const dfa_state_cache & dfa_get_or_build_cache(
     dfa_state_cache sc;
 
     if (state == dfa.dead_state) {
-        // dead state rejects everything
         sc.is_accept_heavy = false;
         auto [ins, _] = ctx->cache.emplace(state, std::move(sc));
         return ins->second;
     }
 
-    // simulate every token from this state
-    std::vector<std::pair<llama_token, uint32_t>> accepted; // (token, next_state)
+    std::vector<std::pair<llama_token, uint32_t>> accepted;
     std::vector<llama_token>                      rejected;
 
     for (int32_t tok = 0; tok < n_vocab; ++tok) {
         const auto & info = ctx->token_info[tok];
-
-        // reject tokens with no codepoints (special/control) or incomplete UTF-8
-        if (info.codepoints.empty() || !info.complete_utf8) {
+        if (info.piece.empty()) {
             rejected.push_back(tok);
             continue;
         }
 
-        uint32_t next = dfa_simulate(dfa, state,
-                                     info.codepoints.data(),
-                                     info.codepoints.size());
+        uint32_t next = dfa_simulate_bytes(dfa, state,
+                                           reinterpret_cast<const uint8_t *>(info.piece.data()),
+                                           info.piece.size());
         if (next == dfa.dead_state) {
             rejected.push_back(tok);
         } else {
@@ -247,17 +195,13 @@ static const dfa_state_cache & dfa_get_or_build_cache(
         }
     }
 
-    const bool accept_heavy = accepted.size() > rejected.size();
-    sc.is_accept_heavy = accept_heavy;
+    sc.is_accept_heavy = accepted.size() > rejected.size();
 
-    if (accept_heavy) {
-        // store rejected tokens as outliers
+    if (sc.is_accept_heavy) {
         for (const auto & tok : rejected) {
             sc.outlier_tokens.insert(tok);
         }
-        // outlier_next_states stays empty – re-simulate on accept()
     } else {
-        // store accepted tokens as outliers (with their next state)
         for (const auto & [tok, ns] : accepted) {
             sc.outlier_tokens.insert(tok);
             sc.outlier_next_states[tok] = ns;
@@ -268,7 +212,63 @@ static const dfa_state_cache & dfa_get_or_build_cache(
     return ins->second;
 }
 
-// Decode all vocab tokens to codepoints
+static const dfa_exit_cache_entry & dfa_get_or_build_exit_cache(
+        common_sampler_dfa * ctx, uint32_t state, uint32_t region_idx) {
+    uint64_t key = (uint64_t)state << 32 | region_idx;
+    auto it = ctx->exit_cache.find(key);
+    if (it != ctx->exit_cache.end()) {
+        return it->second;
+    }
+
+    const auto &  dfa     = ctx->dfa;
+    const int32_t n_vocab = ctx->n_vocab;
+    const auto &  region  = ctx->regions[region_idx];
+
+    // Tokens that are accepted by the DFA AND end outside this region
+    std::vector<llama_token> exits;
+    // Tokens that are accepted by the DFA but stay in the region (or die)
+    std::vector<llama_token> stays;
+
+    for (int32_t tok = 0; tok < n_vocab; ++tok) {
+        const auto & info = ctx->token_info[tok];
+        if (info.piece.empty()) {
+            stays.push_back(tok);
+            continue;
+        }
+
+        uint32_t next = dfa_simulate_bytes(dfa, state,
+                                           reinterpret_cast<const uint8_t *>(info.piece.data()),
+                                           info.piece.size());
+        if (next == dfa.dead_state || region.member_states.count(next)) {
+            stays.push_back(tok);
+        } else {
+            exits.push_back(tok);
+        }
+    }
+
+    dfa_exit_cache_entry ec;
+    ec.is_exit_heavy = exits.size() > stays.size();
+
+    if (ec.is_exit_heavy) {
+        // most tokens exit → store the ones that stay as outliers
+        for (const auto & tok : stays) {
+            ec.outlier_tokens.insert(tok);
+        }
+    } else {
+        // most tokens stay → store the ones that exit as outliers
+        for (const auto & tok : exits) {
+            ec.outlier_tokens.insert(tok);
+        }
+    }
+
+    auto [ins, _] = ctx->exit_cache.emplace(key, std::move(ec));
+    return ins->second;
+}
+
+// ----------------------------------------------------------------------------
+// Token info
+// ----------------------------------------------------------------------------
+
 static void dfa_build_token_info(common_sampler_dfa * ctx,
                                  const struct llama_vocab * vocab) {
     const int32_t n_vocab = ctx->n_vocab;
@@ -276,25 +276,12 @@ static void dfa_build_token_info(common_sampler_dfa * ctx,
 
     for (int32_t tok = 0; tok < n_vocab; ++tok) {
         std::string piece = common_token_to_piece(vocab, tok, false);
-        if (piece.empty()) {
-            // leave codepoints empty, complete_utf8 = false
-            continue;
-        }
-
-        auto [cps, partial] = dfa_decode_utf8(piece, { 0, 0 });
-
-        // remove trailing 0 sentinel if present
-        if (!cps.empty() && cps.back() == 0) {
-            cps.pop_back();
-        }
-
-        ctx->token_info[tok].codepoints    = std::move(cps);
-        ctx->token_info[tok].complete_utf8  = (partial.n_remain == 0);
+        ctx->token_info[tok].piece = std::move(piece);
     }
 }
 
 // ----------------------------------------------------------------------------
-// Sampler interface implementation
+// Sampler interface
 // ----------------------------------------------------------------------------
 
 static const char * dfa_sampler_name(const struct llama_sampler * /*smpl*/) {
@@ -305,13 +292,20 @@ static void dfa_sampler_accept(struct llama_sampler * smpl, llama_token token) {
     auto * ctx = static_cast<common_sampler_dfa *>(smpl->ctx);
 
     if (ctx->current_state == ctx->dfa.dead_state) {
-        return; // stuck in dead state
+        return;
     }
 
+    // increment counters for all regions that contain the current state
+    const auto & sr = ctx->state_regions[ctx->current_state];
+    for (uint32_t ri : sr) {
+        ctx->regions[ri].counter++;
+    }
+
+    // advance DFA state
     const auto & sc = dfa_get_or_build_cache(ctx, ctx->current_state);
 
     if (!sc.is_accept_heavy) {
-        // reject-heavy: accepted tokens (outliers) have cached next_state
+        // reject-heavy: accepted tokens have cached next_state
         auto it = sc.outlier_next_states.find(token);
         if (it != sc.outlier_next_states.end()) {
             ctx->current_state = it->second;
@@ -321,14 +315,13 @@ static void dfa_sampler_accept(struct llama_sampler * smpl, llama_token token) {
 
     // accept-heavy or cache miss: re-simulate
     const auto & info = ctx->token_info[token];
-    if (info.codepoints.empty()) {
-        // special token – don't advance DFA
+    if (info.piece.empty()) {
         return;
     }
 
-    ctx->current_state = dfa_simulate(ctx->dfa, ctx->current_state,
-                                      info.codepoints.data(),
-                                      info.codepoints.size());
+    ctx->current_state = dfa_simulate_bytes(ctx->dfa, ctx->current_state,
+                                            reinterpret_cast<const uint8_t *>(info.piece.data()),
+                                            info.piece.size());
 }
 
 static void dfa_sampler_apply(struct llama_sampler * smpl,
@@ -337,7 +330,6 @@ static void dfa_sampler_apply(struct llama_sampler * smpl,
     const uint32_t state = ctx->current_state;
 
     if (state == ctx->dfa.dead_state) {
-        // everything is rejected
         for (size_t i = 0; i < cur_p->size; ++i) {
             cur_p->data[i].logit = -INFINITY;
         }
@@ -345,20 +337,66 @@ static void dfa_sampler_apply(struct llama_sampler * smpl,
         return;
     }
 
-    const auto & sc = dfa_get_or_build_cache(ctx, state);
+    // check which regions have exhausted their token limits
+    const auto & sr = ctx->state_regions[state];
+    std::vector<uint32_t> exhausted_regions;
+    for (uint32_t ri : sr) {
+        if (ctx->regions[ri].counter >= ctx->regions[ri].max_tokens) {
+            exhausted_regions.push_back(ri);
+        }
+    }
 
-    if (sc.is_accept_heavy) {
-        // most tokens accepted → mask only the outliers (rejected tokens)
-        for (size_t i = 0; i < cur_p->size; ++i) {
-            if (sc.outlier_tokens.count(cur_p->data[i].id)) {
-                cur_p->data[i].logit = -INFINITY;
+    if (!exhausted_regions.empty()) {
+        // apply exit masks: only allow tokens that exit ALL exhausted regions
+        // first pass: apply normal DFA mask (reject dead-state tokens)
+        const auto & sc = dfa_get_or_build_cache(ctx, state);
+        if (sc.is_accept_heavy) {
+            for (size_t i = 0; i < cur_p->size; ++i) {
+                if (sc.outlier_tokens.count(cur_p->data[i].id)) {
+                    cur_p->data[i].logit = -INFINITY;
+                }
+            }
+        } else {
+            for (size_t i = 0; i < cur_p->size; ++i) {
+                if (!sc.outlier_tokens.count(cur_p->data[i].id)) {
+                    cur_p->data[i].logit = -INFINITY;
+                }
+            }
+        }
+
+        // second pass: for each exhausted region, mask tokens that don't exit
+        for (uint32_t ri : exhausted_regions) {
+            const auto & ec = dfa_get_or_build_exit_cache(ctx, state, ri);
+            if (ec.is_exit_heavy) {
+                // most tokens exit → mask outliers (the ones that stay)
+                for (size_t i = 0; i < cur_p->size; ++i) {
+                    if (ec.outlier_tokens.count(cur_p->data[i].id)) {
+                        cur_p->data[i].logit = -INFINITY;
+                    }
+                }
+            } else {
+                // most tokens stay → only allow outliers (the ones that exit)
+                for (size_t i = 0; i < cur_p->size; ++i) {
+                    if (!ec.outlier_tokens.count(cur_p->data[i].id)) {
+                        cur_p->data[i].logit = -INFINITY;
+                    }
+                }
             }
         }
     } else {
-        // most tokens rejected → mask everything NOT in the outlier set
-        for (size_t i = 0; i < cur_p->size; ++i) {
-            if (!sc.outlier_tokens.count(cur_p->data[i].id)) {
-                cur_p->data[i].logit = -INFINITY;
+        // no limit hit: normal DFA masking
+        const auto & sc = dfa_get_or_build_cache(ctx, state);
+        if (sc.is_accept_heavy) {
+            for (size_t i = 0; i < cur_p->size; ++i) {
+                if (sc.outlier_tokens.count(cur_p->data[i].id)) {
+                    cur_p->data[i].logit = -INFINITY;
+                }
+            }
+        } else {
+            for (size_t i = 0; i < cur_p->size; ++i) {
+                if (!sc.outlier_tokens.count(cur_p->data[i].id)) {
+                    cur_p->data[i].logit = -INFINITY;
+                }
             }
         }
     }
@@ -369,6 +407,9 @@ static void dfa_sampler_apply(struct llama_sampler * smpl,
 static void dfa_sampler_reset(struct llama_sampler * smpl) {
     auto * ctx = static_cast<common_sampler_dfa *>(smpl->ctx);
     ctx->current_state = ctx->dfa.start_state;
+    for (auto & r : ctx->regions) {
+        r.counter = 0;
+    }
 }
 
 static struct llama_sampler * dfa_sampler_clone(const struct llama_sampler * smpl) {
@@ -417,13 +458,27 @@ struct llama_sampler * common_sampler_init_dfa(
     ctx->n_vocab       = n_vocab;
     ctx->current_state = params.start_state;
 
-    // build internal DFA representation
+    // build byte-level DFA
     ctx->dfa = dfa_build_table(params);
 
-    // decode all tokens to codepoints (with UTF-8 completeness flag)
+    // decode all tokens to raw bytes
     dfa_build_token_info(ctx, vocab);
 
-    // cache is lazy – built per-state on first access in apply()/accept()
+    // build regions and state→region index
+    ctx->state_regions.resize(params.n_states);
+    for (size_t r = 0; r < params.n_token_limits; ++r) {
+        const auto & tl = params.token_limits[r];
+        dfa_region region;
+        region.max_tokens = tl.max_tokens;
+        region.counter    = 0;
+        for (size_t s = 0; s < tl.n_states; ++s) {
+            region.member_states.insert(tl.states[s]);
+            ctx->state_regions[tl.states[s]].push_back((uint32_t)r);
+        }
+        ctx->regions.push_back(std::move(region));
+    }
+
+    // caches are lazy
 
     return llama_sampler_init(&dfa_sampler_vtable, ctx);
 }
