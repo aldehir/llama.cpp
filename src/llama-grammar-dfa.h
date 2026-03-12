@@ -150,11 +150,19 @@ struct vocab_trie_node {
     // Children indexed by next byte (dense for fast DFA walk)
     std::unique_ptr<vocab_trie_node> children[256];
 
+    // Precomputed: all token IDs at or below this node (sorted).
+    // Built once by cache_subtree_tokens() after trie construction.
+    std::vector<int32_t> subtree_tokens;
+
     // Recursively collect all token IDs at or below this node
     void collect_tokens(std::vector<int32_t> & out) const;
 
     // Count all tokens at or below this node
     uint32_t count_tokens() const;
+
+    // Precompute subtree_tokens for this node and all descendants.
+    // Must be called after the trie is fully built.
+    void cache_subtree_tokens();
 };
 
 struct vocab_byte_trie {
@@ -189,9 +197,14 @@ struct dfa_state_candidates {
                     uint32_t total_vocab_tokens);
 
 private:
-    void walk(const byte_dfa & dfa, uint16_t dfa_state,
-              const vocab_trie_node & node,
-              std::vector<int32_t> & out);
+    // Walk trie with multiple DFA states simultaneously.
+    // active_states maps dfa_state -> list of original starting states that
+    // have reached this dfa_state at this trie depth.
+    // candidate_bits[s] is the bitset of candidate tokens for starting state s.
+    void walk_multi(const byte_dfa & dfa,
+                    const vocab_trie_node & node,
+                    const std::vector<std::pair<uint16_t, std::vector<uint16_t>>> & active_groups,
+                    std::vector<std::vector<uint8_t>> & candidate_bits);
 };
 
 // ============================================================

@@ -10,6 +10,7 @@
 #include <map>
 #include <queue>
 #include <set>
+#include <unordered_map>
 
 // ============================================================
 // NFA implementation
@@ -1038,6 +1039,23 @@ uint32_t vocab_trie_node::count_tokens() const {
     return count;
 }
 
+void vocab_trie_node::cache_subtree_tokens() {
+    // Post-order: cache children first so we can reuse their results
+    subtree_tokens.clear();
+    subtree_tokens.insert(subtree_tokens.end(), tokens.begin(), tokens.end());
+
+    for (int b = 0; b < 256; b++) {
+        if (children[b]) {
+            children[b]->cache_subtree_tokens();
+            subtree_tokens.insert(subtree_tokens.end(),
+                                  children[b]->subtree_tokens.begin(),
+                                  children[b]->subtree_tokens.end());
+        }
+    }
+    // Sort for deterministic order (useful for reject-set construction)
+    std::sort(subtree_tokens.begin(), subtree_tokens.end());
+}
+
 void vocab_byte_trie::build(const llama_vocab & vocab) {
     uint32_t n = vocab.n_tokens();
     n_tokens_inserted = 0;
@@ -1062,45 +1080,80 @@ void vocab_byte_trie::build(const llama_vocab & vocab) {
         node->tokens.push_back((int32_t)id);
         n_tokens_inserted++;
     }
+
+    // Precompute cached subtree token lists for efficient DFA candidate precomputation
+    root.cache_subtree_tokens();
 }
 
 // ============================================================
 // Per-DFA-state candidate precomputation
 // ============================================================
 
-void dfa_state_candidates::walk(
-        const byte_dfa & dfa, uint16_t dfa_state,
+// Helper: set bits in a bitset for all tokens in a sorted token list.
+static void set_bits_for_tokens(std::vector<uint8_t> & bits, const std::vector<int32_t> & tokens) {
+    for (int32_t t : tokens) {
+        bits[t / 8] |= (1 << (t % 8));
+    }
+}
+
+void dfa_state_candidates::walk_multi(
+        const byte_dfa & dfa,
         const vocab_trie_node & node,
-        std::vector<int32_t> & out) {
-    // Tokens terminating at this node: they've been fed through the DFA
-    // up to this point without dying. They're candidates.
-    // (They may end mid-segment, which the runtime simulation will verify.)
-    out.insert(out.end(), node.tokens.begin(), node.tokens.end());
+        const std::vector<std::pair<uint16_t, std::vector<uint16_t>>> & active_groups,
+        std::vector<std::vector<uint8_t>> & candidate_bits) {
+
+    // For tokens terminating at this trie node: all active starting states
+    // get these as candidates (they survived the DFA walk to this point).
+    if (!node.tokens.empty()) {
+        for (const auto & group : active_groups) {
+            for (uint16_t orig : group.second) {
+                set_bits_for_tokens(candidate_bits[orig], node.tokens);
+            }
+        }
+    }
 
     for (int b = 0; b < 256; b++) {
         if (!node.children[b]) continue;
 
-        uint16_t next_state = dfa.transitions[dfa_state][b];
-        if (next_state == 0) {
-            // Dead — entire subtree pruned for this DFA state
-            continue;
+        // Group active states by their DFA transition on byte b.
+        // Key: next dfa_state, Value: list of original starting states.
+        // Use a small local map since DFA state counts are typically small.
+        std::unordered_map<uint16_t, std::vector<uint16_t>> next_groups;
+        std::vector<uint16_t> accept_origins;  // states reaching an accept state
+
+        for (const auto & group : active_groups) {
+            uint16_t next_state = dfa.transitions[group.first][b];
+            if (next_state == 0) {
+                // Dead — prune for all original states in this group
+                continue;
+            }
+            if (dfa.accept[next_state]) {
+                // DFA segment completes — all tokens in subtree are candidates
+                accept_origins.insert(accept_origins.end(),
+                                      group.second.begin(), group.second.end());
+            } else {
+                auto & v = next_groups[next_state];
+                v.insert(v.end(), group.second.begin(), group.second.end());
+            }
         }
 
-        if (dfa.accept[next_state]) {
-            // DFA segment completes here. Remaining bytes go to a different
-            // segment. Conservatively include ALL tokens in this subtree.
-            out.insert(out.end(),
-                       node.children[b]->tokens.begin(),
-                       node.children[b]->tokens.end());
-            // Also collect all tokens deeper in the subtree
-            for (int b2 = 0; b2 < 256; b2++) {
-                if (node.children[b]->children[b2]) {
-                    node.children[b]->children[b2]->collect_tokens(out);
-                }
+        // Handle accept-state origins: use cached subtree tokens (O(1) copy)
+        if (!accept_origins.empty()) {
+            for (uint16_t orig : accept_origins) {
+                set_bits_for_tokens(candidate_bits[orig],
+                                    node.children[b]->subtree_tokens);
             }
-        } else {
-            // DFA still in progress — recurse
-            walk(dfa, next_state, *node.children[b], out);
+        }
+
+        // Recurse with merged groups — states sharing the same next dfa_state
+        // only recurse once, sharing all work in the subtree.
+        if (!next_groups.empty()) {
+            std::vector<std::pair<uint16_t, std::vector<uint16_t>>> merged;
+            merged.reserve(next_groups.size());
+            for (auto & kv : next_groups) {
+                merged.emplace_back(kv.first, std::move(kv.second));
+            }
+            walk_multi(dfa, *node.children[b], merged, candidate_bits);
         }
     }
 }
@@ -1112,42 +1165,62 @@ void dfa_state_candidates::precompute(const byte_dfa & dfa, const vocab_byte_tri
 
     LLAMA_LOG_DEBUG("%s: processing DFA with %zu states\n", __func__, n_states);
 
+    if (n_states <= 1) {
+        // Only state 0 (dead) — nothing to precompute
+        return;
+    }
+
+    // Allocate one bitset per DFA state for candidate tracking.
+    // Using bitsets avoids sort+dedup and makes reject-set construction trivial.
+    size_t bits_size = (total_vocab_tokens + 7) / 8;
+    std::vector<std::vector<uint8_t>> candidate_bits(n_states, std::vector<uint8_t>(bits_size, 0));
+
+    // Build initial active groups: each DFA state (except 0) starts as its own group
+    std::vector<std::pair<uint16_t, std::vector<uint16_t>>> initial_groups;
+    initial_groups.reserve(n_states - 1);
+    for (size_t s = 1; s < n_states; s++) {
+        initial_groups.push_back({(uint16_t) s, {(uint16_t) s}});
+    }
+
+    // Single combined walk processes all DFA states together
+    walk_multi(dfa, trie.root, initial_groups, candidate_bits);
+
+    // Convert bitsets to adaptive accept/reject sets
     size_t n_accept_heavy = 0;
     size_t n_reject_heavy = 0;
 
-    for (size_t s = 1; s < n_states; s++) {  // skip state 0 (dead)
-        std::vector<int32_t> cands;
-        walk(dfa, (uint16_t) s, trie.root, cands);
-
-        // Sort and deduplicate
-        std::sort(cands.begin(), cands.end());
-        cands.erase(std::unique(cands.begin(), cands.end()), cands.end());
+    for (size_t s = 1; s < n_states; s++) {
+        // Count candidates from bitset
+        uint32_t n_cands = 0;
+        for (size_t i = 0; i < bits_size; i++) {
+            // popcount byte
+            uint8_t v = candidate_bits[s][i];
+            // Brian Kernighan's bit counting
+            while (v) { n_cands++; v &= v - 1; }
+        }
 
         auto & state = states[s];
 
-        if (cands.size() > total_vocab_tokens / 2) {
-            // Accept-heavy: most tokens are candidates.
-            // Store the reject set (tokens NOT in cands) — it's smaller.
+        if (n_cands > total_vocab_tokens / 2) {
+            // Accept-heavy: store reject set
             state.accept_heavy = true;
             n_accept_heavy++;
-
-            // Build reject set: all tokens in [0, total_vocab_tokens) not in cands
-            std::vector<int32_t> rejects;
-            size_t ci = 0;
+            state.token_set.reserve(total_vocab_tokens - n_cands);
             for (uint32_t t = 0; t < total_vocab_tokens; t++) {
-                if (ci < cands.size() && cands[ci] == (int32_t)t) {
-                    ci++;
-                } else {
-                    rejects.push_back((int32_t)t);
+                if (!(candidate_bits[s][t / 8] & (1 << (t % 8)))) {
+                    state.token_set.push_back((int32_t) t);
                 }
             }
-            state.token_set = std::move(rejects);
         } else {
-            // Reject-heavy: most tokens are rejected.
-            // Store the accept set (candidate tokens) — it's smaller.
+            // Reject-heavy: store accept set
             state.accept_heavy = false;
             n_reject_heavy++;
-            state.token_set = std::move(cands);
+            state.token_set.reserve(n_cands);
+            for (uint32_t t = 0; t < total_vocab_tokens; t++) {
+                if (candidate_bits[s][t / 8] & (1 << (t % 8))) {
+                    state.token_set.push_back((int32_t) t);
+                }
+            }
         }
     }
 
