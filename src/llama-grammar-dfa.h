@@ -163,14 +163,7 @@ struct compiled_grammar {
     // Check if any config is in a "complete" state (rule finished, stack empty)
     bool any_config_complete(const std::vector<parse_config> & configs) const;
 
-    // Left-factor rules to reduce runtime config proliferation.
-    // Merges alternates that share common prefixes (identical RULE_CALL or DFA_MATCH segments).
-    void left_factor();
-
 private:
-    // Left-factor a single rule, potentially creating new suffix rules.
-    // Returns true if the rule was modified.
-    bool left_factor_rule(uint32_t rule_id);
     // Expand a config to reach a DFA_MATCH segment (or mark as complete)
     // Returns all reachable configs after resolving RULE_CALLs and rule completions
     void advance_to_terminal(
