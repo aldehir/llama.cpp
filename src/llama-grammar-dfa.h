@@ -65,6 +65,9 @@ struct byte_dfa {
 
     // Product construction: intersection of two DFAs
     static byte_dfa intersect(const byte_dfa & a, const byte_dfa & b);
+
+    // Equality: two DFAs match if they have the same structure
+    bool operator==(const byte_dfa & other) const;
 };
 
 // ============================================================

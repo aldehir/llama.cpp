@@ -613,6 +613,12 @@ byte_dfa byte_dfa::intersect(const byte_dfa & a, const byte_dfa & b) {
     return result;
 }
 
+bool byte_dfa::operator==(const byte_dfa & other) const {
+    return start_state == other.start_state &&
+           accept == other.accept &&
+           transitions == other.transitions;
+}
+
 // ============================================================
 // Build DFA for a terminal segment
 // ============================================================
@@ -772,8 +778,19 @@ compiled_grammar compiled_grammar::compile(
                     }
                     // Compile terminal segment to DFA
                     auto dfa = build_segment_dfa(seg_start, pos);
-                    uint32_t dfa_id = (uint32_t) cg.dfas.size();
-                    cg.dfas.push_back(std::move(dfa));
+
+                    // Deduplicate: reuse an existing DFA if identical
+                    uint32_t dfa_id = UINT32_MAX;
+                    for (uint32_t i = 0; i < (uint32_t) cg.dfas.size(); i++) {
+                        if (cg.dfas[i] == dfa) {
+                            dfa_id = i;
+                            break;
+                        }
+                    }
+                    if (dfa_id == UINT32_MAX) {
+                        dfa_id = (uint32_t) cg.dfas.size();
+                        cg.dfas.push_back(std::move(dfa));
+                    }
 
                     compiled_segment seg;
                     seg.type = compiled_segment::DFA_MATCH;
