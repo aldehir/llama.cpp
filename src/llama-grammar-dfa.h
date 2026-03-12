@@ -57,7 +57,7 @@ struct byte_dfa {
     // Build from NFA via subset construction
     static byte_dfa from_nfa(const grammar_nfa & nfa);
 
-    // Minimize using Hopcroft's algorithm
+    // Minimize using Hopcroft's algorithm, then canonicalize state numbering
     void minimize();
 
     // Complement: flip accept/reject states (except dead state 0)

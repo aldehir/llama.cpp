@@ -499,6 +499,56 @@ void byte_dfa::minimize() {
 
     minimized.start_state = state_to_group[start_state];
 
+    // Canonicalize state numbering via BFS from start state.
+    // This ensures that two minimal DFAs for the same language are
+    // structurally identical (same transitions, same state IDs),
+    // enabling deduplication via operator==.
+    {
+        uint16_t n_min = (uint16_t) minimized.transitions.size();
+        std::vector<uint16_t> remap(n_min, UINT16_MAX);
+        remap[0] = 0;  // dead state stays 0
+        uint16_t next_id = 1;
+
+        // BFS from start state
+        std::queue<uint16_t> bfs;
+        if (minimized.start_state != 0) {
+            remap[minimized.start_state] = next_id++;
+            bfs.push(minimized.start_state);
+        }
+
+        while (!bfs.empty()) {
+            uint16_t s = bfs.front();
+            bfs.pop();
+            for (int b = 0; b < 256; b++) {
+                uint16_t t = minimized.transitions[s][b];
+                if (t != 0 && remap[t] == UINT16_MAX) {
+                    remap[t] = next_id++;
+                    bfs.push(t);
+                }
+            }
+        }
+
+        // Assign IDs to any unreachable states (shouldn't happen for well-formed DFAs)
+        for (uint16_t i = 0; i < n_min; i++) {
+            if (remap[i] == UINT16_MAX) {
+                remap[i] = next_id++;
+            }
+        }
+
+        // Build canonicalized DFA
+        byte_dfa canon;
+        canon.transitions.resize(n_min);
+        canon.accept.resize(n_min, false);
+        for (uint16_t i = 0; i < n_min; i++) {
+            canon.accept[remap[i]] = minimized.accept[i];
+            for (int b = 0; b < 256; b++) {
+                canon.transitions[remap[i]][b] = remap[minimized.transitions[i][b]];
+            }
+        }
+        canon.start_state = remap[minimized.start_state];
+        minimized = std::move(canon);
+    }
+
     *this = std::move(minimized);
 }
 
