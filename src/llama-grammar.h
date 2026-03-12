@@ -1,8 +1,10 @@
 #pragma once
 
 #include "llama.h"
+#include "llama-grammar-dfa.h"
 
 #include <map>
+#include <memory>
 #include <regex>
 #include <string>
 #include <vector>
@@ -115,11 +117,16 @@ struct llama_grammar {
     // note: allow null vocab for testing (not great)
     const llama_vocab * vocab;
 
+    // --- Legacy fields (retained for backward compatibility with tests) ---
     const llama_grammar_rules  rules;  // TODO: shared ptr
           llama_grammar_stacks stacks;
 
     // buffer for partially generated UTF-8 sequence from accepted tokens
     llama_partial_utf8 partial_utf8;
+
+    // --- DFA-based engine (new) ---
+    std::shared_ptr<compiled_grammar> compiled;  // immutable after init, shared across clones
+    std::vector<parse_config>         configs;    // mutable runtime state
 
     // lazy grammars wait for trigger words or tokens before constraining the sampling.
     // we still have trigger_tokens for non-lazy grammars to force printing of special trigger tokens.

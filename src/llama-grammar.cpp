@@ -1,4 +1,5 @@
 #include "llama-grammar.h"
+#include "llama-grammar-dfa.h"
 
 #include "llama-impl.h"
 #include "llama-vocab.h"
@@ -7,6 +8,7 @@
 #include <cmath>
 #include <algorithm>
 #include <cstdint>
+#include <memory>
 #include <stdexcept>
 
 #define MAX_REPETITION_THRESHOLD 2000
@@ -965,6 +967,11 @@ struct llama_grammar * llama_grammar_init_impl(
         }
     } while (true);
 
+    // Compile DFA-based grammar
+    auto cg = std::make_shared<compiled_grammar>(
+        compiled_grammar::compile(vec_rules, (uint32_t)start_rule_index));
+    auto dfa_configs = cg->init_configs();
+
     // Important: vec_rules has to be moved here, not copied, because stacks contains
     // pointers to elements of vec_rules. If vec_rules were copied into llama_grammar
     // then the pointers would be invalidated when the local vec_rules goes out of scope.
@@ -973,6 +980,8 @@ struct llama_grammar * llama_grammar_init_impl(
         std::move(vec_rules),
         std::move(stacks),
         /* .partial_utf8 = */     {},
+        /* .compiled = */         std::move(cg),
+        /* .configs = */          std::move(dfa_configs),
         /* .lazy =*/              false,
         /* .awaiting_trigger = */ false,
         /* .trigger_buffer = */   "",
@@ -1070,6 +1079,11 @@ struct llama_grammar * llama_grammar_init_impl(
         trigger.regex = std::regex(trigger.pattern);
     }
 
+    // Compile DFA-based grammar
+    auto cg = std::make_shared<compiled_grammar>(
+        compiled_grammar::compile(vec_rules, (uint32_t)start_rule_index));
+    auto dfa_configs = cg->init_configs();
+
     // Important: vec_rules has to be moved here, not copied, because stacks contains
     // pointers to elements of vec_rules. If vec_rules were copied into llama_grammar
     // then the pointers would be invalidated when the local vec_rules goes out of scope.
@@ -1078,6 +1092,8 @@ struct llama_grammar * llama_grammar_init_impl(
         std::move(vec_rules),
         std::move(stacks),
         /* .partial_utf8 = */     {},
+        /* .compiled = */         std::move(cg),
+        /* .configs = */          std::move(dfa_configs),
         /* .lazy = */             lazy,
         /* .awaiting_trigger = */ lazy,
         /* .trigger_buffer = */   "",
@@ -1100,6 +1116,8 @@ struct llama_grammar * llama_grammar_clone_impl(const struct llama_grammar & gra
         grammar.rules,
         grammar.stacks,
         grammar.partial_utf8,
+        grammar.compiled,    // shared_ptr: compiled grammar is immutable, shared across clones
+        grammar.configs,     // configs are value types, safe to copy
         grammar.lazy,
         grammar.awaiting_trigger,
         grammar.trigger_buffer,
@@ -1130,6 +1148,40 @@ void llama_grammar_apply_impl(const struct llama_grammar & grammar, llama_token_
         return;
     }
 
+    if (grammar.compiled) {
+        // DFA-based token validation
+        bool allow_eog = grammar.compiled->any_config_complete(grammar.configs);
+
+        for (size_t i = 0; i < cur_p->size; ++i) {
+            const llama_token id = cur_p->data[i].id;
+            const std::string & piece = grammar.vocab->token_to_piece(id);
+
+            if (grammar.vocab->is_eog(id)) {
+                if (!allow_eog) {
+                    cur_p->data[i].logit = -INFINITY;
+                }
+            } else if (piece.empty() || piece[0] == 0) {
+                cur_p->data[i].logit = -INFINITY;
+            } else {
+                // Simulate DFA forward through all bytes of the token
+                auto sim_configs = grammar.configs;
+                bool valid = true;
+                for (size_t j = 0; j < piece.size(); j++) {
+                    grammar.compiled->accept_byte(sim_configs, (uint8_t)piece[j]);
+                    if (sim_configs.empty()) {
+                        valid = false;
+                        break;
+                    }
+                }
+                if (!valid) {
+                    cur_p->data[i].logit = -INFINITY;
+                }
+            }
+        }
+        return;
+    }
+
+    // Legacy code path (fallback when compiled grammar is not available)
     bool allow_eog = false;
     for (const auto & stack : grammar.stacks) {
         if (stack.empty()) {
@@ -1197,7 +1249,6 @@ void llama_grammar_accept_impl(struct llama_grammar & grammar, llama_token token
                         start = match.position(0);
                     }
                     auto constrained_str = grammar.trigger_buffer.substr(start);
-                    // std::string constrained_str(match[1].first, grammar.trigger_buffer.end());
                     grammar.trigger_buffer.clear();
                     llama_grammar_accept_str(grammar, constrained_str);
                     LLAMA_LOG_DEBUG("Grammar triggered on regex: '%s'\n", constrained_str.c_str());
@@ -1210,9 +1261,15 @@ void llama_grammar_accept_impl(struct llama_grammar & grammar, llama_token token
     }
 
     if (grammar.vocab->is_eog(token)) {
-        for (const auto & stack : grammar.stacks) {
-            if (stack.empty()) {
+        if (grammar.compiled) {
+            if (grammar.compiled->any_config_complete(grammar.configs)) {
                 return;
+            }
+        } else {
+            for (const auto & stack : grammar.stacks) {
+                if (stack.empty()) {
+                    return;
+                }
             }
         }
         GGML_ABORT("fatal error");
@@ -1222,7 +1279,26 @@ void llama_grammar_accept_impl(struct llama_grammar & grammar, llama_token token
 }
 
 void llama_grammar_accept_str(struct llama_grammar & grammar, const std::string & piece) {
-    // Note terminating 0 in decoded string
+    if (grammar.compiled) {
+        // DFA-based: feed raw bytes through the engine
+        for (size_t i = 0; i < piece.size(); i++) {
+            grammar.compiled->accept_byte(grammar.configs, (uint8_t)piece[i]);
+            if (grammar.configs.empty()) {
+                throw std::runtime_error("Unexpected empty grammar configs after accepting byte in piece: " + piece);
+            }
+        }
+
+        // Also update the legacy engine state to keep it in sync (for tests that inspect stacks)
+        const auto decoded = decode_utf8(piece, grammar.partial_utf8);
+        const auto & code_points = decoded.first;
+        for (auto it = code_points.begin(), end = code_points.end() - 1; it != end; ++it) {
+            llama_grammar_accept(&grammar, *it);
+        }
+        grammar.partial_utf8 = decoded.second;
+        return;
+    }
+
+    // Legacy code path
     const auto   decoded     = decode_utf8(piece, grammar.partial_utf8);
     const auto & code_points = decoded.first;
 
