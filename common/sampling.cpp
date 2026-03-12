@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <unordered_map>
 
@@ -388,6 +389,15 @@ llama_token common_sampler_sample(struct common_sampler * gsmpl, struct llama_co
 
     // start measuring sampling time after the llama_context synchronization in order to not measure any ongoing async operations
     const auto tm = gsmpl->tm();
+
+    // Allow forcing grammar-first sampling via environment variable for benchmarking
+    // the new DFA grammar engine's impact on the sampling pipeline.
+    {
+        static const bool force_grammar_first = (std::getenv("LLAMA_GRAMMAR_FIRST") != nullptr);
+        if (force_grammar_first) {
+            grammar_first = true;
+        }
+    }
 
     gsmpl->set_logits(ctx, idx);
 
