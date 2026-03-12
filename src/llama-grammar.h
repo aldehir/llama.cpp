@@ -45,45 +45,15 @@ typedef struct llama_grammar_element {
     uint32_t           value; // Unicode code point or rule ID
 } llama_grammar_element;
 
-struct llama_partial_utf8 {
-    uint32_t value;    // bit value so far (unshifted)
-    int      n_remain; // num bytes remaining; -1 indicates invalid sequence
-};
-
-struct llama_grammar_candidate {
-    size_t               index;
-    const uint32_t     * code_points;
-    llama_partial_utf8   partial_utf8;
-};
-
 using llama_grammar_rule  = std::vector<      llama_grammar_element>;
-using llama_grammar_stack = std::vector<const llama_grammar_element *>;
-
-using llama_grammar_rules      = std::vector<llama_grammar_rule>;
-using llama_grammar_stacks     = std::vector<llama_grammar_stack>;
-using llama_grammar_candidates = std::vector<llama_grammar_candidate>;
-
-// TODO: remove, needed for tests atm
-const llama_grammar_rules  & llama_grammar_get_rules (const struct llama_grammar * grammar);
-      llama_grammar_stacks & llama_grammar_get_stacks(      struct llama_grammar * grammar);
-
-// takes a set of possible pushdown stacks on a grammar, which are required to
-// be positioned at a character range (see `llama_grammar_advance_stack`), and
-// produces the N possible stacks if the given char is accepted at those
-// positions
-void llama_grammar_accept(struct llama_grammar * grammar, uint32_t chr);
-
-std::vector<llama_grammar_candidate> llama_grammar_reject_candidates_for_stack(
-        const llama_grammar_rules      & rules,
-        const llama_grammar_stack      & stack,
-        const llama_grammar_candidates & candidates);
+using llama_grammar_rules = std::vector<llama_grammar_rule>;
 
 struct llama_grammar_parser {
     std::map<std::string, uint32_t> symbol_ids;
 
     llama_grammar_rules rules;
 
-    llama_grammar_stack c_rules() const;
+    std::vector<const llama_grammar_element *> c_rules() const;
 
     uint32_t get_symbol_id(const char * src, size_t len);
     uint32_t generate_symbol_id(const std::string & base_name);
@@ -117,14 +87,7 @@ struct llama_grammar {
     // note: allow null vocab for testing (not great)
     const llama_vocab * vocab;
 
-    // --- Legacy fields (retained for backward compatibility with tests) ---
-    const llama_grammar_rules  rules;  // TODO: shared ptr
-          llama_grammar_stacks stacks;
-
-    // buffer for partially generated UTF-8 sequence from accepted tokens
-    llama_partial_utf8 partial_utf8;
-
-    // --- DFA-based engine (new) ---
+    // DFA-based engine
     std::shared_ptr<compiled_grammar> compiled;  // immutable after init, shared across clones
     std::vector<parse_config>         configs;    // mutable runtime state
 

@@ -7,10 +7,130 @@
 #include "../src/llama-grammar.h"
 
 #include <cassert>
+#include <cstdio>
 #include <stdexcept>
+#include <string>
 
-int main()
-{
+static llama_grammar * build_grammar(const std::string & grammar_str) {
+    return llama_grammar_init_impl(nullptr, grammar_str.c_str(), "root", false, nullptr, 0, nullptr, 0);
+}
+
+static bool match_string(const std::string & input, llama_grammar * grammar) {
+    auto configs = grammar->configs;  // copy
+    for (uint8_t b : input) {
+        grammar->compiled->accept_byte(configs, b);
+        if (configs.empty()) return false;
+    }
+    return grammar->compiled->any_config_complete(configs);
+}
+
+static void test_grammar_initialization() {
+    fprintf(stderr, "Testing grammar initialization...\n");
+
+    // Test that grammar initialization succeeds for a valid grammar
+    auto * grammar = build_grammar(R"(root ::= "hello")");
+    assert(grammar != nullptr);
+    assert(grammar->compiled != nullptr);
+    assert(!grammar->configs.empty());
+    llama_grammar_free_impl(grammar);
+
+    fprintf(stderr, "  Grammar initialization: OK\n");
+}
+
+static void test_simple_accept_reject() {
+    fprintf(stderr, "Testing simple accept/reject...\n");
+
+    auto * grammar = build_grammar(R"(root ::= "abc")");
+    assert(grammar != nullptr);
+
+    assert(match_string("abc", grammar));
+    assert(!match_string("abd", grammar));
+    assert(!match_string("ab", grammar));
+    assert(!match_string("abcd", grammar));
+    assert(!match_string("", grammar));
+
+    llama_grammar_free_impl(grammar);
+    fprintf(stderr, "  Simple accept/reject: OK\n");
+}
+
+static void test_valid_bytes() {
+    fprintf(stderr, "Testing get_valid_bytes...\n");
+
+    auto * grammar = build_grammar(R"(root ::= [a-z]+)");
+    assert(grammar != nullptr);
+
+    // At the start, all lowercase letters should be valid
+    auto valid = grammar->compiled->get_valid_bytes(grammar->configs);
+    for (uint8_t b = 'a'; b <= 'z'; b++) {
+        assert(valid[b]);
+    }
+    // Digits should not be valid
+    for (uint8_t b = '0'; b <= '9'; b++) {
+        assert(!valid[b]);
+    }
+
+    llama_grammar_free_impl(grammar);
+    fprintf(stderr, "  get_valid_bytes: OK\n");
+}
+
+static void test_char_ranges() {
+    fprintf(stderr, "Testing character ranges...\n");
+
+    auto * grammar = build_grammar(R"(root ::= [a-zA-Z0-9_]+)");
+    assert(grammar != nullptr);
+
+    assert(match_string("hello", grammar));
+    assert(match_string("HELLO", grammar));
+    assert(match_string("hello123", grammar));
+    assert(match_string("_test", grammar));
+    assert(!match_string("hello world", grammar));
+    assert(!match_string("", grammar));
+
+    llama_grammar_free_impl(grammar);
+    fprintf(stderr, "  Character ranges: OK\n");
+}
+
+static void test_alternates() {
+    fprintf(stderr, "Testing alternates...\n");
+
+    auto * grammar = build_grammar(R"(root ::= "foo" | "bar" | "baz")");
+    assert(grammar != nullptr);
+
+    assert(match_string("foo", grammar));
+    assert(match_string("bar", grammar));
+    assert(match_string("baz", grammar));
+    assert(!match_string("qux", grammar));
+    assert(!match_string("foobar", grammar));
+
+    llama_grammar_free_impl(grammar);
+    fprintf(stderr, "  Alternates: OK\n");
+}
+
+static void test_rule_refs() {
+    fprintf(stderr, "Testing rule references...\n");
+
+    auto * grammar = build_grammar(R"(
+        root ::= expr
+        expr ::= term ("+" term)*
+        term ::= [0-9]+
+    )");
+    assert(grammar != nullptr);
+
+    assert(match_string("42", grammar));
+    assert(match_string("1+2", grammar));
+    assert(match_string("1+2+3", grammar));
+    assert(!match_string("+", grammar));
+    assert(!match_string("1+", grammar));
+    assert(!match_string("abc", grammar));
+
+    llama_grammar_free_impl(grammar);
+    fprintf(stderr, "  Rule references: OK\n");
+}
+
+static void test_element_level_init() {
+    fprintf(stderr, "Testing element-level init...\n");
+
+    // Build using the element-level API (same grammar as the original test)
     llama_grammar_parser parsed_grammar;
 
     std::vector<std::pair<std::string, uint32_t>> expected = {
@@ -100,16 +220,13 @@ int main()
         },
     };
 
-    for (auto pair : expected)
-    {
+    for (auto pair : expected) {
         parsed_grammar.symbol_ids[pair.first] = pair.second;
     }
 
-    for (auto rule : expected_rules)
-    {
+    for (auto rule : expected_rules) {
         parsed_grammar.rules.emplace_back();
-        for (auto element : rule)
-        {
+        for (auto element : rule) {
             parsed_grammar.rules.back().push_back(element);
         }
     }
@@ -121,288 +238,41 @@ int main()
         throw std::runtime_error("Failed to initialize llama_grammar");
     }
 
-    std::vector<std::vector<llama_grammar_element>> expected_stacks = {
-        {
-            {LLAMA_GRETYPE_RULE_REF, 5},
-            {LLAMA_GRETYPE_CHAR, 61},
-            {LLAMA_GRETYPE_RULE_REF, 7},
-            {LLAMA_GRETYPE_CHAR, 97},
-        },
-        {
-            {LLAMA_GRETYPE_RULE_REF, 5},
-            {LLAMA_GRETYPE_CHAR, 61},
-            {LLAMA_GRETYPE_RULE_REF, 7},
-            {LLAMA_GRETYPE_RULE_REF, 3},
-            {LLAMA_GRETYPE_CHAR, 48},
-        },
-        {
-            {LLAMA_GRETYPE_RULE_REF, 5},
-            {LLAMA_GRETYPE_CHAR, 61},
-            {LLAMA_GRETYPE_RULE_REF, 7},
-            {LLAMA_GRETYPE_RULE_REF, 3},
-            {LLAMA_GRETYPE_CHAR, 48},
-        },
-        {
-            {LLAMA_GRETYPE_RULE_REF, 5},
-            {LLAMA_GRETYPE_CHAR, 61},
-            {LLAMA_GRETYPE_RULE_REF, 7},
-            {LLAMA_GRETYPE_CHAR, 40},
-        },
-        {
-            {LLAMA_GRETYPE_CHAR, 61},
-            {LLAMA_GRETYPE_RULE_REF, 7},
-            {LLAMA_GRETYPE_CHAR, 97},
-        },
-        {
-            {LLAMA_GRETYPE_CHAR, 61},
-            {LLAMA_GRETYPE_RULE_REF, 7},
-            {LLAMA_GRETYPE_RULE_REF, 3},
-            {LLAMA_GRETYPE_CHAR, 48},
-        },
-        {
-            {LLAMA_GRETYPE_CHAR, 61},
-            {LLAMA_GRETYPE_RULE_REF, 7},
-            {LLAMA_GRETYPE_RULE_REF, 3},
-            {LLAMA_GRETYPE_CHAR, 48},
-        },
-        {
-            {LLAMA_GRETYPE_CHAR, 61},
-            {LLAMA_GRETYPE_RULE_REF, 7},
-            {LLAMA_GRETYPE_CHAR, 40},
-        }};
+    // Verify that the grammar was compiled and configs are initialized
+    assert(grammar->compiled != nullptr);
+    assert(!grammar->configs.empty());
 
-    auto index = 0;
-    for (const llama_grammar_stack & stack : llama_grammar_get_stacks(grammar))
-    {
-        // compare stack to expected_stack
-        for (uint32_t i = 0; i < stack.size(); i++)
-        {
-            const llama_grammar_element * element = stack[i];
-            const llama_grammar_element & expected_element = expected_stacks[index][i];
+    // Verify valid bytes at initial state using DFA
+    auto valid = grammar->compiled->get_valid_bytes(grammar->configs);
 
-            // pretty print error message before asserting
-            if (expected_element.type != element->type || expected_element.value != element->value)
-            {
-                fprintf(stderr, "index: %d\n", index);
-                fprintf(stderr, "expected_element: %d, %u\n", expected_element.type, expected_element.value);
-                fprintf(stderr, "actual_element: %d, %u\n", element->type, element->value);
-                fprintf(stderr, "expected_element != actual_element\n");
-            }
-
-            assert(expected_element.type == element->type && expected_element.value == element->value);
-        }
-        index++;
-    }
-
-    std::vector<llama_grammar_candidate> next_candidates;
-    next_candidates.resize(24);
-
-    for (size_t i = 0; i < 24; ++i)
-    {
-        uint32_t *cp = new uint32_t[2]; // dynamically allocate memory for code_point
-        cp[0] = 37 + i;
-        cp[1] = 0;
-        next_candidates[i] = {i, cp, {}};
-    }
-
-    std::vector<std::vector<std::pair<uint32_t, uint16_t>>> expected_reject = {
-        {
-            {0, 37},
-            {1, 38},
-            {2, 39},
-            {3, 40},
-            {4, 41},
-            {5, 42},
-            {6, 43},
-            {7, 44},
-            {8, 45},
-            {9, 46},
-            {10, 47},
-            {11, 48},
-            {12, 49},
-            {13, 50},
-            {14, 51},
-            {15, 52},
-            {16, 53},
-            {17, 54},
-            {18, 55},
-            {19, 56},
-            {20, 57},
-            {21, 58},
-            {22, 59},
-            {23, 60},
-        },
-        {
-            {0, 37},
-            {1, 38},
-            {2, 39},
-            {3, 40},
-            {4, 41},
-            {5, 42},
-            {6, 43},
-            {7, 44},
-            {8, 45},
-            {9, 46},
-            {10, 47},
-            {21, 58},
-            {22, 59},
-            {23, 60},
-        },
-        {
-            {0, 37},
-            {1, 38},
-            {2, 39},
-            {3, 40},
-            {4, 41},
-            {5, 42},
-            {6, 43},
-            {7, 44},
-            {8, 45},
-            {9, 46},
-            {10, 47},
-            {21, 58},
-            {22, 59},
-            {23, 60},
-        },
-        {
-            {0, 37},
-            {1, 38},
-            {2, 39},
-            {4, 41},
-            {5, 42},
-            {6, 43},
-            {7, 44},
-            {8, 45},
-            {9, 46},
-            {10, 47},
-            {11, 48},
-            {12, 49},
-            {13, 50},
-            {14, 51},
-            {15, 52},
-            {16, 53},
-            {17, 54},
-            {18, 55},
-            {19, 56},
-            {20, 57},
-            {21, 58},
-            {22, 59},
-            {23, 60},
-        },
-        {
-            {0, 37},
-            {1, 38},
-            {2, 39},
-            {3, 40},
-            {4, 41},
-            {5, 42},
-            {6, 43},
-            {7, 44},
-            {8, 45},
-            {9, 46},
-            {10, 47},
-            {11, 48},
-            {12, 49},
-            {13, 50},
-            {14, 51},
-            {15, 52},
-            {16, 53},
-            {17, 54},
-            {18, 55},
-            {19, 56},
-            {20, 57},
-            {21, 58},
-            {22, 59},
-            {23, 60},
-        },
-        {
-            {0, 37},
-            {1, 38},
-            {2, 39},
-            {3, 40},
-            {4, 41},
-            {5, 42},
-            {6, 43},
-            {7, 44},
-            {8, 45},
-            {9, 46},
-            {10, 47},
-            {21, 58},
-            {22, 59},
-            {23, 60},
-        },
-        {
-            {0, 37},
-            {1, 38},
-            {2, 39},
-            {3, 40},
-            {4, 41},
-            {5, 42},
-            {6, 43},
-            {7, 44},
-            {8, 45},
-            {9, 46},
-            {10, 47},
-            {21, 58},
-            {22, 59},
-            {23, 60},
-        },
-        {
-            {0, 37},
-            {1, 38},
-            {2, 39},
-            {4, 41},
-            {5, 42},
-            {6, 43},
-            {7, 44},
-            {8, 45},
-            {9, 46},
-            {10, 47},
-            {11, 48},
-            {12, 49},
-            {13, 50},
-            {14, 51},
-            {15, 52},
-            {16, 53},
-            {17, 54},
-            {18, 55},
-            {19, 56},
-            {20, 57},
-            {21, 58},
-            {22, 59},
-            {23, 60},
-        },
-    };
-
-    std::vector<llama_grammar_candidate> rejects = llama_grammar_reject_candidates_for_stack(llama_grammar_get_rules(grammar), llama_grammar_get_stacks(grammar)[0], next_candidates);
-
-    std::vector<std::vector<llama_grammar_candidate>> all_rejects;
-
-    for (std::size_t count = 0; count < llama_grammar_get_stacks(grammar).size(); ++count)
-    {
-        rejects = llama_grammar_reject_candidates_for_stack(llama_grammar_get_rules(grammar), llama_grammar_get_stacks(grammar)[count], next_candidates);
-        all_rejects.push_back(rejects);
-    }
-
-    index = 0;
-    for (auto rej : all_rejects)
-    {
-        for (uint32_t i = 0; i < rej.size(); i++)
-        {
-            auto element = rej[i];
-            auto expected_element = expected_reject[index][i];
-            assert(element.index == expected_element.first && *element.code_points == expected_element.second);
-        }
-        index++;
-    }
-
-    for (auto &candidate : next_candidates)
-    {
-        delete[] candidate.code_points;
-        candidate.code_points = nullptr;
-    }
+    // At start, the grammar expects an identifier (a-z) or a number (0-9) or '(' — these are
+    // the initial bytes for the terms of this calculator grammar.
+    // Letters a-z should be valid (start of identifier)
+    assert(valid['a']);
+    assert(valid['z']);
+    // Digits 0-9 should be valid (start of number)
+    assert(valid['0']);
+    assert(valid['9']);
+    // '(' should be valid (start of parenthesized expression)
+    assert(valid['(']);
+    // Other characters should not be valid
+    assert(!valid['!']);
+    assert(!valid['+']);
+    assert(!valid[')']);
 
     llama_grammar_free_impl(grammar);
+    fprintf(stderr, "  Element-level init: OK\n");
+}
 
+int main() {
+    fprintf(stderr, "Running llama-grammar tests (DFA engine)...\n");
+    test_grammar_initialization();
+    test_simple_accept_reject();
+    test_valid_bytes();
+    test_char_ranges();
+    test_alternates();
+    test_rule_refs();
+    test_element_level_init();
+    fprintf(stderr, "All tests passed.\n");
     return 0;
 }

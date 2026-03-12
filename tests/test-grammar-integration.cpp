@@ -4,7 +4,6 @@
 
 #include "json-schema-to-grammar.h"
 
-#include "../src/unicode.h"
 #include "../src/llama-grammar.h"
 
 #include <nlohmann/json.hpp>
@@ -33,27 +32,12 @@ static bool test_build_grammar_fails(const std::string & grammar_str) {
 }
 
 static bool match_string(const std::string & input, llama_grammar * grammar) {
-    const auto cpts = unicode_cpts_from_utf8(input);
-
-    auto & stacks_cur = llama_grammar_get_stacks(grammar);
-
-    for (const auto & cpt : cpts) {
-        llama_grammar_accept(grammar, cpt);
-
-        if (stacks_cur.empty()) {
-            // no stacks means that the grammar failed to match at this point
-            return false;
-        }
+    auto configs = grammar->configs;  // copy
+    for (uint8_t b : input) {
+        grammar->compiled->accept_byte(configs, b);
+        if (configs.empty()) return false;
     }
-
-    for (const auto & stack : stacks_cur) {
-        if (stack.empty()) {
-            // An empty stack means that the grammar has been completed
-            return true;
-        }
-    }
-
-    return false;
+    return grammar->compiled->any_config_complete(configs);
 }
 
 static void test(const std::string & test_desc, const std::string & grammar_str, const std::vector<std::string> & passing_strings, const std::vector<std::string> & failing_strings) {
@@ -61,11 +45,6 @@ static void test(const std::string & test_desc, const std::string & grammar_str,
     fflush(stderr);
 
     auto * grammar = build_grammar(grammar_str);
-
-    // Save the original grammar stacks so that we can reset after every new string we want to test
-    const llama_grammar_stacks stacks_org = llama_grammar_get_stacks(grammar); // copy
-
-    llama_grammar_stacks & stacks_cur = llama_grammar_get_stacks(grammar);
 
     fprintf(stderr, "  🔵 Valid strings:\n");
 
@@ -100,9 +79,6 @@ static void test(const std::string & test_desc, const std::string & grammar_str,
         }
 
         assert(matched);
-
-        // Reset the grammar stacks
-        stacks_cur = stacks_org;
     }
 
     fprintf(stderr, "  🟠 Invalid strings:\n");
@@ -120,9 +96,6 @@ static void test(const std::string & test_desc, const std::string & grammar_str,
             fprintf(stdout, "✅︎\n");
         }
         assert(!matched);
-
-        // Reset the grammar stacks
-        stacks_cur = stacks_org;
     }
 
     // Clean up allocated memory
