@@ -91,6 +91,9 @@ struct llama_grammar {
     std::shared_ptr<compiled_grammar> compiled;  // immutable after init, shared across clones
     std::vector<parse_config>         configs;    // mutable runtime state
 
+    // Vocab trie for efficient prefix-based candidate lookup (shared across clones)
+    std::shared_ptr<vocab_byte_trie>  trie;
+
     // lazy grammars wait for trigger words or tokens before constraining the sampling.
     // we still have trigger_tokens for non-lazy grammars to force printing of special trigger tokens.
     // (useful e.g. for tool_choice=required)

@@ -1,5 +1,6 @@
 #include "llama-grammar-dfa.h"
 #include "llama-grammar.h"
+#include "llama-vocab.h"
 
 #include <algorithm>
 #include <cassert>
@@ -795,6 +796,13 @@ compiled_grammar compiled_grammar::compile(
     return cg;
 }
 
+void compiled_grammar::precompute_token_candidates(const vocab_byte_trie & trie, uint32_t total_vocab_tokens) {
+    dfa_candidates.resize(dfas.size());
+    for (size_t i = 0; i < dfas.size(); i++) {
+        dfa_candidates[i].precompute(dfas[i], trie, total_vocab_tokens);
+    }
+}
+
 // ============================================================
 // Runtime: config initialization and advancement
 // ============================================================
@@ -995,3 +1003,134 @@ bool compiled_grammar::any_config_complete(const std::vector<parse_config> & con
     }
     return false;
 }
+
+// ============================================================
+// Vocab trie implementation
+// ============================================================
+
+void vocab_trie_node::collect_tokens(std::vector<int32_t> & out) const {
+    out.insert(out.end(), tokens.begin(), tokens.end());
+    for (int b = 0; b < 256; b++) {
+        if (children[b]) {
+            children[b]->collect_tokens(out);
+        }
+    }
+}
+
+uint32_t vocab_trie_node::count_tokens() const {
+    uint32_t count = (uint32_t) tokens.size();
+    for (int b = 0; b < 256; b++) {
+        if (children[b]) {
+            count += children[b]->count_tokens();
+        }
+    }
+    return count;
+}
+
+void vocab_byte_trie::build(const llama_vocab & vocab) {
+    uint32_t n = vocab.n_tokens();
+    n_tokens_inserted = 0;
+
+    for (uint32_t id = 0; id < n; id++) {
+        if (vocab.is_eog((int32_t)id)) {
+            continue;
+        }
+        const std::string & piece = vocab.token_to_piece((int32_t)id);
+        if (piece.empty() || piece[0] == '\0') {
+            continue;
+        }
+
+        vocab_trie_node * node = &root;
+        for (size_t i = 0; i < piece.size(); i++) {
+            uint8_t byte = (uint8_t) piece[i];
+            if (!node->children[byte]) {
+                node->children[byte] = std::make_unique<vocab_trie_node>();
+            }
+            node = node->children[byte].get();
+        }
+        node->tokens.push_back((int32_t)id);
+        n_tokens_inserted++;
+    }
+}
+
+// ============================================================
+// Per-DFA-state candidate precomputation
+// ============================================================
+
+void dfa_state_candidates::walk(
+        const byte_dfa & dfa, uint16_t dfa_state,
+        const vocab_trie_node & node,
+        std::vector<int32_t> & out) {
+    // Tokens terminating at this node: they've been fed through the DFA
+    // up to this point without dying. They're candidates.
+    // (They may end mid-segment, which the runtime simulation will verify.)
+    out.insert(out.end(), node.tokens.begin(), node.tokens.end());
+
+    for (int b = 0; b < 256; b++) {
+        if (!node.children[b]) continue;
+
+        uint16_t next_state = dfa.transitions[dfa_state][b];
+        if (next_state == 0) {
+            // Dead — entire subtree pruned for this DFA state
+            continue;
+        }
+
+        if (dfa.accept[next_state]) {
+            // DFA segment completes here. Remaining bytes go to a different
+            // segment. Conservatively include ALL tokens in this subtree.
+            out.insert(out.end(),
+                       node.children[b]->tokens.begin(),
+                       node.children[b]->tokens.end());
+            // Also collect all tokens deeper in the subtree
+            for (int b2 = 0; b2 < 256; b2++) {
+                if (node.children[b]->children[b2]) {
+                    node.children[b]->children[b2]->collect_tokens(out);
+                }
+            }
+        } else {
+            // DFA still in progress — recurse
+            walk(dfa, next_state, *node.children[b], out);
+        }
+    }
+}
+
+void dfa_state_candidates::precompute(const byte_dfa & dfa, const vocab_byte_trie & trie,
+                                       uint32_t total_vocab_tokens) {
+    size_t n_states = dfa.transitions.size();
+    states.resize(n_states);
+
+    for (size_t s = 1; s < n_states; s++) {  // skip state 0 (dead)
+        std::vector<int32_t> cands;
+        walk(dfa, (uint16_t) s, trie.root, cands);
+
+        // Sort and deduplicate
+        std::sort(cands.begin(), cands.end());
+        cands.erase(std::unique(cands.begin(), cands.end()), cands.end());
+
+        auto & state = states[s];
+
+        if (cands.size() > total_vocab_tokens / 2) {
+            // Accept-heavy: most tokens are candidates.
+            // Store the reject set (tokens NOT in cands) — it's smaller.
+            state.accept_heavy = true;
+
+            // Build reject set: all tokens in [0, total_vocab_tokens) not in cands
+            std::vector<int32_t> rejects;
+            size_t ci = 0;
+            for (uint32_t t = 0; t < total_vocab_tokens; t++) {
+                if (ci < cands.size() && cands[ci] == (int32_t)t) {
+                    ci++;
+                } else {
+                    rejects.push_back((int32_t)t);
+                }
+            }
+            state.token_set = std::move(rejects);
+        } else {
+            // Reject-heavy: most tokens are rejected.
+            // Store the accept set (candidate tokens) — it's smaller.
+            state.accept_heavy = false;
+            state.token_set = std::move(cands);
+        }
+    }
+}
+

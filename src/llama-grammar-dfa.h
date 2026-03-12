@@ -4,10 +4,12 @@
 #include <bitset>
 #include <cstdint>
 #include <map>
+#include <memory>
 #include <set>
 #include <vector>
 
 struct llama_grammar_element;
+struct llama_vocab;
 
 // ============================================================
 // NFA (Thompson construction over bytes)
@@ -138,6 +140,61 @@ struct parse_config {
 };
 
 // ============================================================
+// Vocab trie for efficient prefix-based token lookup
+// ============================================================
+
+struct vocab_trie_node {
+    // Tokens that terminate exactly at this node
+    std::vector<int32_t> tokens;  // llama_token = int32_t
+
+    // Children indexed by next byte (dense for fast DFA walk)
+    std::unique_ptr<vocab_trie_node> children[256];
+
+    // Recursively collect all token IDs at or below this node
+    void collect_tokens(std::vector<int32_t> & out) const;
+
+    // Count all tokens at or below this node
+    uint32_t count_tokens() const;
+};
+
+struct vocab_byte_trie {
+    vocab_trie_node root;
+    uint32_t n_tokens_inserted = 0;
+
+    void build(const llama_vocab & vocab);
+};
+
+// ============================================================
+// Per-DFA-state precomputed candidate token sets
+// ============================================================
+
+struct dfa_state_token_set {
+    // Adaptive representation: stores whichever is smaller.
+    // If accept_heavy == true:
+    //   Most tokens are candidates → store the REJECT set (tokens to skip).
+    //   Tokens NOT in the set need simulation.
+    // If accept_heavy == false:
+    //   Most tokens are rejected → store the ACCEPT set (tokens to simulate).
+    //   Only tokens IN the set need simulation.
+    bool accept_heavy = false;
+    std::vector<int32_t> token_set;  // sorted
+};
+
+struct dfa_state_candidates {
+    // Per-state adaptive token sets. State 0 (dead) has empty set.
+    std::vector<dfa_state_token_set> states;
+
+    // Precompute candidates for all states of a DFA using the vocab trie.
+    void precompute(const byte_dfa & dfa, const vocab_byte_trie & trie,
+                    uint32_t total_vocab_tokens);
+
+private:
+    void walk(const byte_dfa & dfa, uint16_t dfa_state,
+              const vocab_trie_node & node,
+              std::vector<int32_t> & out);
+};
+
+// ============================================================
 // Compiled grammar (immutable after construction)
 // ============================================================
 
@@ -146,10 +203,17 @@ struct compiled_grammar {
     std::vector<compiled_rule> rules;
     uint32_t                   start_rule;
 
+    // Per-DFA-state precomputed candidate token sets
+    std::vector<dfa_state_candidates> dfa_candidates;
+
     // Compile from parsed grammar rules
     static compiled_grammar compile(
         const std::vector<std::vector<llama_grammar_element>> & parsed_rules,
         uint32_t start_rule_index);
+
+    // Precompute candidate token sets for all DFA states using the vocab trie.
+    // Must be called after compile() and after the trie is built.
+    void precompute_token_candidates(const vocab_byte_trie & trie, uint32_t total_vocab_tokens);
 
     // Initialize runtime configs for the start rule
     std::vector<parse_config> init_configs() const;

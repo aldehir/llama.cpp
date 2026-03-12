@@ -659,10 +659,19 @@ struct llama_grammar * llama_grammar_init_impl(
         return nullptr;
     }
 
+    // Build vocab trie and precompute candidate sets if vocab is available
+    std::shared_ptr<vocab_byte_trie> trie;
+    if (vocab) {
+        trie = std::make_shared<vocab_byte_trie>();
+        trie->build(*vocab);
+        cg->precompute_token_candidates(*trie, vocab->n_tokens());
+    }
+
     return new llama_grammar {
         vocab,
         /* .compiled = */         std::move(cg),
         /* .configs = */          std::move(dfa_configs),
+        /* .trie = */             std::move(trie),
         /* .lazy =*/              false,
         /* .awaiting_trigger = */ false,
         /* .trigger_buffer = */   "",
@@ -718,10 +727,19 @@ struct llama_grammar * llama_grammar_init_impl(
         trigger.regex = std::regex(trigger.pattern);
     }
 
+    // Build vocab trie and precompute candidate sets if vocab is available
+    std::shared_ptr<vocab_byte_trie> trie;
+    if (vocab) {
+        trie = std::make_shared<vocab_byte_trie>();
+        trie->build(*vocab);
+        cg->precompute_token_candidates(*trie, vocab->n_tokens());
+    }
+
     return new llama_grammar {
         vocab,
         /* .compiled = */         std::move(cg),
         /* .configs = */          std::move(dfa_configs),
+        /* .trie = */             std::move(trie),
         /* .lazy = */             lazy,
         /* .awaiting_trigger = */ lazy,
         /* .trigger_buffer = */   "",
@@ -743,6 +761,7 @@ struct llama_grammar * llama_grammar_clone_impl(const struct llama_grammar & gra
         grammar.vocab,
         grammar.compiled,    // shared_ptr: compiled grammar is immutable, shared across clones
         grammar.configs,     // configs are value types, safe to copy
+        grammar.trie,        // shared_ptr: trie is immutable, shared across clones
         grammar.lazy,
         grammar.awaiting_trigger,
         grammar.trigger_buffer,
@@ -758,33 +777,84 @@ void llama_grammar_apply_impl(const struct llama_grammar & grammar, llama_token_
         return;
     }
 
-    // DFA-based token validation
     bool allow_eog = grammar.compiled->any_config_complete(grammar.configs);
+
+    const uint32_t n_vocab = grammar.vocab->n_tokens();
+    const bool have_candidates = !grammar.compiled->dfa_candidates.empty();
+
+    // Build candidate bitmask from precomputed per-DFA-state adaptive token sets.
+    // For each active config, look up its (dfa_id, dfa_state) and union the tokens
+    // that need simulation.
+    std::vector<bool> needs_simulation(n_vocab, !have_candidates);
+    if (have_candidates) {
+        for (const auto & cfg : grammar.configs) {
+            const auto & rule = grammar.compiled->rules[cfg.current.rule_id];
+            const auto & alt = rule.alternates[cfg.current.alternate_idx];
+            if (cfg.current.segment_idx >= alt.size()) continue;
+            const auto & seg = alt[cfg.current.segment_idx];
+            if (seg.type != compiled_segment::DFA_MATCH) continue;
+
+            if (seg.id < grammar.compiled->dfa_candidates.size()) {
+                const auto & state_cands = grammar.compiled->dfa_candidates[seg.id];
+                if (cfg.current.dfa_state < state_cands.states.size()) {
+                    const auto & ts = state_cands.states[cfg.current.dfa_state];
+                    if (ts.accept_heavy) {
+                        // Accept-heavy: token_set contains rejected tokens.
+                        // All tokens NOT in the set are candidates → need simulation.
+                        // Since we're building a union across configs, mark all as
+                        // needing simulation, then we'd need to subtract. Instead,
+                        // for accept-heavy states, conservatively mark all as candidates.
+                        for (uint32_t t = 0; t < n_vocab; t++) {
+                            needs_simulation[t] = true;
+                        }
+                    } else {
+                        // Reject-heavy: token_set contains candidate tokens.
+                        // Only these tokens need simulation.
+                        for (int32_t tok : ts.token_set) {
+                            if (tok >= 0 && (uint32_t)tok < n_vocab) {
+                                needs_simulation[tok] = true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     for (size_t i = 0; i < cur_p->size; ++i) {
         const llama_token id = cur_p->data[i].id;
-        const std::string & piece = grammar.vocab->token_to_piece(id);
 
         if (grammar.vocab->is_eog(id)) {
             if (!allow_eog) {
                 cur_p->data[i].logit = -INFINITY;
             }
-        } else if (piece.empty() || piece[0] == 0) {
+            continue;
+        }
+
+        const std::string & piece = grammar.vocab->token_to_piece(id);
+        if (piece.empty() || piece[0] == 0) {
             cur_p->data[i].logit = -INFINITY;
-        } else {
-            // Simulate DFA forward through all bytes of the token
-            auto sim_configs = grammar.configs;
-            bool valid = true;
-            for (size_t j = 0; j < piece.size(); j++) {
-                grammar.compiled->accept_byte(sim_configs, (uint8_t)piece[j]);
-                if (sim_configs.empty()) {
-                    valid = false;
-                    break;
-                }
+            continue;
+        }
+
+        if (!needs_simulation[id]) {
+            // Not a candidate at any active DFA state — definitely rejected
+            cur_p->data[i].logit = -INFINITY;
+            continue;
+        }
+
+        // Candidate token — simulate to confirm
+        auto sim_configs = grammar.configs;
+        bool valid = true;
+        for (size_t j = 0; j < piece.size(); j++) {
+            grammar.compiled->accept_byte(sim_configs, (uint8_t)piece[j]);
+            if (sim_configs.empty()) {
+                valid = false;
+                break;
             }
-            if (!valid) {
-                cur_p->data[i].logit = -INFINITY;
-            }
+        }
+        if (!valid) {
+            cur_p->data[i].logit = -INFINITY;
         }
     }
 }
