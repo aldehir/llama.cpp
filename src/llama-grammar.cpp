@@ -608,8 +608,11 @@ static bool llama_grammar_detect_left_recursion(
 
 ////////////////////
 
-struct llama_grammar * llama_grammar_init_impl(
-        const struct llama_vocab * vocab,
+// Copy rule element arrays into vectors, check for left recursion, and compile
+// to DFA. Returns {compiled_grammar, initial configs} on success, or {nullptr, {}}
+// on failure (left recursion detected).
+static std::pair<std::shared_ptr<compiled_grammar>, std::vector<parse_config>>
+llama_grammar_compile_rules(
         const llama_grammar_element ** rules,
         size_t n_rules,
         size_t start_rule_index) {
@@ -634,7 +637,7 @@ struct llama_grammar * llama_grammar_init_impl(
         }
         if (llama_grammar_detect_left_recursion(vec_rules, i, &rules_visited, &rules_in_progress, &rules_may_be_empty)) {
             LLAMA_LOG_ERROR("unsupported grammar, left recursion detected for nonterminal at index %zu", i);
-            return nullptr;
+            return {nullptr, {}};
         }
     }
 
@@ -642,6 +645,19 @@ struct llama_grammar * llama_grammar_init_impl(
     auto cg = std::make_shared<compiled_grammar>(
         compiled_grammar::compile(vec_rules, (uint32_t)start_rule_index));
     auto dfa_configs = cg->init_configs();
+
+    return {std::move(cg), std::move(dfa_configs)};
+}
+
+struct llama_grammar * llama_grammar_init_impl(
+        const struct llama_vocab * vocab,
+        const llama_grammar_element ** rules,
+        size_t n_rules,
+        size_t start_rule_index) {
+    auto [cg, dfa_configs] = llama_grammar_compile_rules(rules, n_rules, start_rule_index);
+    if (!cg) {
+        return nullptr;
+    }
 
     return new llama_grammar {
         vocab,
@@ -684,29 +700,9 @@ struct llama_grammar * llama_grammar_init_impl(
     const size_t n_rules = grammar_rules.size();
     const size_t start_rule_index = parser.symbol_ids.at(grammar_root);
 
-    const llama_grammar_element * pos;
-
-    // copy rule definitions into vectors
-    llama_grammar_rules vec_rules(n_rules);
-    for (size_t i = 0; i < n_rules; i++) {
-        for (pos = grammar_rules[i]; pos->type != LLAMA_GRETYPE_END; pos++) {
-            vec_rules[i].push_back(*pos);
-        }
-        vec_rules[i].push_back({LLAMA_GRETYPE_END, 0});
-    }
-
-    // Check for left recursion
-    std::vector<bool> rules_visited(n_rules);
-    std::vector<bool> rules_in_progress(n_rules);
-    std::vector<bool> rules_may_be_empty(n_rules);
-    for (size_t i = 0; i < n_rules; i++) {
-        if (rules_visited[i]) {
-            continue;
-        }
-        if (llama_grammar_detect_left_recursion(vec_rules, i, &rules_visited, &rules_in_progress, &rules_may_be_empty)) {
-            LLAMA_LOG_ERROR("unsupported grammar, left recursion detected for nonterminal at index %zu", i);
-            return nullptr;
-        }
+    auto [cg, dfa_configs] = llama_grammar_compile_rules(grammar_rules.data(), n_rules, start_rule_index);
+    if (!cg) {
+        return nullptr;
     }
 
     std::vector<llama_token>    vec_trigger_tokens;
@@ -721,11 +717,6 @@ struct llama_grammar * llama_grammar_init_impl(
         trigger.pattern = trigger_patterns[i];
         trigger.regex = std::regex(trigger.pattern);
     }
-
-    // Compile DFA-based grammar
-    auto cg = std::make_shared<compiled_grammar>(
-        compiled_grammar::compile(vec_rules, (uint32_t)start_rule_index));
-    auto dfa_configs = cg->init_configs();
 
     return new llama_grammar {
         vocab,

@@ -280,10 +280,13 @@ grammar_nfa valid_utf8_char_nfa() {
 }
 
 byte_dfa build_valid_utf8_dfa() {
-    auto nfa = valid_utf8_char_nfa();
-    auto dfa = byte_dfa::from_nfa(nfa);
-    dfa.minimize();
-    return dfa;
+    static const byte_dfa cached = []() {
+        auto nfa = valid_utf8_char_nfa();
+        auto dfa = byte_dfa::from_nfa(nfa);
+        dfa.minimize();
+        return dfa;
+    }();
+    return cached;
 }
 
 // ============================================================
@@ -633,7 +636,6 @@ static grammar_nfa element_to_nfa(
     // Collect all the character/range alternatives
     std::vector<grammar_nfa> char_alts;
 
-    bool first = true;
     do {
         uint32_t cp = pos->value;
         if (pos[1].type == LLAMA_GRETYPE_CHAR_RNG_UPPER) {
@@ -646,7 +648,6 @@ static grammar_nfa element_to_nfa(
             char_alts.push_back(single_codepoint_nfa(cp));
             pos += 1;
         }
-        first = false;
     } while (pos->type == LLAMA_GRETYPE_CHAR_ALT);
 
     return grammar_nfa::alternation(std::move(char_alts));
@@ -678,31 +679,21 @@ byte_dfa build_segment_dfa(const llama_grammar_element * begin, const llama_gram
             auto negated_dfa = byte_dfa::intersect(positive_dfa, utf8_dfa);
             negated_dfa.minimize();
 
-            // Convert back to NFA-like form by wrapping in a DFA
-            // Actually, we need to concatenate this DFA with the rest of the segment.
-            // For simplicity, if we have a negated element, compile it to a standalone DFA
-            // and then concatenate NFAs. We can convert a small DFA back to an NFA.
-
             // Convert DFA back to NFA for concatenation
-            grammar_nfa neg_nfa;
-            uint32_t base = 0;
-            // Create states in NFA corresponding to DFA states
+            elem_nfa = grammar_nfa();
             for (size_t i = 0; i < negated_dfa.transitions.size(); i++) {
-                neg_nfa.add_state();
+                elem_nfa.add_state();
             }
-            neg_nfa.start = negated_dfa.start_state;
-            // Create a single accept state
-            uint32_t nfa_accept = neg_nfa.add_state();
-            neg_nfa.accept = nfa_accept;
+            elem_nfa.start = negated_dfa.start_state;
+            uint32_t nfa_accept = elem_nfa.add_state();
+            elem_nfa.accept = nfa_accept;
 
-            // Add epsilon from DFA accept states to NFA accept
             for (size_t i = 0; i < negated_dfa.transitions.size(); i++) {
                 if (negated_dfa.accept[i]) {
-                    neg_nfa.states[i].epsilon_transitions.push_back(nfa_accept);
+                    elem_nfa.states[i].epsilon_transitions.push_back(nfa_accept);
                 }
             }
 
-            // Add byte transitions
             for (size_t i = 0; i < negated_dfa.transitions.size(); i++) {
                 // Group consecutive bytes with same target for efficiency
                 int b = 0;
@@ -716,25 +707,18 @@ byte_dfa build_segment_dfa(const llama_grammar_element * begin, const llama_gram
                     while (b < 255 && negated_dfa.transitions[i][b + 1] == target) {
                         b++;
                     }
-                    neg_nfa.states[i].byte_transitions.push_back(
+                    elem_nfa.states[i].byte_transitions.push_back(
                         {(uint8_t)start_b, (uint8_t)b, (uint32_t)target});
                     b++;
                 }
             }
+        }
 
-            if (first) {
-                segment_nfa = std::move(neg_nfa);
-                first = false;
-            } else {
-                segment_nfa = grammar_nfa::concat(std::move(segment_nfa), std::move(neg_nfa));
-            }
+        if (first) {
+            segment_nfa = std::move(elem_nfa);
+            first = false;
         } else {
-            if (first) {
-                segment_nfa = std::move(elem_nfa);
-                first = false;
-            } else {
-                segment_nfa = grammar_nfa::concat(std::move(segment_nfa), std::move(elem_nfa));
-            }
+            segment_nfa = grammar_nfa::concat(std::move(segment_nfa), std::move(elem_nfa));
         }
     }
 
