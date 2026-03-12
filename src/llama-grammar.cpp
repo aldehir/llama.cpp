@@ -660,18 +660,16 @@ struct llama_grammar * llama_grammar_init_impl(
         return nullptr;
     }
 
-    // Build vocab trie and precompute candidate sets if vocab is available
+    // Get cached vocab trie and precompute candidate sets if vocab is available
     std::shared_ptr<vocab_byte_trie> trie;
     if (vocab) {
+        trie = vocab->get_grammar_trie();
+
         auto t_precomp_start = std::chrono::steady_clock::now();
-
-        trie = std::make_shared<vocab_byte_trie>();
-        trie->build(*vocab);
         cg->precompute_token_candidates(*trie, vocab->n_tokens());
-
         auto t_precomp_end = std::chrono::steady_clock::now();
         double precomp_ms = std::chrono::duration<double, std::milli>(t_precomp_end - t_precomp_start).count();
-        LLAMA_LOG_INFO("%s: grammar trie build + precomputation took %.2f ms\n", __func__, precomp_ms);
+        LLAMA_LOG_INFO("%s: grammar DFA precomputation took %.2f ms\n", __func__, precomp_ms);
     }
 
     return new llama_grammar {
@@ -734,18 +732,16 @@ struct llama_grammar * llama_grammar_init_impl(
         trigger.regex = std::regex(trigger.pattern);
     }
 
-    // Build vocab trie and precompute candidate sets if vocab is available
+    // Get cached vocab trie and precompute candidate sets if vocab is available
     std::shared_ptr<vocab_byte_trie> trie;
     if (vocab) {
+        trie = vocab->get_grammar_trie();
+
         auto t_precomp_start = std::chrono::steady_clock::now();
-
-        trie = std::make_shared<vocab_byte_trie>();
-        trie->build(*vocab);
         cg->precompute_token_candidates(*trie, vocab->n_tokens());
-
         auto t_precomp_end = std::chrono::steady_clock::now();
         double precomp_ms = std::chrono::duration<double, std::milli>(t_precomp_end - t_precomp_start).count();
-        LLAMA_LOG_INFO("%s: grammar trie build + precomputation took %.2f ms\n", __func__, precomp_ms);
+        LLAMA_LOG_INFO("%s: grammar DFA precomputation took %.2f ms\n", __func__, precomp_ms);
     }
 
     return new llama_grammar {

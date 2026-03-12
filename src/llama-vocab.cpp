@@ -7,16 +7,20 @@
 
 #include "unicode.h"
 
+#include "llama-grammar-dfa.h"
+
 #include <algorithm>
 #include <cassert>
 #include <cctype>
 #include <cfloat>
+#include <chrono>
 #include <cmath>
 #include <cstdarg>
 #include <cstring>
 #include <forward_list>
 #include <limits>
 #include <map>
+#include <mutex>
 #include <queue>
 #include <set>
 #include <unordered_map>
@@ -1643,6 +1647,10 @@ struct llama_vocab::impl {
     std::unique_ptr<llm_tokenizer> tokenizer;
 
     std::vector<char> precompiled_charsmap;
+
+    // Cached grammar byte trie (built once, shared across all grammars using this vocab)
+    mutable std::once_flag          grammar_trie_once;
+    mutable std::shared_ptr<vocab_byte_trie> grammar_trie;
 
     impl(const llama_vocab & vocab) : vocab(vocab) {
     }
@@ -3724,6 +3732,20 @@ std::string llama_vocab::detokenize(const std::vector<llama_token> & tokens, boo
 
 void llama_vocab::print_info() const {
     pimpl->print_info();
+}
+
+std::shared_ptr<vocab_byte_trie> llama_vocab::get_grammar_trie() const {
+    std::call_once(pimpl->grammar_trie_once, [this]() {
+        auto t_start = std::chrono::steady_clock::now();
+
+        pimpl->grammar_trie = std::make_shared<vocab_byte_trie>();
+        pimpl->grammar_trie->build(*this);
+
+        auto t_end = std::chrono::steady_clock::now();
+        double ms = std::chrono::duration<double, std::milli>(t_end - t_start).count();
+        LLAMA_LOG_INFO("%s: vocab byte trie built in %.2f ms (cached for reuse)\n", __func__, ms);
+    });
+    return pimpl->grammar_trie;
 }
 
 //

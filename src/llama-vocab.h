@@ -2,9 +2,11 @@
 
 #include "llama.h"
 
+#include <memory>
 #include <string>
 #include <vector>
-#include <memory>
+
+struct vocab_byte_trie;
 
 // pre-tokenization types
 enum llama_vocab_pre_type {
@@ -180,6 +182,10 @@ struct llama_vocab {
                                       bool   special) const;
 
     void print_info() const;
+
+    // Get or build the cached vocab byte trie for grammar DFA precomputation.
+    // Thread-safe: built once on first call, then shared across all grammars.
+    std::shared_ptr<vocab_byte_trie> get_grammar_trie() const;
 
 private:
     struct impl;
