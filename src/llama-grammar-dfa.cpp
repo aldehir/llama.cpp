@@ -1,9 +1,11 @@
 #include "llama-grammar-dfa.h"
 #include "llama-grammar.h"
+#include "llama-impl.h"
 #include "llama-vocab.h"
 
 #include <algorithm>
 #include <cassert>
+#include <chrono>
 #include <cstring>
 #include <map>
 #include <queue>
@@ -797,10 +799,19 @@ compiled_grammar compiled_grammar::compile(
 }
 
 void compiled_grammar::precompute_token_candidates(const vocab_byte_trie & trie, uint32_t total_vocab_tokens) {
+    LLAMA_LOG_INFO("%s: precomputing token candidates for %zu DFAs (vocab size = %u)\n",
+                   __func__, dfas.size(), total_vocab_tokens);
+
+    auto t_start = std::chrono::steady_clock::now();
+
     dfa_candidates.resize(dfas.size());
     for (size_t i = 0; i < dfas.size(); i++) {
         dfa_candidates[i].precompute(dfas[i], trie, total_vocab_tokens);
     }
+
+    auto t_end = std::chrono::steady_clock::now();
+    double ms = std::chrono::duration<double, std::milli>(t_end - t_start).count();
+    LLAMA_LOG_INFO("%s: precomputation complete in %.2f ms\n", __func__, ms);
 }
 
 // ============================================================
@@ -1099,6 +1110,11 @@ void dfa_state_candidates::precompute(const byte_dfa & dfa, const vocab_byte_tri
     size_t n_states = dfa.transitions.size();
     states.resize(n_states);
 
+    LLAMA_LOG_DEBUG("%s: processing DFA with %zu states\n", __func__, n_states);
+
+    size_t n_accept_heavy = 0;
+    size_t n_reject_heavy = 0;
+
     for (size_t s = 1; s < n_states; s++) {  // skip state 0 (dead)
         std::vector<int32_t> cands;
         walk(dfa, (uint16_t) s, trie.root, cands);
@@ -1113,6 +1129,7 @@ void dfa_state_candidates::precompute(const byte_dfa & dfa, const vocab_byte_tri
             // Accept-heavy: most tokens are candidates.
             // Store the reject set (tokens NOT in cands) — it's smaller.
             state.accept_heavy = true;
+            n_accept_heavy++;
 
             // Build reject set: all tokens in [0, total_vocab_tokens) not in cands
             std::vector<int32_t> rejects;
@@ -1129,8 +1146,12 @@ void dfa_state_candidates::precompute(const byte_dfa & dfa, const vocab_byte_tri
             // Reject-heavy: most tokens are rejected.
             // Store the accept set (candidate tokens) — it's smaller.
             state.accept_heavy = false;
+            n_reject_heavy++;
             state.token_set = std::move(cands);
         }
     }
+
+    LLAMA_LOG_DEBUG("%s: done - %zu accept-heavy states, %zu reject-heavy states\n",
+                    __func__, n_accept_heavy, n_reject_heavy);
 }
 
