@@ -253,3 +253,244 @@ Used for negated character classes (`[^...]`):
 - Candidate sets: 2-12 MB total (depends on grammar; adaptive representation
   minimizes this).
 - Compiled grammar is immutable and shared across clones via `shared_ptr`.
+
+---
+
+## Repetition Optimization Analysis
+
+### Current Repetition Expansion
+
+The parser in `src/llama-grammar.cpp` handles quantifiers (`{m,n}`, `*`, `+`, `?`) via the
+`handle_repetitions` lambda in `parse_sequence` (line 295). The rewrite rules are:
+
+```
+S{m,n} → S S S ... (m copies inline) S'(n-m)
+          S'(x)   ::= S S'(x-1) |         ← n-m synthetic rules
+          ...
+          S'(1)   ::= S |
+
+S{m,}  → S S S ... (m copies inline) S'
+          S' ::= S S' |                    ← 1 self-recursive rule
+```
+
+Concretely, the code does two things:
+
+1. **Mandatory part** (lines 322–326): Inserts `min_times - 1` literal copies of the
+   sub-expression elements into the parent rule (the first instance is already present).
+
+2. **Optional part** (lines 328–345): Creates `max_times - min_times` new synthetic rules,
+   each containing the sub-expression plus a reference to the next synthetic rule, plus an
+   epsilon alternative.
+
+A safety threshold caps this at 2000:
+
+```c
+#define MAX_REPETITION_THRESHOLD 2000
+```
+
+### Where It Explodes
+
+For `S{m,n}`, the current approach generates:
+
+| Resource | Count | Notes |
+|---|---|---|
+| Inline elements in parent rule | O(m) copies of sub-expression | Each copy = all grammar elements of S |
+| Synthetic rules | O(n − m) | One new rule per optional repetition |
+| Compiled rule objects | O(n) total | Each with alternates, segment lists |
+| DFA objects | O(1) for simple terminals | Deduplication saves us here |
+| Runtime call stack depth | O(n) worst case | One frame per RULE_CALL for optional chain |
+| `parse_config` branching | Multiplied per alternate | Each synthetic rule has 2 alternates (take/skip) |
+
+**For `a{2000}` (exact repetition):**
+- 1999 copies of the char element inlined into the parent rule.
+- 0 synthetic rules (min == max, no optional part).
+- The parent rule becomes one enormous alternate with 1999+ DFA_MATCH segments. Each byte
+  consumed pops one segment and calls `advance_to_terminal()`.
+
+**For `a{0,2000}` (all optional):**
+- 0 inline copies.
+- 2000 synthetic rules, each with 2 alternates.
+- At runtime, `advance_to_terminal()` must recursively enter each RULE_CALL. On the first
+  byte, it explores all 2000 nested rules to find every possible "start consuming here"
+  config. This creates up to 2000 active `parse_config` objects, each with a different call
+  stack depth.
+- `dedup_configs` (line 979) uses O(n²) comparison, compounding the cost.
+
+### Optimization Strategies
+
+#### Strategy 1: Binary Decomposition of Rules (Parser-Level)
+
+**Idea:** Instead of linearly expanding `S{m}` into m copies, use repeated squaring to build
+a tree of O(log m) rules.
+
+```
+S{1}  = S
+S{2}  = S{1} S{1}       → new rule: S_2 ::= S S
+S{4}  = S{2} S{2}       → new rule: S_4 ::= S_2 S_2
+S{8}  = S{4} S{4}       → new rule: S_8 ::= S_4 S_4
+S{5}  = S{4} S{1}       → rule: S_5 ::= S_4 S
+S{5000} = S{4096} S{512} S{256} S{128} S{8}
+        = 13 synthetic rules via binary decomposition
+```
+
+For the optional part, a similar decomposition works:
+
+```
+S{0,1}  = S'_1      → S'_1 ::= S |
+S{0,2}  = S'_1 S'_1   (each half independently 0-1, total 0-2)
+S{0,4}  = S'_2 S'_2
+S{0,k}  = S'_{k/2} S'_{k/2}      when k is even
+S{0,k}  = S'_{(k+1)/2} S'_{k/2}  when k is odd
+```
+
+**Complexity:** O(log n) rules and inline elements instead of O(n).
+
+**Pros:**
+- Pure parser-level change—no modifications to compilation or runtime.
+- DFA dedup already handles the shared terminal DFAs.
+- Call stack depth drops from O(n) to O(log n).
+- Number of active configs drops dramatically.
+
+**Cons:**
+- Slightly more complex parser logic.
+- Grammar rule dump (for debugging) becomes less human-readable.
+
+#### Strategy 2: Counted Repetition Segment (Runtime-Level)
+
+**Idea:** Introduce a new compiled segment type `COUNTED_REP` that the runtime engine handles
+with a counter, avoiding grammar expansion entirely.
+
+```cpp
+struct compiled_segment {
+    enum type_t : uint8_t { DFA_MATCH, RULE_CALL, COUNTED_REP };
+    type_t   type;
+    uint32_t id;       // for COUNTED_REP: rule_id of the repeated sub-expression
+    uint32_t min_rep;  // minimum repetitions
+    uint32_t max_rep;  // maximum repetitions (UINT32_MAX = unbounded)
+};
+```
+
+The runtime would track a repetition counter alongside the call stack:
+
+```cpp
+struct rep_counter_frame {
+    uint32_t segment_idx;  // which COUNTED_REP segment this belongs to
+    uint32_t count;        // how many times the sub-rule has completed
+};
+```
+
+When the sub-rule completes:
+- Increment the counter.
+- If count < max: fork into (a) re-enter sub-rule, (b) if count >= min: advance past segment.
+- If count == max: advance past segment.
+
+**Complexity:** O(1) rules and segments regardless of repetition count.
+
+**Pros:**
+- Zero grammar expansion—`a{1000000}` uses the same memory as `a{1}`.
+- No call stack depth growth from repetition.
+- `MAX_REPETITION_THRESHOLD` could be raised or removed.
+
+**Cons:**
+- Requires changes to: grammar element types, parser, compiled segment, runtime
+  (`advance_to_terminal`, `accept_byte`), config comparison, and dedup.
+- The counter vector adds to config comparison cost.
+- Token candidate precomputation may need updates.
+
+#### Strategy 3: DFA-Level Counting (Terminal-Only Optimization)
+
+**Idea:** For patterns where the repeated sub-expression is a single terminal (e.g.,
+`[a-z]{5000}`), build a single DFA that encodes both the character matching and the
+repetition count via product construction with a counting automaton.
+
+For `[a-z]{m,n}`:
+- Build a DFA for `[a-z]` (2 states: start → accept).
+- Build a counting DFA with states 0..n where states m..n are accepting.
+- Product construction yields O(n) states but everything is one DFA segment.
+
+**Pros:**
+- Single DFA, no rule expansion, no call stack overhead.
+- Token candidate precomputation works unchanged.
+
+**Cons:**
+- Only applicable when the repeated sub-expression is a single terminal segment.
+- O(n) DFA states (each = 512 bytes, so `a{5000}` ≈ 2.5 MB).
+- `uint16_t` state type limits DFAs to 65535 states.
+
+#### Strategy 4: Hybrid Approach
+
+Combine strategies based on the nature of the repeated sub-expression:
+
+1. **Simple terminal repetition** (char, char-range, char-any): Use Strategy 3.
+2. **Complex sub-expression repetition** (contains rule refs): Use Strategy 1.
+3. **Very large repetition** (n > some threshold): Use Strategy 2.
+
+### Recommendation
+
+**Strategy 1 (binary decomposition)** offers the best effort-to-impact ratio:
+
+- Localized change to `handle_repetitions` in the parser (~50 lines of code).
+- Reduces rule/element count from O(n) to O(log n) with no changes elsewhere.
+- `a{2000}` generates ~22 rules instead of ~2000.
+- `a{5000}` becomes feasible (~26 rules), allowing `MAX_REPETITION_THRESHOLD` to be raised.
+- Existing DFA dedup, runtime call stack, and token candidate precomputation all work
+  unchanged.
+
+**Strategy 2 (counted repetition)** is the ideal long-term solution but requires significantly
+more engineering across the entire grammar pipeline.
+
+### Appendix: Concrete Examples
+
+#### Current expansion of `[a-z]{6,10}`:
+
+```
+root ::= [a-z] [a-z] [a-z] [a-z] [a-z] [a-z] root_0
+root_0 ::= [a-z] root_1 |          ← optional rep 4
+root_1 ::= [a-z] root_2 |          ← optional rep 3
+root_2 ::= [a-z] root_3 |          ← optional rep 2
+root_3 ::= [a-z] |                 ← optional rep 1
+
+Total: 6 inline copies + 4 synthetic rules = 10 rule elements
+```
+
+#### With binary decomposition:
+
+```
+rep_1 ::= [a-z]                    ← base: 1 repetition
+rep_2 ::= rep_1 rep_1              ← 2 repetitions
+rep_3 ::= rep_2 rep_1              ← 3 repetitions (2+1)
+rep_6 ::= rep_3 rep_3              ← 6 repetitions (mandatory part)
+
+opt_1 ::= [a-z] |                  ← 0-1 optional
+opt_2 ::= opt_1 opt_1              ← 0-2 optional
+opt_4 ::= opt_2 opt_2              ← 0-4 optional
+
+root  ::= rep_6 opt_4              ← 6 mandatory + 0-4 optional = {6,10}
+
+Total: 7 synthetic rules, max call stack depth = 4
+```
+
+#### `[a-z]{5000}` with binary decomposition:
+
+```
+5000 = 4096 + 512 + 256 + 128 + 8
+
+rep_1    ::= [a-z]
+rep_2    ::= rep_1 rep_1
+rep_4    ::= rep_2 rep_2
+rep_8    ::= rep_4 rep_4
+rep_16   ::= rep_8 rep_8
+rep_32   ::= rep_16 rep_16
+rep_64   ::= rep_32 rep_32
+rep_128  ::= rep_64 rep_64
+rep_256  ::= rep_128 rep_128
+rep_512  ::= rep_256 rep_256
+rep_1024 ::= rep_512 rep_512
+rep_2048 ::= rep_1024 rep_1024
+rep_4096 ::= rep_2048 rep_2048
+
+root ::= rep_4096 rep_512 rep_256 rep_128 rep_8
+
+Total: 13 synthetic rules + 5 inline refs, max call stack depth = 13
+vs. current: 4999 inline copies, call stack depth = 0 but 4999 segments
+```
