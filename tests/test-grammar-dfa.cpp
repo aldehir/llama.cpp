@@ -509,6 +509,169 @@ static void test_grammar_wildcard() {
     fprintf(stderr, "  ✅ Wildcard grammar DFA tests passed\n");
 }
 
+// ============================================================
+// Left factoring tests
+// ============================================================
+
+static void test_left_factor_basic() {
+    fprintf(stderr, "Testing left factoring: basic shared prefix...\n");
+
+    // root ::= "a" "b" "x" | "a" "b" "y"
+    // After factoring, both should still be accepted but with fewer initial configs
+    auto * grammar = build_grammar("root ::= \"a\" \"b\" \"x\" | \"a\" \"b\" \"y\"");
+    assert(grammar != nullptr);
+
+    // Verify factoring reduced initial config count
+    assert(grammar->configs.size() == 1);
+
+    // Verify both strings are still accepted
+    assert(dfa_match_string("abx", grammar));
+    assert(dfa_match_string("aby", grammar));
+    assert(!dfa_match_string("abz", grammar));
+    assert(!dfa_match_string("ab", grammar));
+    assert(!dfa_match_string("a", grammar));
+
+    llama_grammar_free_impl(grammar);
+    fprintf(stderr, "  ✅ Basic left factoring tests passed\n");
+}
+
+static void test_left_factor_rule_call() {
+    fprintf(stderr, "Testing left factoring: shared rule call prefix...\n");
+
+    // root ::= shared "x" | shared "y"
+    // shared ::= [a-z]+
+    auto * grammar = build_grammar(
+        "root ::= shared \"x\" | shared \"y\"\n"
+        "shared ::= [a-z]+");
+    assert(grammar != nullptr);
+
+    // After factoring, root should start with one config (shared prefix factored)
+    assert(grammar->configs.size() == 1);
+
+    assert(dfa_match_string("hellox", grammar));
+    assert(dfa_match_string("helloy", grammar));
+    assert(!dfa_match_string("helloz", grammar));
+
+    llama_grammar_free_impl(grammar);
+    fprintf(stderr, "  ✅ Rule call left factoring tests passed\n");
+}
+
+static void test_left_factor_no_common_prefix() {
+    fprintf(stderr, "Testing left factoring: no common prefix (no change)...\n");
+
+    // root ::= "a" | "b"
+    // Alternates don't share a prefix, so no factoring should apply
+    auto * grammar = build_grammar("root ::= \"a\" | \"b\"");
+    assert(grammar != nullptr);
+
+    // Should have 2 configs (no factoring possible)
+    assert(grammar->configs.size() == 2);
+
+    assert(dfa_match_string("a", grammar));
+    assert(dfa_match_string("b", grammar));
+    assert(!dfa_match_string("c", grammar));
+
+    llama_grammar_free_impl(grammar);
+    fprintf(stderr, "  ✅ No-common-prefix tests passed\n");
+}
+
+static void test_left_factor_deep() {
+    fprintf(stderr, "Testing left factoring: deep factoring A B C x | A B C y | A B D z...\n");
+
+    // root ::= A B C "x" | A B C "y" | A B D "z"
+    // Should factor out A B, then factor the suffix
+    auto * grammar = build_grammar(
+        "root ::= a b c \"x\" | a b c \"y\" | a b d \"z\"\n"
+        "a ::= \"a\"\n"
+        "b ::= \"b\"\n"
+        "c ::= \"c\"\n"
+        "d ::= \"d\"");
+    assert(grammar != nullptr);
+
+    // After factoring "a b" prefix, root should have 1 initial config
+    assert(grammar->configs.size() == 1);
+
+    assert(dfa_match_string("abcx", grammar));
+    assert(dfa_match_string("abcy", grammar));
+    assert(dfa_match_string("abdz", grammar));
+    assert(!dfa_match_string("abcz", grammar));
+    assert(!dfa_match_string("abdx", grammar));
+
+    llama_grammar_free_impl(grammar);
+    fprintf(stderr, "  ✅ Deep left factoring tests passed\n");
+}
+
+static void test_left_factor_identical_alternates() {
+    fprintf(stderr, "Testing left factoring: identical alternates collapse...\n");
+
+    // root ::= "abc" | "abc"
+    // Identical alternates should collapse to one
+    auto * grammar = build_grammar("root ::= \"abc\" | \"abc\"");
+    assert(grammar != nullptr);
+
+    assert(grammar->configs.size() == 1);
+    assert(dfa_match_string("abc", grammar));
+    assert(!dfa_match_string("ab", grammar));
+
+    llama_grammar_free_impl(grammar);
+    fprintf(stderr, "  ✅ Identical alternates collapse tests passed\n");
+}
+
+static void test_left_factor_partial_overlap() {
+    fprintf(stderr, "Testing left factoring: partial overlap among groups...\n");
+
+    // root ::= "a" "x" | "a" "y" | "b" "z"
+    // Group "a": "a" "x" and "a" "y" share prefix "a"
+    // Group "b": "b" "z" stands alone
+    auto * grammar = build_grammar("root ::= \"a\" \"x\" | \"a\" \"y\" | \"b\" \"z\"");
+    assert(grammar != nullptr);
+
+    // Should have 2 initial configs: one for factored "a" group, one for "b" group
+    assert(grammar->configs.size() == 2);
+
+    assert(dfa_match_string("ax", grammar));
+    assert(dfa_match_string("ay", grammar));
+    assert(dfa_match_string("bz", grammar));
+    assert(!dfa_match_string("az", grammar));
+    assert(!dfa_match_string("bx", grammar));
+
+    llama_grammar_free_impl(grammar);
+    fprintf(stderr, "  ✅ Partial overlap left factoring tests passed\n");
+}
+
+static void test_left_factor_with_existing_grammars() {
+    fprintf(stderr, "Testing left factoring doesn't break existing grammar patterns...\n");
+
+    // Verify that the JSON string grammar still works after left factoring is enabled
+    auto * grammar = build_grammar(
+        "root ::= \"\\\"\" chars \"\\\"\" \n"
+        "chars ::= char*\n"
+        "char ::= [^\"\\\\] | \"\\\\\" [\"\\\\/bfnrt]");
+    assert(grammar != nullptr);
+
+    assert(dfa_match_string("\"hello\"", grammar));
+    assert(dfa_match_string("\"\"", grammar));
+    assert(dfa_match_string("\"hello world\"", grammar));
+    assert(dfa_match_string("\"line\\n\"", grammar));
+    assert(!dfa_match_string("hello", grammar));
+
+    llama_grammar_free_impl(grammar);
+
+    // Also test rule refs with optional elements
+    grammar = build_grammar(
+        "root ::= greeting \" \" name\n"
+        "greeting ::= \"hello\" | \"hi\"\n"
+        "name ::= [A-Z] [a-z]+");
+    assert(grammar != nullptr);
+
+    assert(dfa_match_string("hello World", grammar));
+    assert(dfa_match_string("hi Bob", grammar));
+    assert(!dfa_match_string("hey World", grammar));
+
+    llama_grammar_free_impl(grammar);
+    fprintf(stderr, "  ✅ Existing grammar compatibility tests passed\n");
+}
+
 static void test_valid_bytes() {
     fprintf(stderr, "Testing get_valid_bytes...\n");
 
@@ -594,6 +757,15 @@ int main() {
     test_grammar_json_string();
     test_grammar_quantifiers();
     test_grammar_wildcard();
+
+    // Left factoring tests
+    test_left_factor_basic();
+    test_left_factor_rule_call();
+    test_left_factor_no_common_prefix();
+    test_left_factor_deep();
+    test_left_factor_identical_alternates();
+    test_left_factor_partial_overlap();
+    test_left_factor_with_existing_grammars();
 
     // Runtime feature tests
     test_valid_bytes();
