@@ -783,10 +783,22 @@ void llama_grammar_apply_impl(const struct llama_grammar & grammar, llama_token_
     const bool have_candidates = !grammar.compiled->dfa_candidates.empty();
 
     // Build candidate bitmask from precomputed per-DFA-state adaptive token sets.
-    // For each active config, look up its (dfa_id, dfa_state) and union the tokens
-    // that need simulation.
+    //
+    // A token needs simulation if ANY config considers it a candidate.
+    // Equivalently, a token can be skipped only if ALL configs reject it.
+    //
+    // We track `rejected_by_all`: start all-true, then for each config AND in
+    // that config's reject set. At the end, needs_simulation = !rejected_by_all.
+    //
+    // For reject-heavy states (token_set = accept set): reject set is the complement.
+    //   → Clear bits for tokens IN the accept set (they're candidates, not rejected).
+    // For accept-heavy states (token_set = reject set): reject set is token_set itself.
+    //   → Only keep bits that are also in this reject set (AND with reject set).
     std::vector<bool> needs_simulation(n_vocab, !have_candidates);
     if (have_candidates) {
+        std::vector<bool> rejected_by_all(n_vocab, true);
+        bool any_config_matched = false;
+
         for (const auto & cfg : grammar.configs) {
             const auto & rule = grammar.compiled->rules[cfg.current.rule_id];
             const auto & alt = rule.alternates[cfg.current.alternate_idx];
@@ -794,29 +806,44 @@ void llama_grammar_apply_impl(const struct llama_grammar & grammar, llama_token_
             const auto & seg = alt[cfg.current.segment_idx];
             if (seg.type != compiled_segment::DFA_MATCH) continue;
 
-            if (seg.id < grammar.compiled->dfa_candidates.size()) {
-                const auto & state_cands = grammar.compiled->dfa_candidates[seg.id];
-                if (cfg.current.dfa_state < state_cands.states.size()) {
-                    const auto & ts = state_cands.states[cfg.current.dfa_state];
-                    if (ts.accept_heavy) {
-                        // Accept-heavy: token_set contains rejected tokens.
-                        // All tokens NOT in the set are candidates → need simulation.
-                        // Since we're building a union across configs, mark all as
-                        // needing simulation, then we'd need to subtract. Instead,
-                        // for accept-heavy states, conservatively mark all as candidates.
-                        for (uint32_t t = 0; t < n_vocab; t++) {
-                            needs_simulation[t] = true;
-                        }
+            if (seg.id >= grammar.compiled->dfa_candidates.size()) continue;
+            const auto & state_cands = grammar.compiled->dfa_candidates[seg.id];
+            if (cfg.current.dfa_state >= state_cands.states.size()) continue;
+
+            const auto & ts = state_cands.states[cfg.current.dfa_state];
+            any_config_matched = true;
+
+            if (ts.accept_heavy) {
+                // token_set = reject set. A token is rejected by this config
+                // only if it's IN token_set. AND rejected_by_all with this reject set.
+                //
+                // Build a bitmask of this config's rejects, then AND.
+                // Since token_set is sorted, use merge-style iteration.
+                size_t ti = 0;
+                for (uint32_t t = 0; t < n_vocab; t++) {
+                    if (ti < ts.token_set.size() && ts.token_set[ti] == (int32_t)t) {
+                        // Token is in reject set — leave rejected_by_all[t] as-is
+                        ti++;
                     } else {
-                        // Reject-heavy: token_set contains candidate tokens.
-                        // Only these tokens need simulation.
-                        for (int32_t tok : ts.token_set) {
-                            if (tok >= 0 && (uint32_t)tok < n_vocab) {
-                                needs_simulation[tok] = true;
-                            }
-                        }
+                        // Token is a candidate for this config — it's NOT rejected
+                        rejected_by_all[t] = false;
                     }
                 }
+            } else {
+                // token_set = accept set. A token is rejected by this config
+                // if it's NOT in token_set. Clear rejected_by_all for tokens
+                // that ARE in the accept set (they're candidates, not rejected).
+                for (int32_t tok : ts.token_set) {
+                    if (tok >= 0 && (uint32_t)tok < n_vocab) {
+                        rejected_by_all[tok] = false;
+                    }
+                }
+            }
+        }
+
+        if (any_config_matched) {
+            for (uint32_t t = 0; t < n_vocab; t++) {
+                needs_simulation[t] = !rejected_by_all[t];
             }
         }
     }
