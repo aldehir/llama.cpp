@@ -5,7 +5,8 @@
 	import Label from '$lib/components/ui/label/label.svelte';
 	import * as Select from '$lib/components/ui/select';
 	import { Textarea } from '$lib/components/ui/textarea';
-	import { SETTING_CONFIG_DEFAULT, SETTING_CONFIG_INFO } from '$lib/constants/settings-config';
+	import { SETTING_CONFIG_DEFAULT, SETTING_CONFIG_INFO, SETTINGS_KEYS } from '$lib/constants';
+	import { SettingsFieldType } from '$lib/enums/settings';
 	import { settingsStore } from '$lib/stores/settings.svelte';
 	import { ChatSettingsParameterSourceIndicator } from '$lib/components/app';
 	import type { Component } from 'svelte';
@@ -31,7 +32,7 @@
 
 {#each fields as field (field.key)}
 	<div class="space-y-2">
-		{#if field.type === 'input'}
+		{#if field.type === SettingsFieldType.INPUT}
 			{@const paramInfo = getParameterSourceInfo(field.key)}
 			{@const currentValue = String(localConfig[field.key] ?? '')}
 			{@const propsDefault = paramInfo?.serverDefault}
@@ -95,10 +96,10 @@
 			</div>
 			{#if field.help || SETTING_CONFIG_INFO[field.key]}
 				<p class="mt-1 text-xs text-muted-foreground">
-					{field.help || SETTING_CONFIG_INFO[field.key]}
+					{@html field.help || SETTING_CONFIG_INFO[field.key]}
 				</p>
 			{/if}
-		{:else if field.type === 'textarea'}
+		{:else if field.type === SettingsFieldType.TEXTAREA}
 			<Label for={field.key} class="block flex items-center gap-1.5 text-sm font-medium">
 				{field.label}
 
@@ -112,14 +113,29 @@
 				value={String(localConfig[field.key] ?? '')}
 				onchange={(e) => onConfigChange(field.key, e.currentTarget.value)}
 				placeholder={`Default: ${SETTING_CONFIG_DEFAULT[field.key] ?? 'none'}`}
-				class="min-h-[100px] w-full md:max-w-2xl"
+				class="min-h-[10rem] w-full md:max-w-2xl"
 			/>
+
 			{#if field.help || SETTING_CONFIG_INFO[field.key]}
 				<p class="mt-1 text-xs text-muted-foreground">
 					{field.help || SETTING_CONFIG_INFO[field.key]}
 				</p>
 			{/if}
-		{:else if field.type === 'select'}
+
+			{#if field.key === SETTINGS_KEYS.SYSTEM_MESSAGE}
+				<div class="mt-3 flex items-center gap-2">
+					<Checkbox
+						id="showSystemMessage"
+						checked={Boolean(localConfig.showSystemMessage ?? true)}
+						onCheckedChange={(checked) => onConfigChange('showSystemMessage', Boolean(checked))}
+					/>
+
+					<Label for="showSystemMessage" class="cursor-pointer text-sm font-normal">
+						Show system message in conversations
+					</Label>
+				</div>
+			{/if}
+		{:else if field.type === SettingsFieldType.SELECT}
 			{@const selectedOption = field.options?.find(
 				(opt: { value: string; label: string; icon?: Component }) =>
 					opt.value === localConfig[field.key]
@@ -151,7 +167,7 @@
 				type="single"
 				value={currentValue}
 				onValueChange={(value) => {
-					if (field.key === 'theme' && value && onThemeChange) {
+					if (field.key === SETTINGS_KEYS.THEME && value && onThemeChange) {
 						onThemeChange(value);
 					} else {
 						onConfigChange(field.key, value);
@@ -207,7 +223,7 @@
 					{field.help || SETTING_CONFIG_INFO[field.key]}
 				</p>
 			{/if}
-		{:else if field.type === 'checkbox'}
+		{:else if field.type === SettingsFieldType.CHECKBOX}
 			<div class="flex items-start space-x-3">
 				<Checkbox
 					id={field.key}
