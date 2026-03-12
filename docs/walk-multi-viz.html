@@ -1,0 +1,991 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>walk_multi Algorithm Visualization</title>
+<style>
+  :root {
+    --bg: #1a1a2e;
+    --surface: #16213e;
+    --surface2: #0f3460;
+    --accent: #e94560;
+    --accent2: #533483;
+    --green: #4ecca3;
+    --yellow: #f0c929;
+    --text: #eee;
+    --text-dim: #999;
+    --dead: #555;
+    --font-mono: 'Fira Code', 'Cascadia Code', 'JetBrains Mono', monospace;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    min-height: 100vh;
+    overflow-x: hidden;
+  }
+  h1 {
+    text-align: center;
+    padding: 24px 16px 8px;
+    font-size: 1.6rem;
+    font-weight: 700;
+    letter-spacing: -0.5px;
+  }
+  h1 code { font-family: var(--font-mono); color: var(--accent); }
+  .subtitle {
+    text-align: center;
+    color: var(--text-dim);
+    font-size: 0.9rem;
+    margin-bottom: 20px;
+  }
+
+  /* Layout */
+  .container {
+    display: grid;
+    grid-template-columns: 320px 1fr;
+    gap: 16px;
+    max-width: 1400px;
+    margin: 0 auto;
+    padding: 0 16px 24px;
+    min-height: calc(100vh - 120px);
+  }
+  @media (max-width: 900px) {
+    .container { grid-template-columns: 1fr; }
+  }
+
+  /* Sidebar */
+  .sidebar {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+  .panel {
+    background: var(--surface);
+    border-radius: 10px;
+    padding: 14px;
+    border: 1px solid rgba(255,255,255,0.06);
+  }
+  .panel h3 {
+    font-size: 0.8rem;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    color: var(--text-dim);
+    margin-bottom: 10px;
+  }
+
+  /* DFA table */
+  .dfa-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-family: var(--font-mono);
+    font-size: 0.78rem;
+  }
+  .dfa-table th, .dfa-table td {
+    padding: 4px 6px;
+    text-align: center;
+    border: 1px solid rgba(255,255,255,0.08);
+  }
+  .dfa-table th {
+    background: var(--surface2);
+    font-weight: 600;
+    color: var(--text-dim);
+  }
+  .dfa-table td.dead { color: var(--dead); }
+  .dfa-table td.accept-cell { color: var(--green); font-weight: 700; }
+  .dfa-table tr.highlight-row { background: rgba(233, 69, 96, 0.15); }
+
+  /* Controls */
+  .controls {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+  button {
+    font-family: inherit;
+    font-size: 0.85rem;
+    padding: 8px 16px;
+    border: none;
+    border-radius: 6px;
+    cursor: pointer;
+    font-weight: 600;
+    transition: all 0.15s;
+  }
+  button:active { transform: scale(0.97); }
+  .btn-primary {
+    background: var(--accent);
+    color: white;
+  }
+  .btn-primary:hover { background: #d63a52; }
+  .btn-primary:disabled {
+    background: #555;
+    cursor: not-allowed;
+  }
+  .btn-secondary {
+    background: var(--surface2);
+    color: var(--text);
+  }
+  .btn-secondary:hover { background: #1a4a8a; }
+  .btn-reset {
+    background: var(--accent2);
+    color: white;
+  }
+  .btn-reset:hover { background: #6a42a8; }
+  .speed-control {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 0.8rem;
+    color: var(--text-dim);
+  }
+  .speed-control input { width: 80px; }
+
+  /* Main visualization area */
+  .main-area {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+
+  /* Step narration */
+  .narration {
+    background: var(--surface);
+    border-radius: 10px;
+    padding: 14px 18px;
+    border-left: 4px solid var(--accent);
+    font-size: 0.9rem;
+    line-height: 1.5;
+    min-height: 60px;
+  }
+  .narration .step-num {
+    font-family: var(--font-mono);
+    color: var(--accent);
+    font-weight: 700;
+    margin-right: 8px;
+  }
+
+  /* Trie + groups visualization */
+  .viz-area {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+    flex: 1;
+  }
+  @media (max-width: 1100px) {
+    .viz-area { grid-template-columns: 1fr; }
+  }
+
+  /* Trie canvas */
+  .trie-panel {
+    background: var(--surface);
+    border-radius: 10px;
+    padding: 14px;
+    border: 1px solid rgba(255,255,255,0.06);
+    position: relative;
+    min-height: 400px;
+  }
+  .trie-panel h3 {
+    font-size: 0.8rem;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    color: var(--text-dim);
+    margin-bottom: 10px;
+  }
+  #trie-canvas {
+    width: 100%;
+    height: 380px;
+  }
+
+  /* Groups panel */
+  .groups-panel {
+    background: var(--surface);
+    border-radius: 10px;
+    padding: 14px;
+    border: 1px solid rgba(255,255,255,0.06);
+    min-height: 400px;
+    overflow-y: auto;
+  }
+  .groups-panel h3 {
+    font-size: 0.8rem;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    color: var(--text-dim);
+    margin-bottom: 10px;
+  }
+
+  .group-card {
+    background: rgba(255,255,255,0.04);
+    border-radius: 8px;
+    padding: 10px 12px;
+    margin-bottom: 8px;
+    border-left: 3px solid var(--accent2);
+    transition: all 0.3s;
+  }
+  .group-card.active { border-left-color: var(--accent); background: rgba(233,69,96,0.08); }
+  .group-card.dead { border-left-color: var(--dead); opacity: 0.4; }
+  .group-card.accepted { border-left-color: var(--green); background: rgba(78,204,163,0.08); }
+  .group-card.merged { border-left-color: var(--yellow); background: rgba(240,201,41,0.08); }
+
+  .group-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 4px;
+  }
+  .group-dfa-state {
+    font-family: var(--font-mono);
+    font-weight: 700;
+    font-size: 0.9rem;
+  }
+  .group-badge {
+    font-size: 0.7rem;
+    padding: 2px 8px;
+    border-radius: 10px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+  .badge-active { background: var(--accent); color: white; }
+  .badge-dead { background: var(--dead); color: #222; }
+  .badge-accept { background: var(--green); color: #111; }
+  .badge-merged { background: var(--yellow); color: #111; }
+  .group-origins {
+    font-family: var(--font-mono);
+    font-size: 0.78rem;
+    color: var(--text-dim);
+  }
+
+  /* Candidate bits matrix */
+  .candidate-panel {
+    background: var(--surface);
+    border-radius: 10px;
+    padding: 14px;
+    border: 1px solid rgba(255,255,255,0.06);
+  }
+  .candidate-panel h3 {
+    font-size: 0.8rem;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    color: var(--text-dim);
+    margin-bottom: 10px;
+  }
+  .bits-grid {
+    display: grid;
+    gap: 4px;
+    font-family: var(--font-mono);
+    font-size: 0.75rem;
+  }
+  .bits-row {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+  }
+  .bits-label {
+    width: 65px;
+    text-align: right;
+    color: var(--text-dim);
+    flex-shrink: 0;
+  }
+  .bit-cell {
+    width: 22px;
+    height: 22px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 3px;
+    background: rgba(255,255,255,0.03);
+    transition: all 0.3s;
+    font-size: 0.7rem;
+  }
+  .bit-cell.on {
+    background: var(--green);
+    color: #111;
+    font-weight: 700;
+  }
+  .bit-cell.just-set {
+    background: var(--yellow);
+    color: #111;
+    font-weight: 700;
+    box-shadow: 0 0 8px rgba(240,201,41,0.5);
+  }
+  .bit-cell.token-header {
+    background: none;
+    color: var(--text-dim);
+    font-weight: 600;
+    font-size: 0.65rem;
+  }
+
+  /* Legend */
+  .legend {
+    display: flex;
+    gap: 16px;
+    flex-wrap: wrap;
+    font-size: 0.78rem;
+    color: var(--text-dim);
+    padding: 8px 0;
+  }
+  .legend-item {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .legend-dot {
+    width: 12px;
+    height: 12px;
+    border-radius: 3px;
+  }
+</style>
+</head>
+<body>
+
+<h1><code>walk_multi</code> Algorithm Visualization</h1>
+<p class="subtitle">Interactive step-through of the multi-state DFA × vocab trie traversal used in llama.cpp grammar precomputation</p>
+
+<div class="container">
+  <div class="sidebar">
+    <!-- DFA definition -->
+    <div class="panel">
+      <h3>DFA Transition Table</h3>
+      <table class="dfa-table" id="dfa-table"></table>
+      <div style="margin-top:8px; font-size:0.75rem; color:var(--text-dim)">
+        State 0 = dead &nbsp;|&nbsp; <span style="color:var(--green)">Green</span> = accept
+      </div>
+    </div>
+
+    <!-- Vocab tokens -->
+    <div class="panel">
+      <h3>Vocab Tokens (in trie)</h3>
+      <div id="vocab-list" style="font-family:var(--font-mono); font-size:0.8rem; line-height:1.8"></div>
+    </div>
+
+    <!-- Controls -->
+    <div class="panel">
+      <h3>Controls</h3>
+      <div class="controls">
+        <button class="btn-primary" id="btn-step">Step →</button>
+        <button class="btn-secondary" id="btn-auto">Auto ▶</button>
+        <button class="btn-reset" id="btn-reset">Reset ↺</button>
+      </div>
+      <div class="speed-control" style="margin-top:10px">
+        <label>Speed:</label>
+        <input type="range" id="speed" min="200" max="2000" value="900" step="100">
+        <span id="speed-val">900ms</span>
+      </div>
+      <div class="legend" style="margin-top:10px">
+        <div class="legend-item"><div class="legend-dot" style="background:var(--accent)"></div> Active</div>
+        <div class="legend-item"><div class="legend-dot" style="background:var(--dead)"></div> Dead</div>
+        <div class="legend-item"><div class="legend-dot" style="background:var(--green)"></div> Accept</div>
+        <div class="legend-item"><div class="legend-dot" style="background:var(--yellow)"></div> Merged</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="main-area">
+    <div class="narration" id="narration">
+      <span class="step-num">Ready</span>
+      Press <b>Step →</b> to begin the walk_multi traversal. We'll walk all DFA states simultaneously through the vocab trie, grouping states that converge.
+    </div>
+
+    <div class="viz-area">
+      <div class="trie-panel">
+        <h3>Vocab Byte Trie</h3>
+        <canvas id="trie-canvas"></canvas>
+      </div>
+      <div class="groups-panel">
+        <h3>Active Groups</h3>
+        <div id="groups-container"></div>
+      </div>
+    </div>
+
+    <div class="candidate-panel">
+      <h3>Candidate Bits Matrix &nbsp;<span style="font-size:0.7rem;color:var(--text-dim)">(rows = DFA starting states, cols = vocab tokens)</span></h3>
+      <div class="bits-grid" id="bits-grid"></div>
+    </div>
+  </div>
+</div>
+
+<script>
+// ============================================================
+// Example DFA and Vocab
+// ============================================================
+
+// DFA: matches patterns like [a-c][a-b] (2-char strings from limited alphabet)
+// States: 0=dead, 1=start, 2=after first char, 3=accept
+// We add a second start state (4) that accepts single 'a' for variety
+const DFA = {
+  n_states: 5,
+  accept: [false, false, false, true, false],
+  // transitions[state][byte] → next_state  (we only define 'a','b','c')
+  labels: ['a', 'b', 'c'],
+  trans: [
+    // state 0 (dead): all → 0
+    { a: 0, b: 0, c: 0 },
+    // state 1 (start): a→2, b→2, c→2
+    { a: 2, b: 2, c: 0 },
+    // state 2: a→3, b→3, c→0
+    { a: 3, b: 3, c: 0 },
+    // state 3 (accept): all → 0
+    { a: 0, b: 0, c: 0 },
+    // state 4 (start2): a→3, b→0, c→2
+    { a: 3, b: 0, c: 2 },
+  ],
+  // Full 256-byte transition table (only a,b,c are non-dead)
+  transition(state, byte) {
+    const ch = String.fromCharCode(byte);
+    if (this.trans[state] && this.trans[state][ch] !== undefined) {
+      return this.trans[state][ch];
+    }
+    return 0;
+  }
+};
+
+// Vocab tokens inserted into the trie
+const VOCAB = [
+  { id: 0, text: 'a' },
+  { id: 1, text: 'ab' },
+  { id: 2, text: 'ac' },
+  { id: 3, text: 'b' },
+  { id: 4, text: 'ba' },
+  { id: 5, text: 'bb' },
+  { id: 6, text: 'ca' },
+  { id: 7, text: 'cb' },
+];
+
+// ============================================================
+// Build Trie
+// ============================================================
+class TrieNode {
+  constructor(label = 'root', depth = 0) {
+    this.label = label;
+    this.depth = depth;
+    this.children = {};
+    this.tokens = [];
+    this.subtreeTokens = [];
+    // viz
+    this.x = 0;
+    this.y = 0;
+    this.highlighted = false;
+    this.highlightColor = null;
+  }
+
+  cacheSubtreeTokens() {
+    this.subtreeTokens = [...this.tokens];
+    for (const ch of Object.keys(this.children).sort()) {
+      this.children[ch].cacheSubtreeTokens();
+      this.subtreeTokens.push(...this.children[ch].subtreeTokens);
+    }
+    this.subtreeTokens.sort((a, b) => a - b);
+  }
+}
+
+function buildTrie(vocab) {
+  const root = new TrieNode('root', 0);
+  for (const tok of vocab) {
+    let node = root;
+    for (let i = 0; i < tok.text.length; i++) {
+      const ch = tok.text[i];
+      if (!node.children[ch]) {
+        node.children[ch] = new TrieNode(ch, i + 1);
+      }
+      node = node.children[ch];
+    }
+    node.tokens.push(tok.id);
+  }
+  root.cacheSubtreeTokens();
+  return root;
+}
+
+const trieRoot = buildTrie(VOCAB);
+
+// ============================================================
+// Step-by-step walk_multi recorder
+// ============================================================
+
+const steps = [];
+
+function recordWalkMulti(dfa, node, activeGroups, candidateBits, path) {
+  // Record visiting this node
+  steps.push({
+    type: 'visit',
+    path: [...path],
+    node_label: node.label,
+    groups: activeGroups.map(g => ({ dfaState: g.dfaState, origins: [...g.origins] })),
+    candidateBits: candidateBits.map(row => [...row]),
+    narration: path.length === 0
+      ? `Start at trie root with ${activeGroups.length} groups: ${activeGroups.map(g => `(DFA ${g.dfaState} ← [${g.origins.join(',')}])`).join(', ')}`
+      : `Descend to trie node '${path.join('')}' with ${activeGroups.length} active group${activeGroups.length !== 1 ? 's' : ''}`
+  });
+
+  // Case 1: tokens terminate here
+  if (node.tokens.length > 0) {
+    for (const grp of activeGroups) {
+      for (const orig of grp.origins) {
+        for (const tokId of node.tokens) {
+          candidateBits[orig][tokId] = 1;
+        }
+      }
+    }
+    const tokNames = node.tokens.map(id => `"${VOCAB[id].text}"(T${id})`).join(', ');
+    const origStates = activeGroups.flatMap(g => g.origins);
+    steps.push({
+      type: 'token_found',
+      path: [...path],
+      tokenIds: [...node.tokens],
+      origins: [...origStates],
+      candidateBits: candidateBits.map(row => [...row]),
+      narration: `Tokens ${tokNames} terminate here → mark as candidates for starting states [${origStates.join(', ')}]`
+    });
+  }
+
+  // Process each child byte
+  const childKeys = Object.keys(node.children).sort();
+  for (const ch of childKeys) {
+    const byte = ch.charCodeAt(0);
+    const nextGroups = {};
+    const acceptOrigins = [];
+
+    for (const grp of activeGroups) {
+      const nextState = dfa.transition(grp.dfaState, byte);
+      if (nextState === 0) {
+        // Dead
+        steps.push({
+          type: 'dead',
+          path: [...path, ch],
+          dfaState: grp.dfaState,
+          origins: [...grp.origins],
+          byte: ch,
+          candidateBits: candidateBits.map(row => [...row]),
+          narration: `Byte '${ch}': DFA state ${grp.dfaState} → state 0 (DEAD). Prune origins [${grp.origins.join(',')}] for subtree '${[...path, ch].join('')}*'`
+        });
+        continue;
+      }
+      if (dfa.accept[nextState]) {
+        // Accept — collect subtree
+        acceptOrigins.push(...grp.origins);
+        steps.push({
+          type: 'accept',
+          path: [...path, ch],
+          dfaState: grp.dfaState,
+          nextState: nextState,
+          origins: [...grp.origins],
+          byte: ch,
+          subtreeTokens: [...node.children[ch].subtreeTokens],
+          candidateBits: candidateBits.map(row => [...row]),
+          narration: `Byte '${ch}': DFA state ${grp.dfaState} → state ${nextState} (ACCEPT). All ${node.children[ch].subtreeTokens.length} subtree token(s) become candidates for origins [${grp.origins.join(',')}]`
+        });
+        // Actually mark the bits
+        for (const orig of grp.origins) {
+          for (const tokId of node.children[ch].subtreeTokens) {
+            candidateBits[orig][tokId] = 1;
+          }
+        }
+        // Show updated bits
+        steps.push({
+          type: 'bits_update',
+          path: [...path, ch],
+          origins: [...grp.origins],
+          tokenIds: [...node.children[ch].subtreeTokens],
+          candidateBits: candidateBits.map(row => [...row]),
+          narration: `Marked subtree tokens [${node.children[ch].subtreeTokens.map(id => `T${id}`).join(',')}] for origins [${grp.origins.join(',')}] using cached subtree_tokens`
+        });
+      } else {
+        // Continue — group by next state
+        if (!nextGroups[nextState]) nextGroups[nextState] = [];
+        nextGroups[nextState].push(...grp.origins);
+      }
+    }
+
+    // Show merging
+    const merged = Object.entries(nextGroups).map(([s, origs]) => ({
+      dfaState: parseInt(s),
+      origins: origs
+    }));
+
+    if (merged.length > 0) {
+      const mergeDetails = merged.map(g =>
+        `DFA ${g.dfaState} ← [${g.origins.join(',')}]`
+      ).join(', ');
+      const wasMerged = merged.some(g => g.origins.length > 1);
+      steps.push({
+        type: 'merge',
+        path: [...path, ch],
+        byte: ch,
+        merged: merged.map(g => ({ dfaState: g.dfaState, origins: [...g.origins] })),
+        wasMerged,
+        candidateBits: candidateBits.map(row => [...row]),
+        narration: wasMerged
+          ? `Byte '${ch}': MERGE! Multiple origins converge → ${mergeDetails}. Shared recursion saves work.`
+          : `Byte '${ch}': Continue with groups: ${mergeDetails}`
+      });
+
+      // Recurse
+      recordWalkMulti(dfa, node.children[ch], merged, candidateBits, [...path, ch]);
+    }
+  }
+}
+
+// Initial groups: each non-dead DFA state starts as its own group
+function initAndRecord() {
+  steps.length = 0;
+  const startStates = [1, 4]; // our two interesting start states
+  const candidateBits = [];
+  for (let s = 0; s < DFA.n_states; s++) {
+    candidateBits.push(new Array(VOCAB.length).fill(0));
+  }
+  const initialGroups = startStates.map(s => ({ dfaState: s, origins: [s] }));
+
+  steps.push({
+    type: 'init',
+    path: [],
+    groups: initialGroups.map(g => ({ dfaState: g.dfaState, origins: [...g.origins] })),
+    candidateBits: candidateBits.map(row => [...row]),
+    narration: `Initialize: ${startStates.length} DFA starting states [${startStates.join(', ')}] each form their own group. We'll walk them all through the trie simultaneously.`
+  });
+
+  recordWalkMulti(DFA, trieRoot, initialGroups, candidateBits, []);
+
+  steps.push({
+    type: 'done',
+    path: [],
+    candidateBits: candidateBits.map(row => [...row]),
+    narration: `Done! All trie paths explored. The candidate_bits matrix shows which tokens are valid candidates for each DFA starting state.`
+  });
+}
+
+initAndRecord();
+
+// ============================================================
+// Rendering
+// ============================================================
+
+let currentStep = -1;
+let autoInterval = null;
+
+// DFA table
+function renderDFATable() {
+  const table = document.getElementById('dfa-table');
+  let html = '<tr><th>State</th>';
+  for (const l of DFA.labels) html += `<th>'${l}'</th>`;
+  html += '<th>Accept?</th></tr>';
+  for (let s = 0; s < DFA.n_states; s++) {
+    html += `<tr id="dfa-row-${s}">`;
+    html += `<td style="font-weight:700">${s}${s === 0 ? ' (dead)' : ''}</td>`;
+    for (const l of DFA.labels) {
+      const next = DFA.trans[s][l];
+      const cls = next === 0 ? 'dead' : (DFA.accept[next] ? 'accept-cell' : '');
+      html += `<td class="${cls}">${next}</td>`;
+    }
+    html += `<td class="${DFA.accept[s] ? 'accept-cell' : 'dead'}">${DFA.accept[s] ? '✓' : '—'}</td>`;
+    html += '</tr>';
+  }
+  table.innerHTML = html;
+}
+
+function renderVocabList() {
+  const el = document.getElementById('vocab-list');
+  el.innerHTML = VOCAB.map(v =>
+    `<span id="vocab-${v.id}" style="display:inline-block;margin:2px 6px 2px 0;padding:2px 8px;border-radius:4px;background:rgba(255,255,255,0.05)">T${v.id}: "${v.text}"</span>`
+  ).join('');
+}
+
+// Trie drawing
+function layoutTrie(node, x, y, xSpan) {
+  node.x = x;
+  node.y = y;
+  const keys = Object.keys(node.children).sort();
+  if (keys.length === 0) return;
+  const childSpan = xSpan / keys.length;
+  let cx = x - xSpan / 2 + childSpan / 2;
+  for (const k of keys) {
+    layoutTrie(node.children[k], cx, y + 80, childSpan);
+    cx += childSpan;
+  }
+}
+
+function drawTrie(ctx, node, highlightPath, parent = null) {
+  const isOnPath = highlightPath !== null;
+  // Draw edge from parent
+  if (parent) {
+    ctx.beginPath();
+    ctx.moveTo(parent.x, parent.y + 16);
+    ctx.lineTo(node.x, node.y - 16);
+    const onEdge = node.highlighted;
+    ctx.strokeStyle = onEdge ? 'rgba(233,69,96,0.8)' : 'rgba(255,255,255,0.15)';
+    ctx.lineWidth = onEdge ? 2.5 : 1;
+    ctx.stroke();
+  }
+
+  // Draw node
+  const r = 16;
+  ctx.beginPath();
+  ctx.arc(node.x, node.y, r, 0, Math.PI * 2);
+
+  if (node.highlightColor) {
+    ctx.fillStyle = node.highlightColor;
+  } else if (node.highlighted) {
+    ctx.fillStyle = 'rgba(233,69,96,0.3)';
+  } else {
+    ctx.fillStyle = 'rgba(255,255,255,0.06)';
+  }
+  ctx.fill();
+
+  ctx.strokeStyle = node.highlighted ? '#e94560' : 'rgba(255,255,255,0.2)';
+  ctx.lineWidth = node.highlighted ? 2 : 1;
+  ctx.stroke();
+
+  // Label
+  ctx.fillStyle = node.highlighted ? '#fff' : '#aaa';
+  ctx.font = `${node.highlighted ? 'bold ' : ''}12px ${getComputedStyle(document.body).getPropertyValue('--font-mono').trim() || 'monospace'}`;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(node.label === 'root' ? '∅' : node.label, node.x, node.y);
+
+  // Token indicators
+  if (node.tokens.length > 0) {
+    ctx.fillStyle = node.highlighted ? '#4ecca3' : 'rgba(78,204,163,0.5)';
+    ctx.font = '9px sans-serif';
+    ctx.fillText(`T${node.tokens.join(',')}`, node.x, node.y + r + 12);
+  }
+
+  // Children
+  const keys = Object.keys(node.children).sort();
+  for (const k of keys) {
+    drawTrie(ctx, node.children[k], highlightPath, node);
+  }
+}
+
+function clearTrieHighlights(node) {
+  node.highlighted = false;
+  node.highlightColor = null;
+  for (const ch of Object.values(node.children)) {
+    clearTrieHighlights(ch);
+  }
+}
+
+function highlightTriePath(root, path) {
+  clearTrieHighlights(root);
+  let node = root;
+  node.highlighted = true;
+  for (const ch of path) {
+    if (node.children[ch]) {
+      node = node.children[ch];
+      node.highlighted = true;
+    }
+  }
+  return node;
+}
+
+function renderTrie(path) {
+  const canvas = document.getElementById('trie-canvas');
+  const ctx = canvas.getContext('2d');
+  const rect = canvas.parentElement.getBoundingClientRect();
+  canvas.width = rect.width - 28;
+  canvas.height = 380;
+
+  layoutTrie(trieRoot, canvas.width / 2, 30, canvas.width - 40);
+
+  if (path && path.length >= 0) {
+    highlightTriePath(trieRoot, path);
+  } else {
+    clearTrieHighlights(trieRoot);
+  }
+
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  drawTrie(ctx, trieRoot, path);
+}
+
+// Groups
+function renderGroups(groups, stepType) {
+  const container = document.getElementById('groups-container');
+  if (!groups || groups.length === 0) {
+    container.innerHTML = '<div style="color:var(--text-dim);font-size:0.85rem">No active groups</div>';
+    return;
+  }
+  container.innerHTML = groups.map((g, i) => {
+    let cls = 'group-card';
+    let badgeCls = 'badge-active';
+    let badgeText = 'Active';
+    if (stepType === 'dead' && i === groups.length - 1) {
+      cls += ' dead'; badgeCls = 'badge-dead'; badgeText = 'Dead';
+    } else if (stepType === 'accept' && i === groups.length - 1) {
+      cls += ' accepted'; badgeCls = 'badge-accept'; badgeText = 'Accept';
+    } else if (stepType === 'merge' || (g.origins && g.origins.length > 1)) {
+      cls += ' merged'; badgeCls = 'badge-merged'; badgeText = g.origins.length > 1 ? 'Merged' : 'Active';
+      if (g.origins.length <= 1) { cls = 'group-card active'; badgeCls = 'badge-active'; badgeText = 'Active'; }
+    } else {
+      cls += ' active';
+    }
+    return `<div class="${cls}">
+      <div class="group-header">
+        <span class="group-dfa-state">DFA State ${g.dfaState}</span>
+        <span class="group-badge ${badgeCls}">${badgeText}</span>
+      </div>
+      <div class="group-origins">Origins: [${g.origins.join(', ')}]</div>
+    </div>`;
+  }).join('');
+}
+
+// Candidate bits
+function renderBits(candidateBits, justSet = null) {
+  const grid = document.getElementById('bits-grid');
+  const startStates = [1, 4];
+
+  // Header row
+  let html = '<div class="bits-row"><div class="bits-label"></div>';
+  for (let t = 0; t < VOCAB.length; t++) {
+    html += `<div class="bit-cell token-header">T${t}</div>`;
+  }
+  html += '</div>';
+
+  for (const s of startStates) {
+    html += `<div class="bits-row"><div class="bits-label">State ${s}:</div>`;
+    for (let t = 0; t < VOCAB.length; t++) {
+      const on = candidateBits[s][t];
+      const just = justSet && justSet.origins && justSet.tokenIds &&
+                   justSet.origins.includes(s) && justSet.tokenIds.includes(t);
+      const cls = just ? 'bit-cell just-set' : (on ? 'bit-cell on' : 'bit-cell');
+      html += `<div class="${cls}">${on ? '1' : '·'}</div>`;
+    }
+    html += '</div>';
+  }
+  grid.innerHTML = html;
+}
+
+// Highlight DFA table rows
+function highlightDFARows(states) {
+  for (let s = 0; s < DFA.n_states; s++) {
+    const row = document.getElementById(`dfa-row-${s}`);
+    if (row) row.classList.toggle('highlight-row', states.includes(s));
+  }
+}
+
+// Main render for a step
+function renderStep(idx) {
+  if (idx < 0 || idx >= steps.length) return;
+  const step = steps[idx];
+
+  // Narration
+  const narEl = document.getElementById('narration');
+  narEl.innerHTML = `<span class="step-num">Step ${idx + 1}/${steps.length}</span> ${step.narration}`;
+
+  // Trie
+  renderTrie(step.path || []);
+
+  // Color the current trie node based on step type
+  if (step.type === 'dead') {
+    const node = getTrieNode(step.path);
+    if (node) node.highlightColor = 'rgba(85,85,85,0.4)';
+    renderTrie(step.path);
+  } else if (step.type === 'accept' || step.type === 'bits_update') {
+    const node = getTrieNode(step.path);
+    if (node) node.highlightColor = 'rgba(78,204,163,0.3)';
+    renderTrie(step.path);
+  }
+
+  // Groups
+  const groups = step.groups || step.merged || [];
+  renderGroups(groups, step.type);
+
+  // Bits
+  const justSet = (step.type === 'token_found' || step.type === 'bits_update')
+    ? { origins: step.origins, tokenIds: step.tokenIds }
+    : null;
+  renderBits(step.candidateBits, justSet);
+
+  // DFA row highlights
+  const dfaStates = (step.groups || step.merged || []).map(g => g.dfaState);
+  if (step.dfaState !== undefined) dfaStates.push(step.dfaState);
+  if (step.nextState !== undefined) dfaStates.push(step.nextState);
+  highlightDFARows(dfaStates);
+
+  // Update button state
+  document.getElementById('btn-step').disabled = idx >= steps.length - 1;
+}
+
+function getTrieNode(path) {
+  let node = trieRoot;
+  for (const ch of path) {
+    if (node.children[ch]) node = node.children[ch];
+    else return null;
+  }
+  return node;
+}
+
+// Controls
+document.getElementById('btn-step').addEventListener('click', () => {
+  if (currentStep < steps.length - 1) {
+    currentStep++;
+    renderStep(currentStep);
+  }
+});
+
+document.getElementById('btn-auto').addEventListener('click', () => {
+  const btn = document.getElementById('btn-auto');
+  if (autoInterval) {
+    clearInterval(autoInterval);
+    autoInterval = null;
+    btn.textContent = 'Auto ▶';
+    return;
+  }
+  btn.textContent = 'Pause ⏸';
+  const speed = parseInt(document.getElementById('speed').value);
+  autoInterval = setInterval(() => {
+    if (currentStep < steps.length - 1) {
+      currentStep++;
+      renderStep(currentStep);
+    } else {
+      clearInterval(autoInterval);
+      autoInterval = null;
+      btn.textContent = 'Auto ▶';
+    }
+  }, speed);
+});
+
+document.getElementById('btn-reset').addEventListener('click', () => {
+  if (autoInterval) {
+    clearInterval(autoInterval);
+    autoInterval = null;
+    document.getElementById('btn-auto').textContent = 'Auto ▶';
+  }
+  currentStep = -1;
+  clearTrieHighlights(trieRoot);
+  renderTrie([]);
+  renderGroups([], '');
+  renderBits(Array.from({ length: DFA.n_states }, () => new Array(VOCAB.length).fill(0)));
+  highlightDFARows([]);
+  document.getElementById('narration').innerHTML =
+    '<span class="step-num">Ready</span> Press <b>Step →</b> to begin the walk_multi traversal.';
+  document.getElementById('btn-step').disabled = false;
+});
+
+document.getElementById('speed').addEventListener('input', (e) => {
+  document.getElementById('speed-val').textContent = e.target.value + 'ms';
+  if (autoInterval) {
+    clearInterval(autoInterval);
+    const btn = document.getElementById('btn-auto');
+    const speed = parseInt(e.target.value);
+    autoInterval = setInterval(() => {
+      if (currentStep < steps.length - 1) {
+        currentStep++;
+        renderStep(currentStep);
+      } else {
+        clearInterval(autoInterval);
+        autoInterval = null;
+        btn.textContent = 'Auto ▶';
+      }
+    }, speed);
+  }
+});
+
+// Initial render
+renderDFATable();
+renderVocabList();
+renderTrie([]);
+renderBits(Array.from({ length: DFA.n_states }, () => new Array(VOCAB.length).fill(0)));
+
+// Handle resize
+window.addEventListener('resize', () => renderTrie(currentStep >= 0 ? steps[currentStep].path : []));
+</script>
+</body>
+</html>
