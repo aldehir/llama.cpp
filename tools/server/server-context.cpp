@@ -2677,6 +2677,15 @@ private:
             n_empty_consecutive = 0;
         }
 
+        // launch async grammar mask computation for generating slots so that
+        // grammar constraints are evaluated in parallel with llama_decode()
+        for (auto & slot : slots) {
+            if (slot.state == SLOT_STATE_GENERATING && slot.i_batch >= 0
+                    && slot.i_batch_dft.empty()) {
+                common_sampler_start_grammar_async(slot.smpl.get());
+            }
+        }
+
         int32_t i_next = 0;
 
         // process the created batch of tokens

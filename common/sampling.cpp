@@ -8,6 +8,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <future>
 #include <unordered_map>
 
 // the ring buffer works similarly to std::deque, but with a fixed capacity
@@ -114,6 +115,10 @@ struct common_sampler {
     std::vector<llama_token_data> cur;
 
     llama_token_data_array cur_p;
+
+    // async grammar: precompute grammar mask in parallel with llama_decode()
+    int32_t n_vocab = 0;
+    std::future<std::vector<bool>> grammar_future;
 
     void reset() {
         prev.clear();
@@ -355,6 +360,8 @@ struct common_sampler * common_sampler_init(const struct llama_model * model, st
         /* .prev    = */ ring_buffer<llama_token>(std::max(32, params.n_prev)),
         /* .cur     = */ {},
         /* .cur_p   = */ {},
+        /* .n_vocab = */ llama_vocab_n_tokens(vocab),
+        /* .grammar_future = */ {},
     };
 
     return result;
@@ -403,7 +410,37 @@ struct common_sampler * common_sampler_clone(common_sampler * gsmpl) {
         /* .prev    = */ gsmpl->prev,
         /* .cur     = */ gsmpl->cur,
         /* .cur_p   = */ gsmpl->cur_p,
+        /* .n_vocab = */ gsmpl->n_vocab,
+        /* .grammar_future = */ {},
     };
+}
+
+void common_sampler_start_grammar_async(struct common_sampler * gsmpl) {
+    if (!gsmpl || !gsmpl->grmr) {
+        return;
+    }
+
+    const int32_t n_vocab = gsmpl->n_vocab;
+    llama_sampler * grmr = gsmpl->grmr;
+
+    gsmpl->grammar_future = std::async(std::launch::async, [grmr, n_vocab]() {
+        // build dummy token array with all tokens, logit = 0
+        std::vector<llama_token_data> dummy(n_vocab);
+        for (int32_t i = 0; i < n_vocab; i++) {
+            dummy[i] = { i, 0.0f, 0.0f };
+        }
+        llama_token_data_array dummy_arr = { dummy.data(), (size_t) n_vocab, -1, false };
+
+        // grammar apply is read-only on grammar state — safe from background thread
+        llama_sampler_apply(grmr, &dummy_arr);
+
+        // extract bitmask: allowed if logit wasn't set to -INFINITY
+        std::vector<bool> mask(n_vocab);
+        for (int32_t i = 0; i < n_vocab; i++) {
+            mask[dummy[i].id] = (dummy[i].logit != -INFINITY);
+        }
+        return mask;
+    });
 }
 
 void common_perf_print(const struct llama_context * ctx, const struct common_sampler * gsmpl) {
@@ -500,6 +537,25 @@ llama_token common_sampler_sample(struct common_sampler * gsmpl, struct llama_co
     }
 
     gsmpl->set_logits(ctx, idx);
+
+    // if an async grammar mask was precomputed (in parallel with llama_decode),
+    // apply it directly to the logits and skip the synchronous grammar path
+    if (gsmpl->grammar_future.valid()) {
+        auto mask = gsmpl->grammar_future.get();
+
+        for (size_t i = 0; i < cur_p.size; i++) {
+            const llama_token tok = cur_p.data[i].id;
+            if (tok >= 0 && tok < (llama_token) mask.size() && !mask[tok]) {
+                cur_p.data[i].logit = -INFINITY;
+            }
+        }
+
+        llama_sampler_apply(chain, &cur_p);
+
+        GGML_ASSERT(cur_p.selected != -1 && "no selected token during sampling - check your sampling configuration");
+
+        return cur_p.data[cur_p.selected].id;
+    }
 
     if (grammar_first) {
         llama_sampler_apply(grmr, &cur_p);
