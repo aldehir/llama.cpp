@@ -144,3 +144,8 @@ void llama_grammar_accept_impl(
 void llama_grammar_accept_str(
               struct llama_grammar & grammar,
                  const std::string & piece);
+
+// Total memory usage of the grammar, including shared compiled grammar, trie,
+// and runtime state. Note: compiled grammar and trie are shared across clones
+// via shared_ptr; this reports their full allocation size.
+size_t llama_grammar_size_bytes(const struct llama_grammar & grammar);

@@ -1295,3 +1295,80 @@ void dfa_state_candidates::precompute(const byte_dfa & dfa, const vocab_byte_tri
                     __func__, n_accept_heavy, n_reject_heavy);
 }
 
+// ============================================================
+// Memory usage reporting
+// ============================================================
+
+size_t byte_dfa::size_bytes() const {
+    size_t size = sizeof(*this);
+    size += transitions.capacity() * sizeof(transitions[0]);
+    // std::vector<bool> uses 1 bit per element
+    size += (accept.capacity() + 7) / 8;
+    return size;
+}
+
+size_t compiled_rule::size_bytes() const {
+    size_t size = sizeof(*this);
+    size += alternates.capacity() * sizeof(alternates[0]);
+    for (const auto & alt : alternates) {
+        size += alt.capacity() * sizeof(compiled_segment);
+    }
+    return size;
+}
+
+size_t dfa_state_token_set::size_bytes() const {
+    size_t size = sizeof(*this);
+    size += token_set.capacity() * sizeof(token_set[0]);
+    return size;
+}
+
+size_t dfa_state_candidates::size_bytes() const {
+    size_t size = sizeof(*this);
+    size += states.capacity() * sizeof(states[0]);
+    for (const auto & state : states) {
+        size += state.token_set.capacity() * sizeof(state.token_set[0]);
+    }
+    return size;
+}
+
+size_t vocab_trie_node::size_bytes() const {
+    size_t size = sizeof(*this);
+    size += tokens.capacity() * sizeof(tokens[0]);
+    size += subtree_tokens.capacity() * sizeof(subtree_tokens[0]);
+    for (const auto & child : children) {
+        if (child) {
+            size += child->size_bytes();
+        }
+    }
+    return size;
+}
+
+size_t vocab_byte_trie::size_bytes() const {
+    return root.size_bytes();
+}
+
+compiled_grammar_mem_info compiled_grammar::mem_info() const {
+    compiled_grammar_mem_info info = {};
+
+    // Rules
+    info.rules_bytes = rules.capacity() * sizeof(rules[0]);
+    for (const auto & rule : rules) {
+        info.rules_bytes += rule.size_bytes() - sizeof(rule);
+    }
+
+    // DFAs
+    info.dfas_bytes = dfas.capacity() * sizeof(dfas[0]);
+    for (const auto & dfa : dfas) {
+        info.dfas_bytes += dfa.size_bytes() - sizeof(dfa);
+    }
+
+    // Token candidate cache
+    info.candidates_bytes = dfa_candidates.capacity() * sizeof(dfa_candidates[0]);
+    for (const auto & cand : dfa_candidates) {
+        info.candidates_bytes += cand.size_bytes() - sizeof(cand);
+    }
+
+    info.total_bytes = info.rules_bytes + info.dfas_bytes + info.candidates_bytes;
+    return info;
+}
+

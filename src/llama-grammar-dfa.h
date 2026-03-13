@@ -68,6 +68,9 @@ struct byte_dfa {
 
     // Equality: two DFAs match if they have the same structure
     bool operator==(const byte_dfa & other) const;
+
+    // Total heap memory used by this DFA (transitions + accept vectors)
+    size_t size_bytes() const;
 };
 
 // ============================================================
@@ -99,6 +102,8 @@ struct compiled_segment {
 struct compiled_rule {
     // Each alternate is a sequence of segments (DFA matches and rule calls)
     std::vector<std::vector<compiled_segment>> alternates;
+
+    size_t size_bytes() const;
 };
 
 // ============================================================
@@ -166,6 +171,9 @@ struct vocab_trie_node {
     // Precompute subtree_tokens for this node and all descendants.
     // Must be called after the trie is fully built.
     void cache_subtree_tokens();
+
+    // Total memory used by this node and all descendants (recursive)
+    size_t size_bytes() const;
 };
 
 struct vocab_byte_trie {
@@ -173,6 +181,8 @@ struct vocab_byte_trie {
     uint32_t n_tokens_inserted = 0;
 
     void build(const llama_vocab & vocab);
+
+    size_t size_bytes() const;
 };
 
 // ============================================================
@@ -189,6 +199,8 @@ struct dfa_state_token_set {
     //   Only tokens IN the set need simulation.
     bool accept_heavy = false;
     std::vector<int32_t> token_set;  // sorted
+
+    size_t size_bytes() const;
 };
 
 struct dfa_state_candidates {
@@ -199,6 +211,8 @@ struct dfa_state_candidates {
     void precompute(const byte_dfa & dfa, const vocab_byte_trie & trie,
                     uint32_t total_vocab_tokens);
 
+    size_t size_bytes() const;
+
 private:
     // Walk trie with multiple DFA states simultaneously.
     // active_states maps dfa_state -> list of original starting states that
@@ -208,6 +222,17 @@ private:
                     const vocab_trie_node & node,
                     const std::vector<std::pair<uint16_t, std::vector<uint16_t>>> & active_groups,
                     std::vector<std::vector<uint8_t>> & candidate_bits);
+};
+
+// ============================================================
+// Memory usage breakdown for compiled grammar
+// ============================================================
+
+struct compiled_grammar_mem_info {
+    size_t rules_bytes;       // compiled_rule structures
+    size_t dfas_bytes;        // byte_dfa transition tables
+    size_t candidates_bytes;  // dfa_state_candidates token sets
+    size_t total_bytes;       // sum of above
 };
 
 // ============================================================
@@ -242,6 +267,9 @@ struct compiled_grammar {
 
     // Check if any config is in a "complete" state (rule finished, stack empty)
     bool any_config_complete(const std::vector<parse_config> & configs) const;
+
+    // Memory usage breakdown (rules, DFAs, candidate cache)
+    compiled_grammar_mem_info mem_info() const;
 
 private:
     // Expand a config to reach a DFA_MATCH segment (or mark as complete)

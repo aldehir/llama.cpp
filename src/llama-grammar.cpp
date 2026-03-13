@@ -956,3 +956,31 @@ void llama_grammar_accept_str(struct llama_grammar & grammar, const std::string 
         }
     }
 }
+
+size_t llama_grammar_size_bytes(const struct llama_grammar & grammar) {
+    size_t size = sizeof(grammar);
+
+    // Compiled grammar (shared across clones)
+    if (grammar.compiled) {
+        auto info = grammar.compiled->mem_info();
+        size += info.total_bytes;
+    }
+
+    // Vocab trie (shared across clones)
+    if (grammar.trie) {
+        size += grammar.trie->size_bytes();
+    }
+
+    // Runtime configs
+    size += grammar.configs.capacity() * sizeof(grammar.configs[0]);
+    for (const auto & cfg : grammar.configs) {
+        size += cfg.call_stack.capacity() * sizeof(cfg.call_stack[0]);
+    }
+
+    // Trigger state
+    size += grammar.trigger_buffer.capacity();
+    size += grammar.trigger_tokens.capacity() * sizeof(grammar.trigger_tokens[0]);
+    size += grammar.trigger_patterns.capacity() * sizeof(grammar.trigger_patterns[0]);
+
+    return size;
+}
