@@ -42,6 +42,8 @@ struct grammar_nfa {
     static grammar_nfa concat(grammar_nfa a, grammar_nfa b);
     static grammar_nfa alternation(std::vector<grammar_nfa> parts);
     static grammar_nfa epsilon_nfa();
+    static grammar_nfa kleene_star(grammar_nfa body);
+    static grammar_nfa kleene_plus(grammar_nfa body);
 };
 
 // ============================================================
@@ -52,6 +54,7 @@ struct byte_dfa {
     // transitions[state][byte] -> next_state (0 = dead/reject state)
     std::vector<std::array<uint16_t, 256>> transitions;
     std::vector<bool> accept;
+    std::vector<bool> accept_can_continue;  // accept[s] && has outgoing transitions
     uint16_t start_state;  // typically 1 (state 0 is dead)
 
     // Build from NFA via subset construction

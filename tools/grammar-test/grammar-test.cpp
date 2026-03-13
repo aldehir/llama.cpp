@@ -66,6 +66,7 @@ static void print_usage(const char * prog) {
     printf("Modes (pick one, default: --validate):\n");
     printf("  --validate                 Validate test strings against grammar\n");
     printf("  --bench                    Benchmark grammar pipeline stages\n");
+    printf("  --bench-string STR         Benchmark apply/accept per token through a string\n");
     printf("  --candidates               Dump candidate set analysis\n");
     printf("  --masking-report           Per-token accept/reject categorization\n");
     printf("  --graph                    Output graphviz dot graph of grammar\n\n");
@@ -425,6 +426,135 @@ static int mode_bench(const llama_vocab * vocab, const std::string & grammar_str
     printf("      Empty/null:       %6d tokens\n", cnt_empty);
 
     llama_grammar_free_impl(grammar);
+    return 0;
+}
+
+// ============================================================
+// Mode: bench-string
+// ============================================================
+
+static int mode_bench_string(const llama_vocab * vocab, const std::string & grammar_str,
+                             const char * grammar_root, const std::string & bench_str,
+                             int bench_iters) {
+    const int32_t n_vocab = llama_vocab_n_tokens(vocab);
+
+    // Tokenize the input string
+    std::vector<llama_token> tokens = common_tokenize(vocab, bench_str, false, false);
+    if (tokens.empty()) {
+        fprintf(stderr, "error: bench string tokenized to 0 tokens\n");
+        return 1;
+    }
+
+    size_t n_steps = tokens.size();
+    printf("Input: \"%s\" (%zu tokens, %d iterations)\n\n",
+           escape_for_display(bench_str).c_str(), n_steps, bench_iters);
+
+    using clock = std::chrono::steady_clock;
+
+    // Build token data array (reused across iterations)
+    std::vector<llama_token_data> token_data(n_vocab);
+
+    // Init grammar once (trie + precompute), then clone for each iteration
+    llama_grammar * base_grammar = llama_grammar_init_impl(
+        vocab, grammar_str.c_str(), grammar_root, false, nullptr, 0, nullptr, 0);
+    if (!base_grammar) {
+        fprintf(stderr, "error: grammar init failed\n");
+        return 1;
+    }
+
+    // Accumulate per-step totals across iterations
+    std::vector<double> apply_total(n_steps, 0.0);
+    std::vector<double> accept_total(n_steps, 0.0);
+
+    for (int iter = 0; iter < bench_iters; iter++) {
+        llama_grammar * grammar = llama_grammar_clone_impl(*base_grammar);
+
+        for (size_t step = 0; step < n_steps; step++) {
+            llama_token tok = tokens[step];
+
+            // --- Apply ---
+            for (int32_t i = 0; i < n_vocab; i++) {
+                token_data[i] = {i, 0.0f, 0.0f};
+            }
+            llama_token_data_array cur_p = {token_data.data(), (size_t)n_vocab, -1, false};
+
+            auto ta = clock::now();
+            llama_grammar_apply_impl(*grammar, &cur_p);
+            auto tb = clock::now();
+
+            // --- Accept ---
+            auto tc = clock::now();
+            llama_grammar_accept_impl(*grammar, tok);
+            auto td = clock::now();
+
+            double apply_ms = std::chrono::duration<double, std::milli>(tb - ta).count();
+            double accept_ms = std::chrono::duration<double, std::milli>(td - tc).count();
+
+            apply_total[step] += apply_ms;
+            accept_total[step] += accept_ms;
+
+            // Log each step on first iteration
+            if (iter == 0) {
+                std::string piece = escape_for_display(common_token_to_piece(vocab, tok, true));
+                size_t configs_after = grammar->configs.size();
+
+                // Count rejected/accepted from apply result
+                int rejected = 0, accepted = 0;
+                for (int32_t i = 0; i < n_vocab; i++) {
+                    if (!llama_vocab_is_eog(vocab, i)) {
+                        const std::string p = common_token_to_piece(vocab, i, true);
+                        if (!p.empty() && p[0] != 0) {
+                            if (token_data[i].logit == -INFINITY) {
+                                rejected++;
+                            } else {
+                                accepted++;
+                            }
+                        }
+                    }
+                }
+
+                fprintf(stderr, "  [%3zu] tok=%6d \"%s\"  apply=%.3fms  accept=%.3fms  configs=%zu  rejected=%d  accepted=%d\n",
+                        step, tok, piece.c_str(), apply_ms, accept_ms,
+                        configs_after, rejected, accepted);
+            }
+        }
+
+        llama_grammar_free_impl(grammar);
+    }
+
+    llama_grammar_free_impl(base_grammar);
+
+    // Print summary table
+    printf("\n%-5s  %-6s  %-20s  %10s  %10s\n",
+           "Step", "TokID", "Token", "Apply(ms)", "Accept(ms)");
+    printf("%-5s  %-6s  %-20s  %10s  %10s\n",
+           "-----", "------", "--------------------", "----------", "----------");
+
+    double sum_apply = 0.0, sum_accept = 0.0;
+
+    for (size_t step = 0; step < n_steps; step++) {
+        double avg_apply = apply_total[step] / bench_iters;
+        double avg_accept = accept_total[step] / bench_iters;
+        sum_apply += avg_apply;
+        sum_accept += avg_accept;
+
+        std::string piece = escape_for_display(common_token_to_piece(vocab, tokens[step], true));
+        if (piece.size() > 20) {
+            piece = piece.substr(0, 17) + "...";
+        }
+
+        printf("%5zu  %6d  %-20s  %10.3f  %10.3f\n",
+               step, tokens[step], piece.c_str(), avg_apply, avg_accept);
+    }
+
+    printf("\nSummary (%d iterations):\n", bench_iters);
+    printf("  Total apply:  %8.3f ms   Mean/step: %.3f ms\n",
+           sum_apply, sum_apply / (double)n_steps);
+    printf("  Total accept: %8.3f ms   Mean/step: %.3f ms\n",
+           sum_accept, sum_accept / (double)n_steps);
+    printf("  Total:        %8.3f ms   Mean/step: %.3f ms\n",
+           sum_apply + sum_accept, (sum_apply + sum_accept) / (double)n_steps);
+
     return 0;
 }
 
@@ -910,8 +1040,9 @@ int main(int argc, char ** argv) {
     int bench_iters = 1000;
     bool disable_logging = false;
 
-    enum mode_t { MODE_VALIDATE, MODE_BENCH, MODE_CANDIDATES, MODE_MASKING, MODE_GRAPH };
+    enum mode_t { MODE_VALIDATE, MODE_BENCH, MODE_BENCH_STRING, MODE_CANDIDATES, MODE_MASKING, MODE_GRAPH };
     mode_t mode = MODE_VALIDATE;
+    std::string bench_string;
 
     std::vector<test_string> tests;
 
@@ -930,6 +1061,10 @@ int main(int argc, char ** argv) {
             mode = MODE_VALIDATE;
         } else if (arg == "--bench") {
             mode = MODE_BENCH;
+        } else if (arg == "--bench-string") {
+            mode = MODE_BENCH_STRING;
+            if (++i >= argc) { fprintf(stderr, "error: %s requires argument\n", arg.c_str()); return 1; }
+            bench_string = argv[i];
         } else if (arg == "--candidates") {
             mode = MODE_CANDIDATES;
         } else if (arg == "--masking-report") {
@@ -990,8 +1125,8 @@ int main(int argc, char ** argv) {
         return mode_graph(grammar_str, grammar_root);
     }
 
-    // For bench mode, we do our own step-by-step timing
-    if (mode == MODE_BENCH) {
+    // For bench/bench-string modes, we do our own step-by-step timing
+    if (mode == MODE_BENCH || mode == MODE_BENCH_STRING) {
         if (disable_logging) {
             llama_log_set(llama_log_callback_null, nullptr);
         }
@@ -1006,7 +1141,12 @@ int main(int argc, char ** argv) {
         }
         const llama_vocab * vocab = llama_model_get_vocab(model);
 
-        int rc = mode_bench(vocab, grammar_str, grammar_root, state_prefix, bench_iters);
+        int rc;
+        if (mode == MODE_BENCH_STRING) {
+            rc = mode_bench_string(vocab, grammar_str, grammar_root, bench_string, bench_iters);
+        } else {
+            rc = mode_bench(vocab, grammar_str, grammar_root, state_prefix, bench_iters);
+        }
 
         llama_model_free(model);
         llama_backend_free();
