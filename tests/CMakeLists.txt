@@ -154,6 +154,7 @@ if (NOT WIN32 OR NOT BUILD_SHARED_LIBS)
     llama_build_and_test(test-grammar-integration.cpp)
     llama_build_and_test(test-llama-grammar.cpp)
     llama_build_and_test(test-grammar-dfa.cpp)
+    llama_build_and_test(test-grammar-dfa-apply.cpp ARGS ${PROJECT_SOURCE_DIR}/models/ggml-vocab-llama-bpe.gguf)
     llama_build_and_test(test-chat.cpp WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
     # TODO: disabled on loongarch64 because the ggml-ci node lacks Python 3.8
     if (NOT ${CMAKE_SYSTEM_PROCESSOR} MATCHES "loongarch64")
