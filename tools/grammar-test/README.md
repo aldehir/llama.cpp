@@ -15,11 +15,12 @@ cmake --build build --target llama-grammar-test
 ## Usage
 
 ```
-llama-grammar-test -m MODEL -g GRAMMAR_FILE [mode] [options]
+llama-grammar-test -g GRAMMAR_FILE [-m MODEL] [mode] [options]
 ```
 
 The model file is used only for its vocabulary (`vocab_only` load). No weights
-are loaded and no inference is performed.
+are loaded and no inference is performed. The model is required for all modes
+except `--graph`.
 
 ## Modes
 
@@ -117,6 +118,30 @@ Categories:
 | `eog-reject` | End-of-generation token, grammar is not complete |
 | `empty-reject` | Empty or null token piece |
 
+### Graph
+
+Generate a graphviz dot graph of the grammar structure. This mode does not
+require a model file. The output includes:
+
+- **Rule call graph**: each rule shown with its alternates (DFA segments and
+  rule calls), with edges between rules that reference each other
+- **DFA subgraphs**: each DFA as a state machine with byte-range transitions
+  (compressed into readable labels like `a-z`, `0-9`)
+
+```bash
+# Render as SVG
+llama-grammar-test -g grammars/json.gbnf --graph | dot -Tsvg -o json.svg
+
+# Render as PNG
+llama-grammar-test -g grammars/arithmetic.gbnf --graph | dot -Tpng -o arith.png
+
+# Just inspect the dot source
+llama-grammar-test -g grammars/chess.gbnf --graph
+```
+
+The start rule is highlighted with a blue border. Accept states in DFAs use
+double circles. Start states in DFAs are bold.
+
 ## Common options
 
 | Option | Description |
@@ -138,4 +163,7 @@ llama-grammar-test -m model.gguf -g grammars/json.gbnf \
 
 # Inspect candidate sets for the arithmetic grammar
 llama-grammar-test -m model.gguf -g grammars/arithmetic.gbnf --candidates
+
+# Visualize grammar structure (no model needed)
+llama-grammar-test -g grammars/json.gbnf --graph | dot -Tsvg -o json.svg
 ```

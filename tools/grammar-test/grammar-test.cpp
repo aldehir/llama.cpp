@@ -10,6 +10,7 @@
 #include <cstdio>
 #include <cstring>
 #include <fstream>
+#include <map>
 #include <numeric>
 #include <sstream>
 #include <string>
@@ -55,17 +56,19 @@ static void llama_log_callback_null(ggml_log_level, const char *, void *) {}
 // ============================================================
 
 static void print_usage(const char * prog) {
-    printf("Usage: %s -m MODEL -g GRAMMAR_FILE [options]\n\n", prog);
+    printf("Usage: %s -g GRAMMAR_FILE [-m MODEL] [options]\n\n", prog);
     printf("Test grammar correctness and profile logit-masking performance.\n");
     printf("The model is used only for its vocabulary (vocab_only load).\n\n");
     printf("Required:\n");
-    printf("  -m, --model MODEL          Model file (vocab only)\n");
     printf("  -g, --grammar-file FILE    GBNF grammar file\n\n");
+    printf("Required for all modes except --graph:\n");
+    printf("  -m, --model MODEL          Model file (vocab only)\n\n");
     printf("Modes (pick one, default: --validate):\n");
     printf("  --validate                 Validate test strings against grammar\n");
     printf("  --bench                    Benchmark grammar pipeline stages\n");
     printf("  --candidates               Dump candidate set analysis\n");
-    printf("  --masking-report           Per-token accept/reject categorization\n\n");
+    printf("  --masking-report           Per-token accept/reject categorization\n");
+    printf("  --graph                    Output graphviz dot graph of grammar\n\n");
     printf("Options:\n");
     printf("  --test-file FILE           Test strings file (+pass / -fail per line)\n");
     printf("  --test-pass STR            String expected to be accepted (repeatable)\n");
@@ -615,6 +618,239 @@ static int mode_masking_report(const llama_grammar & grammar, const llama_vocab 
 }
 
 // ============================================================
+// Mode: graph
+// ============================================================
+
+// Escape a string for use inside a graphviz HTML label
+static std::string dot_html_escape(const std::string & s) {
+    std::string out;
+    for (char c : s) {
+        switch (c) {
+            case '<': out += "&lt;";  break;
+            case '>': out += "&gt;";  break;
+            case '&': out += "&amp;"; break;
+            case '"': out += "&quot;"; break;
+            default:  out += c;       break;
+        }
+    }
+    return out;
+}
+
+// Format a single byte for display in a graph label
+static std::string dot_format_byte(uint8_t b) {
+    if (b >= 0x21 && b <= 0x7e) {
+        switch (b) {
+            case '<': return "&lt;";
+            case '>': return "&gt;";
+            case '&': return "&amp;";
+            case '"': return "&quot;";
+            case '\\': return "\\\\";
+            default: return std::string(1, (char)b);
+        }
+    }
+    switch (b) {
+        case ' ':  return "SP";
+        case '\t': return "\\t";
+        case '\n': return "\\n";
+        case '\r': return "\\r";
+        case 0:    return "NUL";
+        default: {
+            char buf[8];
+            snprintf(buf, sizeof(buf), "x%02X", b);
+            return buf;
+        }
+    }
+}
+
+struct byte_range {
+    uint8_t lo, hi;
+};
+
+static std::vector<byte_range> compress_byte_ranges(const std::vector<uint8_t> & bytes) {
+    std::vector<byte_range> ranges;
+    if (bytes.empty()) return ranges;
+    uint8_t lo = bytes[0], hi = bytes[0];
+    for (size_t i = 1; i < bytes.size(); i++) {
+        if (bytes[i] == hi + 1) {
+            hi = bytes[i];
+        } else {
+            ranges.push_back({lo, hi});
+            lo = hi = bytes[i];
+        }
+    }
+    ranges.push_back({lo, hi});
+    return ranges;
+}
+
+static std::string format_ranges_label(const std::vector<byte_range> & ranges, size_t total_bytes) {
+    // If nearly all bytes match, show as wildcard
+    if (total_bytes >= 250) {
+        char buf[32];
+        snprintf(buf, sizeof(buf), "* (%zu bytes)", total_bytes);
+        return buf;
+    }
+
+    std::string s;
+    size_t max_ranges = 6;
+    for (size_t i = 0; i < ranges.size() && i < max_ranges; i++) {
+        if (!s.empty()) s += ", ";
+        if (ranges[i].lo == ranges[i].hi) {
+            s += dot_format_byte(ranges[i].lo);
+        } else {
+            s += dot_format_byte(ranges[i].lo) + "-" + dot_format_byte(ranges[i].hi);
+        }
+    }
+    if (ranges.size() > max_ranges) {
+        char buf[32];
+        snprintf(buf, sizeof(buf), " +%zu more", ranges.size() - max_ranges);
+        s += buf;
+    }
+    return s;
+}
+
+static int mode_graph(const std::string & grammar_str, const char * grammar_root) {
+    // Parse grammar to get rule names
+    llama_grammar_parser parser;
+    if (!parser.parse(grammar_str.c_str())) {
+        fprintf(stderr, "error: grammar parse failed\n");
+        return 1;
+    }
+    if (parser.symbol_ids.find(grammar_root) == parser.symbol_ids.end()) {
+        fprintf(stderr, "error: grammar does not contain '%s' rule\n", grammar_root);
+        return 1;
+    }
+
+    // Build id -> name map
+    std::map<uint32_t, std::string> rule_names;
+    for (const auto & kv : parser.symbol_ids) {
+        rule_names[kv.second] = kv.first;
+    }
+
+    // Compile
+    uint32_t start_idx = parser.symbol_ids.at(grammar_root);
+    auto cg = compiled_grammar::compile(parser.rules, start_idx);
+
+    // Output dot
+    printf("digraph grammar {\n");
+    printf("    rankdir=LR;\n");
+    printf("    compound=true;\n");
+    printf("    fontname=\"Helvetica\";\n");
+    printf("    node [fontname=\"Helvetica\", fontsize=10];\n");
+    printf("    edge [fontname=\"Helvetica\", fontsize=9];\n");
+    printf("\n");
+
+    // --- Rule call graph ---
+    printf("    subgraph cluster_rules {\n");
+    printf("        label=<<B>Grammar Rules</B>>;\n");
+    printf("        style=\"rounded,filled\"; fillcolor=\"#f0f0f0\";\n");
+    printf("        node [shape=box, style=\"rounded,filled\", fillcolor=white];\n");
+    printf("\n");
+
+    for (size_t r = 0; r < cg.rules.size(); r++) {
+        const auto & rule = cg.rules[r];
+        std::string name = rule_names.count((uint32_t)r) ? rule_names[(uint32_t)r]
+                                                          : "rule_" + std::to_string(r);
+        bool is_start = (r == start_idx);
+
+        // Build label showing alternates
+        std::string label = "<B>" + dot_html_escape(name) + "</B>";
+        if (is_start) label += " (start)";
+
+        for (size_t a = 0; a < rule.alternates.size(); a++) {
+            label += "<BR/><FONT POINT-SIZE=\"8\" COLOR=\"#666666\">alt " + std::to_string(a) + ": ";
+            const auto & alt = rule.alternates[a];
+            for (size_t s = 0; s < alt.size(); s++) {
+                if (s > 0) label += " &#8594; ";
+                if (alt[s].type == compiled_segment::DFA_MATCH) {
+                    label += "DFA[" + std::to_string(alt[s].id) + "]";
+                } else {
+                    std::string callee = rule_names.count(alt[s].id)
+                                         ? dot_html_escape(rule_names[alt[s].id])
+                                         : "rule_" + std::to_string(alt[s].id);
+                    label += "<I>" + callee + "</I>";
+                }
+            }
+            if (alt.empty()) label += "(empty)";
+            label += "</FONT>";
+        }
+
+        const char * color = is_start ? " color=\"#2060c0\" penwidth=2" : "";
+        printf("        rule_%zu [label=<%s>%s];\n", r, label.c_str(), color);
+    }
+
+    // Rule call edges
+    printf("\n");
+    for (size_t r = 0; r < cg.rules.size(); r++) {
+        const auto & rule = cg.rules[r];
+        for (size_t a = 0; a < rule.alternates.size(); a++) {
+            for (const auto & seg : rule.alternates[a]) {
+                if (seg.type == compiled_segment::RULE_CALL) {
+                    printf("        rule_%zu -> rule_%u [color=\"#888888\"];\n",
+                           r, seg.id);
+                }
+            }
+        }
+    }
+
+    printf("    }\n\n");
+
+    // --- DFA subgraphs ---
+    for (size_t d = 0; d < cg.dfas.size(); d++) {
+        const auto & dfa = cg.dfas[d];
+        size_t n_states = dfa.transitions.size();
+
+        printf("    subgraph cluster_dfa_%zu {\n", d);
+        printf("        label=<<B>DFA %zu</B> (%zu states)>;\n", d, n_states);
+        printf("        style=\"rounded,dashed\"; color=\"#999999\";\n");
+        printf("        node [shape=circle, width=0.35, fixedsize=true, fontsize=8];\n");
+        printf("\n");
+
+        for (size_t s = 0; s < n_states; s++) {
+            if (s == 0) {
+                // Dead state - skip
+                continue;
+            }
+            bool is_accept = s < dfa.accept.size() && dfa.accept[s];
+            bool is_start = (s == (size_t)dfa.start_state);
+
+            const char * shape = is_accept ? "doublecircle" : "circle";
+            std::string style;
+            if (is_start) style = " style=bold";
+
+            printf("        dfa%zu_s%zu [label=\"%zu\", shape=%s%s];\n",
+                   d, s, s, shape, style.c_str());
+        }
+
+        // Transitions - group by (source, target), compress byte ranges
+        printf("\n");
+        for (size_t s = 1; s < n_states; s++) {
+            // Collect bytes per target
+            std::map<uint16_t, std::vector<uint8_t>> target_bytes;
+            for (int b = 0; b < 256; b++) {
+                uint16_t target = dfa.transitions[s][b];
+                if (target != 0) {
+                    target_bytes[target].push_back((uint8_t)b);
+                }
+            }
+
+            for (const auto & kv : target_bytes) {
+                uint16_t target = kv.first;
+                const auto & bytes = kv.second;
+                auto ranges = compress_byte_ranges(bytes);
+                std::string label = format_ranges_label(ranges, bytes.size());
+                printf("        dfa%zu_s%zu -> dfa%zu_s%u [label=<%s>];\n",
+                       d, s, d, target, label.c_str());
+            }
+        }
+
+        printf("    }\n\n");
+    }
+
+    printf("}\n");
+    return 0;
+}
+
+// ============================================================
 // Main
 // ============================================================
 
@@ -628,7 +864,7 @@ int main(int argc, char ** argv) {
     int bench_iters = 1000;
     bool disable_logging = false;
 
-    enum mode_t { MODE_VALIDATE, MODE_BENCH, MODE_CANDIDATES, MODE_MASKING };
+    enum mode_t { MODE_VALIDATE, MODE_BENCH, MODE_CANDIDATES, MODE_MASKING, MODE_GRAPH };
     mode_t mode = MODE_VALIDATE;
 
     std::vector<test_string> tests;
@@ -652,6 +888,8 @@ int main(int argc, char ** argv) {
             mode = MODE_CANDIDATES;
         } else if (arg == "--masking-report") {
             mode = MODE_MASKING;
+        } else if (arg == "--graph") {
+            mode = MODE_GRAPH;
         } else if (arg == "--test-file") {
             if (++i >= argc) { fprintf(stderr, "error: %s requires argument\n", arg.c_str()); return 1; }
             test_file_path = argv[i];
@@ -679,8 +917,8 @@ int main(int argc, char ** argv) {
         }
     }
 
-    if (!model_path) {
-        fprintf(stderr, "error: --model is required\n");
+    if (!model_path && mode != MODE_GRAPH) {
+        fprintf(stderr, "error: --model is required for this mode\n");
         return 1;
     }
     if (!grammar_path) {
@@ -699,6 +937,11 @@ int main(int argc, char ** argv) {
     if (grammar_str.empty()) {
         fprintf(stderr, "error: grammar file is empty or could not be read\n");
         return 1;
+    }
+
+    // Graph mode: no model needed, just parse + compile
+    if (mode == MODE_GRAPH) {
+        return mode_graph(grammar_str, grammar_root);
     }
 
     // For bench mode, we do our own step-by-step timing
