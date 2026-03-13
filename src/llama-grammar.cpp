@@ -779,6 +779,46 @@ struct llama_grammar * llama_grammar_clone_impl(const struct llama_grammar & gra
     };
 }
 
+// Merge sorted vector `src` into sorted vector `dst` (union, unique).
+static void sorted_merge_unique(std::vector<int32_t> & dst, const std::vector<int32_t> & src) {
+    if (src.empty()) return;
+    if (dst.empty()) { dst = src; return; }
+    std::vector<int32_t> merged;
+    merged.reserve(dst.size() + src.size());
+    size_t di = 0, si = 0;
+    while (di < dst.size() && si < src.size()) {
+        if (dst[di] < src[si]) {
+            merged.push_back(dst[di++]);
+        } else if (dst[di] > src[si]) {
+            merged.push_back(src[si++]);
+        } else {
+            merged.push_back(dst[di++]);
+            si++;
+        }
+    }
+    while (di < dst.size()) merged.push_back(dst[di++]);
+    while (si < src.size()) merged.push_back(src[si++]);
+    dst = std::move(merged);
+}
+
+// Simulate a token through the grammar to check if it's valid.
+static bool grammar_simulate_token(
+        const struct llama_grammar & grammar,
+        llama_token id) {
+    const std::string & piece = grammar.vocab->token_to_piece(id);
+    if (piece.empty() || piece[0] == 0) {
+        return false;
+    }
+    auto sim_configs = grammar.configs;
+    for (size_t j = 0; j < piece.size(); j++) {
+        grammar.compiled->accept_byte(sim_configs, (uint8_t)piece[j]);
+        if (sim_configs.empty()) {
+            return false;
+        }
+    }
+    return true;
+}
+
 void llama_grammar_apply_impl(const struct llama_grammar & grammar, llama_token_data_array * cur_p) {
     GGML_ASSERT(grammar.vocab != nullptr);
 
@@ -791,20 +831,91 @@ void llama_grammar_apply_impl(const struct llama_grammar & grammar, llama_token_
     const uint32_t n_vocab = grammar.vocab->n_tokens();
     const bool have_candidates = !grammar.compiled->dfa_candidates.empty();
 
-    // Three-way classification using precomputed per-DFA-state token sets:
-    //   rejected      — token is dead in ALL configs → set logit to -INFINITY
-    //   guaranteed     — token is guaranteed accepted by at least one config → keep
-    //   context-dep    — token spans a DFA boundary, needs simulation to confirm
-    //
-    // rejected_by_all[t]: true if ALL configs reject token t (neither accepted nor context)
-    // is_context[t]: true if ANY config marks token t as context-dependent
-    //
-    // Final: reject if rejected_by_all, simulate if is_context, else guaranteed accept.
-    std::vector<bool> rejected_by_all(n_vocab, !have_candidates ? false : true);
-    std::vector<bool> is_context(n_vocab, false);
-    bool any_config_matched = !have_candidates;
+    if (!have_candidates) {
+        // No precomputed candidates — fall back to full simulation
+        for (size_t i = 0; i < cur_p->size; ++i) {
+            const llama_token id = cur_p->data[i].id;
+            if (grammar.vocab->is_eog(id)) {
+                if (!allow_eog) {
+                    cur_p->data[i].logit = -INFINITY;
+                }
+                continue;
+            }
+            if (!grammar_simulate_token(grammar, id)) {
+                cur_p->data[i].logit = -INFINITY;
+            }
+        }
+        return;
+    }
 
-    if (have_candidates) {
+    // Three-way classification using precomputed per-DFA-state token sets:
+    //   rejected    — token is dead in ALL configs → set logit to -INFINITY
+    //   guaranteed  — token is guaranteed accepted by at least one config → keep
+    //   context-dep — token spans a DFA boundary, needs simulation to confirm
+    //
+    // Strategy: build sorted sets of not-rejected and context-dependent token IDs
+    // from precomputed per-DFA-state data. Then iterate ONLY those small sets
+    // instead of scanning the entire vocabulary.
+    //
+    // not_rejected = union of (accept_set ∪ context_set) across all configs
+    // context_ids  = union of context_set across all configs
+    // rejected     = complement(not_rejected) — applied via merge-scan
+
+    std::vector<int32_t> not_rejected; // sorted union of accepted + context tokens
+    std::vector<int32_t> context_ids;  // sorted union of context-dependent tokens
+    bool any_config_matched = false;
+    bool any_accept_heavy = false;
+
+    for (const auto & cfg : grammar.configs) {
+        const auto & rule = grammar.compiled->rules[cfg.current.rule_id];
+        const auto & alt = rule.alternates[cfg.current.alternate_idx];
+        if (cfg.current.segment_idx >= alt.size()) continue;
+        const auto & seg = alt[cfg.current.segment_idx];
+        if (seg.type != compiled_segment::DFA_MATCH) continue;
+
+        if (seg.id >= grammar.compiled->dfa_candidates.size()) continue;
+        const auto & state_cands = grammar.compiled->dfa_candidates[seg.id];
+        if (cfg.current.dfa_state >= state_cands.states.size()) continue;
+
+        const auto & ts = state_cands.states[cfg.current.dfa_state];
+        any_config_matched = true;
+
+        if (ts.accept_heavy) {
+            any_accept_heavy = true;
+            break;
+        }
+
+        // reject-heavy: token_set = accept set, context_set = context tokens
+        sorted_merge_unique(not_rejected, ts.token_set);
+        sorted_merge_unique(not_rejected, ts.context_set);
+        sorted_merge_unique(context_ids, ts.context_set);
+    }
+
+    if (!any_config_matched) {
+        // No config matched a DFA segment — simulate every token
+        for (size_t i = 0; i < cur_p->size; ++i) {
+            const llama_token id = cur_p->data[i].id;
+            if (grammar.vocab->is_eog(id)) {
+                if (!allow_eog) {
+                    cur_p->data[i].logit = -INFINITY;
+                }
+                continue;
+            }
+            if (!grammar_simulate_token(grammar, id)) {
+                cur_p->data[i].logit = -INFINITY;
+            }
+        }
+        return;
+    }
+
+    // ---- Accept-heavy fallback: use bitmaps with reordered checks ----
+    // When any config is accept-heavy, the not_rejected set approaches n_vocab,
+    // so we fall back to a bitmap approach but with checks ordered to avoid
+    // expensive token_to_piece() calls for guaranteed-accept tokens.
+    if (any_accept_heavy) {
+        std::vector<bool> rejected_by_all(n_vocab, true);
+        std::vector<bool> is_context_bmp(n_vocab, false);
+
         for (const auto & cfg : grammar.configs) {
             const auto & rule = grammar.compiled->rules[cfg.current.rule_id];
             const auto & alt = rule.alternates[cfg.current.alternate_idx];
@@ -817,19 +928,16 @@ void llama_grammar_apply_impl(const struct llama_grammar & grammar, llama_token_
             if (cfg.current.dfa_state >= state_cands.states.size()) continue;
 
             const auto & ts = state_cands.states[cfg.current.dfa_state];
-            any_config_matched = true;
 
-            // OR in context-dependent tokens
             for (int32_t tok : ts.context_set) {
                 if (tok >= 0 && (uint32_t)tok < n_vocab) {
-                    is_context[tok] = true;
+                    is_context_bmp[tok] = true;
                 }
             }
 
             if (ts.accept_heavy) {
-                // token_set = reject set. Everything NOT in token_set is either
-                // guaranteed accepted or context-dependent (not rejected).
-                // Context tokens are not in the reject set by construction.
+                // token_set = reject set. Keep rejected_by_all true only for
+                // tokens in the reject set; clear everything else.
                 size_t ti = 0;
                 for (uint32_t t = 0; t < n_vocab; t++) {
                     if (ti < ts.token_set.size() && ts.token_set[ti] == (int32_t)t) {
@@ -839,13 +947,11 @@ void llama_grammar_apply_impl(const struct llama_grammar & grammar, llama_token_
                     }
                 }
             } else {
-                // token_set = accept set. Clear rejected_by_all for accepted tokens.
                 for (int32_t tok : ts.token_set) {
                     if (tok >= 0 && (uint32_t)tok < n_vocab) {
                         rejected_by_all[tok] = false;
                     }
                 }
-                // Also clear for context tokens (they're not rejected).
                 for (int32_t tok : ts.context_set) {
                     if (tok >= 0 && (uint32_t)tok < n_vocab) {
                         rejected_by_all[tok] = false;
@@ -853,8 +959,68 @@ void llama_grammar_apply_impl(const struct llama_grammar & grammar, llama_token_
                 }
             }
         }
+
+        for (size_t i = 0; i < cur_p->size; ++i) {
+            const llama_token id = cur_p->data[i].id;
+
+            if (grammar.vocab->is_eog(id)) {
+                if (!allow_eog) {
+                    cur_p->data[i].logit = -INFINITY;
+                }
+                continue;
+            }
+
+            if (rejected_by_all[id]) {
+                cur_p->data[i].logit = -INFINITY;
+                continue;
+            }
+
+            if (!is_context_bmp[id]) {
+                continue; // guaranteed accept
+            }
+
+            if (!grammar_simulate_token(grammar, id)) {
+                cur_p->data[i].logit = -INFINITY;
+            }
+        }
+        return;
     }
 
+    // ---- Set-based fast path: all configs are reject-heavy ----
+    // not_rejected and context_ids are small sorted vectors.
+    // Reject = complement(not_rejected). Apply via merge-scan of cur_p.
+
+    LLAMA_LOG_DEBUG("%s: set-based path: not_rejected=%zu context=%zu configs=%zu cur_p=%zu n_vocab=%u\n",
+                    __func__, not_rejected.size(), context_ids.size(), grammar.configs.size(),
+                    cur_p->size, n_vocab);
+
+    // Fast path: cur_p is dense (full vocab, data[i].id == i).
+    // Use merge-scan over token IDs — only touches rejected + context tokens.
+    if (cur_p->size == (size_t)n_vocab) {
+        // Merge-scan: iterate n_vocab with two-pointer against not_rejected.
+        // Tokens NOT in not_rejected get -INFINITY (unless EOG and allowed).
+        size_t ni = 0;
+        for (uint32_t t = 0; t < n_vocab; t++) {
+            if (ni < not_rejected.size() && not_rejected[ni] == (int32_t)t) {
+                ni++; // accepted — don't touch
+            } else if (allow_eog && grammar.vocab->is_eog((llama_token)t)) {
+                // keep EOG token
+            } else {
+                cur_p->data[t].logit = -INFINITY;
+            }
+        }
+
+        // Simulate context-dependent tokens
+        for (int32_t tok : context_ids) {
+            if (!grammar_simulate_token(grammar, tok)) {
+                cur_p->data[tok].logit = -INFINITY;
+            }
+        }
+        return;
+    }
+
+    // Sparse cur_p (filtered by prior sampler): iterate cur_p entries,
+    // use binary search against the small sorted sets.
     for (size_t i = 0; i < cur_p->size; ++i) {
         const llama_token id = cur_p->data[i].id;
 
@@ -865,34 +1031,15 @@ void llama_grammar_apply_impl(const struct llama_grammar & grammar, llama_token_
             continue;
         }
 
-        const std::string & piece = grammar.vocab->token_to_piece(id);
-        if (piece.empty() || piece[0] == 0) {
+        if (!std::binary_search(not_rejected.begin(), not_rejected.end(), (int32_t)id)) {
             cur_p->data[i].logit = -INFINITY;
             continue;
         }
 
-        if (any_config_matched && rejected_by_all[id]) {
-            cur_p->data[i].logit = -INFINITY;
-            continue;
-        }
-
-        if (any_config_matched && !is_context[id]) {
-            // Guaranteed accept — no simulation needed
-            continue;
-        }
-
-        // Context-dependent token — simulate to confirm
-        auto sim_configs = grammar.configs;
-        bool valid = true;
-        for (size_t j = 0; j < piece.size(); j++) {
-            grammar.compiled->accept_byte(sim_configs, (uint8_t)piece[j]);
-            if (sim_configs.empty()) {
-                valid = false;
-                break;
+        if (std::binary_search(context_ids.begin(), context_ids.end(), (int32_t)id)) {
+            if (!grammar_simulate_token(grammar, id)) {
+                cur_p->data[i].logit = -INFINITY;
             }
-        }
-        if (!valid) {
-            cur_p->data[i].logit = -INFINITY;
         }
     }
 }

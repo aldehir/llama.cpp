@@ -915,6 +915,35 @@ compiled_grammar compiled_grammar::compile(
                         __func__, i, bb, be - 1);
     }
 
+    // --- Helper: check if terminal elements match a Kleene star's body ---
+    auto elements_match = [&](const llama_grammar_element * seg_start,
+                              const llama_grammar_element * seg_end,
+                              uint32_t star_rule_idx) -> bool {
+        const auto & ki = kleene[star_rule_idx];
+        const auto & star_rule = parsed_rules[star_rule_idx];
+        size_t seg_len = seg_end - seg_start;
+        size_t body_len = ki.body_end - ki.body_begin;
+        if (seg_len != body_len) return false;
+        for (size_t k = 0; k < seg_len; k++) {
+            if (seg_start[k].type  != star_rule[ki.body_begin + k].type ||
+                seg_start[k].value != star_rule[ki.body_begin + k].value) {
+                return false;
+            }
+        }
+        return true;
+    };
+
+    // --- Helper: build a DFA(T+) from terminal elements ---
+    auto build_plus_dfa = [&](const llama_grammar_element * begin,
+                              const llama_grammar_element * end) -> byte_dfa {
+        const llama_grammar_element * pos = begin;
+        grammar_nfa body_nfa = build_segment_nfa(pos, end);
+        grammar_nfa plus_nfa = grammar_nfa::kleene_plus(std::move(body_nfa));
+        auto dfa = byte_dfa::from_nfa(plus_nfa);
+        dfa.minimize();
+        return dfa;
+    };
+
     // --- Build compiled rules ---
     for (size_t rule_idx = 0; rule_idx < parsed_rules.size(); rule_idx++) {
         const auto & rule = parsed_rules[rule_idx];
@@ -923,16 +952,7 @@ compiled_grammar compiled_grammar::compile(
         // Kleene star rule: rewrite to DFA(T+) | ε
         if (kleene[rule_idx].detected) {
             const auto & ki = kleene[rule_idx];
-
-            // Build NFA for the body (terminal elements)
-            const llama_grammar_element * body_pos = &rule[ki.body_begin];
-            const llama_grammar_element * body_end = &rule[ki.body_end];
-            grammar_nfa body_nfa = build_segment_nfa(body_pos, body_end);
-
-            // Build T+ NFA (body with loop) and convert to DFA
-            grammar_nfa plus_nfa = grammar_nfa::kleene_plus(std::move(body_nfa));
-            auto dfa = byte_dfa::from_nfa(plus_nfa);
-            dfa.minimize();
+            auto dfa = build_plus_dfa(&rule[ki.body_begin], &rule[ki.body_end]);
             uint32_t dfa_id = add_or_reuse_dfa(cg, std::move(dfa));
 
             // Alt 0: single DFA(T+) segment
@@ -942,7 +962,7 @@ compiled_grammar compiled_grammar::compile(
             continue;
         }
 
-        // Normal rule processing (unchanged)
+        // Normal rule processing
         const llama_grammar_element * pos = rule.data();
         const llama_grammar_element * rule_end = rule.data() + rule.size();
 
@@ -966,14 +986,31 @@ compiled_grammar compiled_grammar::compile(
                            pos->type != LLAMA_GRETYPE_END) {
                         pos++;
                     }
-                    // Compile terminal segment to DFA
-                    auto dfa = build_segment_dfa(seg_start, pos);
-                    uint32_t dfa_id = add_or_reuse_dfa(cg, std::move(dfa));
 
-                    compiled_segment seg;
-                    seg.type = compiled_segment::DFA_MATCH;
-                    seg.id   = dfa_id;
-                    segments.push_back(seg);
+                    // Detect Kleene plus pattern: T... followed by RULE_REF(T*)
+                    // where the terminals match the Kleene star's body.
+                    // Compile directly as DFA(T+) instead of DFA(T) + RULE_CALL(T*).
+                    bool is_plus = false;
+                    if (pos < rule_end && pos->type == LLAMA_GRETYPE_RULE_REF) {
+                        uint32_t called = pos->value;
+                        if (called < kleene.size() && kleene[called].detected &&
+                            elements_match(seg_start, pos, called)) {
+                            auto dfa = build_plus_dfa(seg_start, pos);
+                            uint32_t dfa_id = add_or_reuse_dfa(cg, std::move(dfa));
+                            segments.push_back({compiled_segment::DFA_MATCH, dfa_id});
+                            pos++; // consume the RULE_REF
+                            is_plus = true;
+                            LLAMA_LOG_DEBUG("%s: rule %zu: detected T+ pattern (star rule %u) -> DFA(T+) id=%u\n",
+                                            __func__, rule_idx, called, dfa_id);
+                        }
+                    }
+
+                    if (!is_plus) {
+                        // Normal terminal segment
+                        auto dfa = build_segment_dfa(seg_start, pos);
+                        uint32_t dfa_id = add_or_reuse_dfa(cg, std::move(dfa));
+                        segments.push_back({compiled_segment::DFA_MATCH, dfa_id});
+                    }
                 }
             }
 
@@ -1334,6 +1371,13 @@ void dfa_state_candidates::walk_multi(
                 // DFA segment completes on this byte
                 accept_origins.insert(accept_origins.end(),
                                       group.second.begin(), group.second.end());
+                // If the accept state has outgoing transitions (e.g. Kleene star
+                // self-loop), keep walking — tokens fully consumed via continued
+                // DFA transitions are guaranteed-accept, not context-dependent.
+                if (dfa.accept_can_continue[next_state]) {
+                    auto & v = next_groups[next_state];
+                    v.insert(v.end(), group.second.begin(), group.second.end());
+                }
             } else {
                 auto & v = next_groups[next_state];
                 v.insert(v.end(), group.second.begin(), group.second.end());
@@ -1419,10 +1463,13 @@ void dfa_state_candidates::precompute(const byte_dfa & dfa, const vocab_byte_tri
 
         auto & state = states[s];
 
-        // Build context set (always stored explicitly, typically small)
-        state.context_set.reserve(n_context);
+        // Build context set: tokens that are context-dependent but NOT
+        // guaranteed-accepted. If a token is fully consumed within the DFA
+        // (accepted), it doesn't need runtime simulation even if some path
+        // through the DFA also accepts mid-token.
         for (uint32_t t = 0; t < total_vocab_tokens; t++) {
-            if (context_bits[s][t / 8] & (1 << (t % 8))) {
+            if ((context_bits[s][t / 8] & (1 << (t % 8))) &&
+                !(accepted_bits[s][t / 8] & (1 << (t % 8)))) {
                 state.context_set.push_back((int32_t) t);
             }
         }
@@ -1452,6 +1499,12 @@ void dfa_state_candidates::precompute(const byte_dfa & dfa, const vocab_byte_tri
         }
     }
 
+    for (size_t s = 1; s < n_states; s++) {
+        LLAMA_LOG_DEBUG("%s:   state %zu: accept=%d can_continue=%d token_set=%zu context_set=%zu %s\n",
+                        __func__, s, (int)dfa.accept[s], (int)dfa.accept_can_continue[s],
+                        states[s].token_set.size(), states[s].context_set.size(),
+                        states[s].accept_heavy ? "accept-heavy" : "reject-heavy");
+    }
     LLAMA_LOG_DEBUG("%s: done - %zu accept-heavy states, %zu reject-heavy states\n",
                     __func__, n_accept_heavy, n_reject_heavy);
 }
