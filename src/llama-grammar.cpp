@@ -1,4 +1,5 @@
 #include "llama-grammar.h"
+#include "llama-grammar-ast.h"
 #include "llama-grammar-dfa.h"
 
 #include "llama-impl.h"
@@ -694,30 +695,25 @@ struct llama_grammar * llama_grammar_init_impl(
                             size_t num_trigger_patterns,
                const llama_token * trigger_tokens,
                             size_t num_trigger_tokens) {
-    llama_grammar_parser parser;
+    llama_grammar_ast_parser ast_parser;
 
-    // if there is a grammar, parse it
-    // rules will be empty (default) if there are parse errors
-    if (!parser.parse(grammar_str) || parser.rules.empty()) {
+    if (!ast_parser.parse(grammar_str) || ast_parser.rules.empty()) {
         fprintf(stderr, "%s: failed to parse grammar\n", __func__);
         return nullptr;
     }
 
-    // Ensure that there is a "root" node.
-    if (parser.symbol_ids.find("root") == parser.symbol_ids.end()) {
+    if (ast_parser.symbol_ids.find("root") == ast_parser.symbol_ids.end()) {
         fprintf(stderr, "%s: grammar does not contain a 'root' symbol\n", __func__);
         return nullptr;
     }
 
-    std::vector<const llama_grammar_element *> grammar_rules(parser.c_rules());
+    const uint32_t start_rule_index = ast_parser.symbol_ids.at(grammar_root);
 
-    const size_t n_rules = grammar_rules.size();
-    const size_t start_rule_index = parser.symbol_ids.at(grammar_root);
+    ast_parser.optimize();
 
-    auto [cg, dfa_configs] = llama_grammar_compile_rules(grammar_rules.data(), n_rules, start_rule_index);
-    if (!cg) {
-        return nullptr;
-    }
+    auto cg = std::make_shared<compiled_grammar>(
+        compile_grammar_from_ast(ast_parser.rules, start_rule_index));
+    auto dfa_configs = cg->init_configs();
 
     std::vector<llama_token>    vec_trigger_tokens;
     std::vector<llama_grammar_trigger_pattern> vec_trigger_patterns;

@@ -3,6 +3,7 @@
 
 // Internal headers for grammar access (same pattern as tests)
 #include "../../src/llama-grammar.h"
+#include "../../src/llama-grammar-ast.h"
 
 #include <algorithm>
 #include <chrono>
@@ -228,25 +229,26 @@ static int mode_bench(const llama_vocab * vocab, const std::string & grammar_str
 
     using clock = std::chrono::steady_clock;
 
-    // 1. Parse
+    // 1. Parse (AST)
     auto t0 = clock::now();
-    llama_grammar_parser parser;
-    if (!parser.parse(grammar_str.c_str())) {
+    llama_grammar_ast_parser ast_parser;
+    if (!ast_parser.parse(grammar_str.c_str())) {
         fprintf(stderr, "error: grammar parse failed\n");
         return 1;
     }
     auto t1 = clock::now();
     double parse_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
 
-    if (parser.symbol_ids.find(grammar_root) == parser.symbol_ids.end()) {
+    if (ast_parser.symbol_ids.find(grammar_root) == ast_parser.symbol_ids.end()) {
         fprintf(stderr, "error: grammar does not contain '%s' rule\n", grammar_root);
         return 1;
     }
 
-    // 2. Compile
+    // 2. Optimize + Compile (AST)
     auto t2 = clock::now();
+    ast_parser.optimize();
     auto cg = std::make_shared<compiled_grammar>(
-        compiled_grammar::compile(parser.rules, (uint32_t)parser.symbol_ids.at(grammar_root)));
+        compile_grammar_from_ast(ast_parser.rules, (uint32_t)ast_parser.symbol_ids.at(grammar_root)));
     auto t3 = clock::now();
     double compile_ms = std::chrono::duration<double, std::milli>(t3 - t2).count();
 
@@ -885,26 +887,27 @@ static std::string format_ranges_label(const std::vector<byte_range> & ranges, s
 }
 
 static int mode_graph(const std::string & grammar_str, const char * grammar_root) {
-    // Parse grammar to get rule names
-    llama_grammar_parser parser;
-    if (!parser.parse(grammar_str.c_str())) {
+    // Parse grammar via AST
+    llama_grammar_ast_parser ast_parser;
+    if (!ast_parser.parse(grammar_str.c_str())) {
         fprintf(stderr, "error: grammar parse failed\n");
         return 1;
     }
-    if (parser.symbol_ids.find(grammar_root) == parser.symbol_ids.end()) {
+    if (ast_parser.symbol_ids.find(grammar_root) == ast_parser.symbol_ids.end()) {
         fprintf(stderr, "error: grammar does not contain '%s' rule\n", grammar_root);
         return 1;
     }
 
     // Build id -> name map
     std::map<uint32_t, std::string> rule_names;
-    for (const auto & kv : parser.symbol_ids) {
+    for (const auto & kv : ast_parser.symbol_ids) {
         rule_names[kv.second] = kv.first;
     }
 
-    // Compile
-    uint32_t start_idx = parser.symbol_ids.at(grammar_root);
-    auto cg = compiled_grammar::compile(parser.rules, start_idx);
+    // Optimize + Compile via AST
+    ast_parser.optimize();
+    uint32_t start_idx = ast_parser.symbol_ids.at(grammar_root);
+    auto cg = compile_grammar_from_ast(ast_parser.rules, start_idx);
 
     // Output dot
     printf("digraph grammar {\n");

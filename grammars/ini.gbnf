@@ -1,0 +1,20 @@
+# INI file grammar
+root ::= section+
+
+section ::= header kvpair+ ws?
+
+header ::= ws? "[" section-name "]" ws? newline
+
+section-name ::= [a-zA-Z0-9_.-]+
+
+kvpair ::= ws? key ws? "=" ws? value? newline
+
+key ::= [a-zA-Z0-9_.-]+
+
+value ::= [^\n\r#;]+
+
+ws ::= [ \t]*
+
+newline ::= (comment? "\n")+
+
+comment ::= ws? [#;] [^\n]*

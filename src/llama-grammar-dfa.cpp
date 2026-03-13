@@ -1088,10 +1088,20 @@ void compiled_grammar::advance_to_terminal(
     const auto & seg = alt[cfg.current.segment_idx];
 
     if (seg.type == compiled_segment::DFA_MATCH) {
+        const auto & dfa = dfas[seg.id];
         // We're at a DFA segment — set up initial DFA state
         parse_config ready = cfg;
-        ready.current.dfa_state = dfas[seg.id].start_state;
+        ready.current.dfa_state = dfa.start_state;
         out_configs.push_back(ready);
+
+        // If the DFA's start state is accepting (zero-length match possible),
+        // also generate a config that has advanced past this segment.
+        if (dfa.accept[dfa.start_state]) {
+            parse_config advanced = cfg;
+            advanced.current.segment_idx++;
+            advanced.current.dfa_state = 0;
+            advance_to_terminal(advanced, out_configs);
+        }
         return;
     }
 

@@ -233,7 +233,7 @@ struct compiled_grammar {
     // Per-DFA-state precomputed candidate token sets
     std::vector<dfa_state_candidates> dfa_candidates;
 
-    // Compile from parsed grammar rules
+    // Compile from parsed grammar rules (legacy flat format)
     static compiled_grammar compile(
         const std::vector<std::vector<llama_grammar_element>> & parsed_rules,
         uint32_t start_rule_index);

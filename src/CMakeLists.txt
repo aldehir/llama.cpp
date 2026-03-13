@@ -16,6 +16,7 @@ add_library(llama
             llama-context.cpp
             llama-cparams.cpp
             llama-grammar.cpp
+            llama-grammar-ast.cpp
             llama-grammar-dfa.cpp
             llama-graph.cpp
             llama-hparams.cpp
