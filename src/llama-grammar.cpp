@@ -670,6 +670,13 @@ struct llama_grammar * llama_grammar_init_impl(
         auto t_precomp_end = std::chrono::steady_clock::now();
         double precomp_ms = std::chrono::duration<double, std::milli>(t_precomp_end - t_precomp_start).count();
         LLAMA_LOG_INFO("%s: grammar DFA precomputation took %.2f ms\n", __func__, precomp_ms);
+
+        auto info = cg->mem_info();
+        LLAMA_LOG_INFO("%s: grammar memory: rules = %.2f KB, DFAs = %.2f KB, candidates = %.2f KB, "
+                       "trie = %.2f KB, total = %.2f KB\n", __func__,
+                       info.rules_bytes / 1024.0, info.dfas_bytes / 1024.0, info.candidates_bytes / 1024.0,
+                       trie->size_bytes() / 1024.0,
+                       (info.total_bytes + trie->size_bytes()) / 1024.0);
     }
 
     return new llama_grammar {
@@ -742,6 +749,13 @@ struct llama_grammar * llama_grammar_init_impl(
         auto t_precomp_end = std::chrono::steady_clock::now();
         double precomp_ms = std::chrono::duration<double, std::milli>(t_precomp_end - t_precomp_start).count();
         LLAMA_LOG_INFO("%s: grammar DFA precomputation took %.2f ms\n", __func__, precomp_ms);
+
+        auto info = cg->mem_info();
+        LLAMA_LOG_INFO("%s: grammar memory: rules = %.2f KB, DFAs = %.2f KB, candidates = %.2f KB, "
+                       "trie = %.2f KB, total = %.2f KB\n", __func__,
+                       info.rules_bytes / 1024.0, info.dfas_bytes / 1024.0, info.candidates_bytes / 1024.0,
+                       trie->size_bytes() / 1024.0,
+                       (info.total_bytes + trie->size_bytes()) / 1024.0);
     }
 
     return new llama_grammar {
