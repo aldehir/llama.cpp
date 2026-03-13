@@ -180,15 +180,21 @@ struct vocab_byte_trie {
 // ============================================================
 
 struct dfa_state_token_set {
-    // Adaptive representation: stores whichever is smaller.
+    // Three-way classification: guaranteed-accept, context-dependent, rejected.
+    //
+    // context_set: tokens where the DFA accepts mid-token (token spans beyond
+    // the current DFA segment). These MUST be simulated at runtime.
+    //
+    // token_set: adaptive representation of guaranteed accept/reject tokens.
     // If accept_heavy == true:
-    //   Most tokens are candidates → store the REJECT set (tokens to skip).
-    //   Tokens NOT in the set need simulation.
+    //   Most tokens are guaranteed accepted → store the REJECT set.
+    //   Tokens NOT in token_set AND NOT in context_set are guaranteed accepted.
     // If accept_heavy == false:
-    //   Most tokens are rejected → store the ACCEPT set (tokens to simulate).
-    //   Only tokens IN the set need simulation.
+    //   Most tokens are guaranteed rejected → store the ACCEPT set.
+    //   Tokens IN token_set are guaranteed accepted.
     bool accept_heavy = false;
-    std::vector<int32_t> token_set;  // sorted
+    std::vector<int32_t> token_set;    // sorted (guaranteed accept or reject, adaptive)
+    std::vector<int32_t> context_set;  // sorted (tokens needing simulation)
 };
 
 struct dfa_state_candidates {
@@ -203,11 +209,13 @@ private:
     // Walk trie with multiple DFA states simultaneously.
     // active_states maps dfa_state -> list of original starting states that
     // have reached this dfa_state at this trie depth.
-    // candidate_bits[s] is the bitset of candidate tokens for starting state s.
+    // accepted_bits[s]: tokens guaranteed accepted (fully within DFA or exact-accept)
+    // context_bits[s]: tokens that span beyond a DFA accept (need simulation)
     void walk_multi(const byte_dfa & dfa,
                     const vocab_trie_node & node,
                     const std::vector<std::pair<uint16_t, std::vector<uint16_t>>> & active_groups,
-                    std::vector<std::vector<uint8_t>> & candidate_bits);
+                    std::vector<std::vector<uint8_t>> & accepted_bits,
+                    std::vector<std::vector<uint8_t>> & context_bits);
 };
 
 // ============================================================

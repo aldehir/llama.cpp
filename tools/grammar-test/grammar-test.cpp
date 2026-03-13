@@ -306,7 +306,8 @@ static int mode_bench(const llama_vocab * vocab, const std::string & grammar_str
     auto stats = compute_stats(timings);
 
     // Count token categories from last iteration's results
-    int cnt_precomp_reject = 0, cnt_sim_accept = 0, cnt_sim_reject = 0;
+    int cnt_precomp_reject = 0, cnt_precomp_accept = 0;
+    int cnt_sim_accept = 0, cnt_sim_reject = 0;
     int cnt_eog = 0, cnt_empty = 0;
 
     // Re-run once with fresh logits to count categories
@@ -316,14 +317,14 @@ static int mode_bench(const llama_vocab * vocab, const std::string & grammar_str
     llama_token_data_array cur_p = {token_data.data(), (size_t)n_vocab, -1, false};
     llama_grammar_apply_impl(*grammar, &cur_p);
 
-    // Build needs_simulation the same way apply_impl does, to distinguish categories
-    std::vector<bool> needs_sim(n_vocab, false);
+    // Build rejected_by_all + is_context the same way apply_impl does
+    std::vector<bool> rejected_by_all(n_vocab, true);
+    std::vector<bool> is_context(n_vocab, false);
     {
         const bool have_candidates = !grammar->compiled->dfa_candidates.empty();
-        if (have_candidates) {
-            std::vector<bool> rejected_by_all(n_vocab, true);
-            bool any_config_matched = false;
+        bool any_config_matched = false;
 
+        if (have_candidates) {
             for (const auto & cfg : grammar->configs) {
                 const auto & rule = grammar->compiled->rules[cfg.current.rule_id];
                 const auto & alt = rule.alternates[cfg.current.alternate_idx];
@@ -335,6 +336,12 @@ static int mode_bench(const llama_vocab * vocab, const std::string & grammar_str
                 if (cfg.current.dfa_state >= state_cands.states.size()) continue;
                 const auto & ts = state_cands.states[cfg.current.dfa_state];
                 any_config_matched = true;
+
+                for (int32_t tok : ts.context_set) {
+                    if (tok >= 0 && tok < n_vocab) {
+                        is_context[tok] = true;
+                    }
+                }
 
                 if (ts.accept_heavy) {
                     size_t ti = 0;
@@ -351,15 +358,17 @@ static int mode_bench(const llama_vocab * vocab, const std::string & grammar_str
                             rejected_by_all[tok] = false;
                         }
                     }
+                    for (int32_t tok : ts.context_set) {
+                        if (tok >= 0 && tok < n_vocab) {
+                            rejected_by_all[tok] = false;
+                        }
+                    }
                 }
             }
-            if (any_config_matched) {
-                for (int32_t t = 0; t < n_vocab; t++) {
-                    needs_sim[t] = !rejected_by_all[t];
-                }
-            }
-        } else {
-            std::fill(needs_sim.begin(), needs_sim.end(), true);
+        }
+        if (!have_candidates || !any_config_matched) {
+            std::fill(rejected_by_all.begin(), rejected_by_all.end(), false);
+            std::fill(is_context.begin(), is_context.end(), true);
         }
     }
 
@@ -370,8 +379,10 @@ static int mode_bench(const llama_vocab * vocab, const std::string & grammar_str
             const std::string piece = common_token_to_piece(vocab, i, true);
             if (piece.empty() || piece[0] == 0) {
                 cnt_empty++;
-            } else if (!needs_sim[i]) {
+            } else if (rejected_by_all[i]) {
                 cnt_precomp_reject++;
+            } else if (!is_context[i]) {
+                cnt_precomp_accept++;
             } else if (token_data[i].logit == -INFINITY) {
                 cnt_sim_reject++;
             } else {
@@ -403,6 +414,8 @@ static int mode_bench(const llama_vocab * vocab, const std::string & grammar_str
     printf("    Breakdown:\n");
     printf("      Precomp-rejected: %6d tokens (%5.1f%%)\n",
            cnt_precomp_reject, 100.0 * cnt_precomp_reject / n_vocab);
+    printf("      Precomp-accepted: %6d tokens (%5.1f%%)\n",
+           cnt_precomp_accept, 100.0 * cnt_precomp_accept / n_vocab);
     int cnt_simulated = cnt_sim_accept + cnt_sim_reject;
     printf("      Simulated:        %6d tokens (%5.1f%%)\n",
            cnt_simulated, 100.0 * cnt_simulated / n_vocab);
@@ -444,25 +457,26 @@ static int mode_candidates(const llama_grammar & grammar, const llama_vocab * vo
             const auto & ts = dc.states[st];
             bool is_accept = st < dfa.accept.size() && dfa.accept[st];
 
-            int32_t n_candidates;
+            int32_t n_guaranteed;
             if (ts.accept_heavy) {
                 // token_set is reject set
-                n_candidates = n_vocab - (int32_t)ts.token_set.size();
+                n_guaranteed = n_vocab - (int32_t)ts.token_set.size() - (int32_t)ts.context_set.size();
             } else {
                 // token_set is accept set
-                n_candidates = (int32_t)ts.token_set.size();
+                n_guaranteed = (int32_t)ts.token_set.size();
             }
 
             const char * repr = ts.accept_heavy ? "accept-heavy" : "reject-heavy";
             const char * set_type = ts.accept_heavy ? "rejects" : "accepts";
 
-            printf("  State %3zu: %s, token_set=%zu (%s), candidates=%d%s\n",
-                   st, repr, ts.token_set.size(), set_type, n_candidates,
+            printf("  State %3zu: %s, token_set=%zu (%s), guaranteed=%d, context=%zu%s\n",
+                   st, repr, ts.token_set.size(), set_type, n_guaranteed,
+                   ts.context_set.size(),
                    is_accept ? " [accept]" : "");
 
             // Show up to 5 sample tokens from the set
             if (!ts.token_set.empty()) {
-                printf("           samples: ");
+                printf("           token samples: ");
                 size_t show = std::min((size_t)5, ts.token_set.size());
                 for (size_t j = 0; j < show; j++) {
                     int32_t tok = ts.token_set[j];
@@ -475,12 +489,26 @@ static int mode_candidates(const llama_grammar & grammar, const llama_vocab * vo
                 }
                 printf("\n");
             }
+            if (!ts.context_set.empty()) {
+                printf("           context samples: ");
+                size_t show = std::min((size_t)5, ts.context_set.size());
+                for (size_t j = 0; j < show; j++) {
+                    int32_t tok = ts.context_set[j];
+                    std::string piece = common_token_to_piece(vocab, tok, true);
+                    printf("%d:\"%s\"", tok, escape_for_display(piece).c_str());
+                    if (j + 1 < show) printf(", ");
+                }
+                if (ts.context_set.size() > show) {
+                    printf(", ... (%zu more)", ts.context_set.size() - show);
+                }
+                printf("\n");
+            }
 
             total_states++;
             if (ts.accept_heavy) total_accept_heavy++;
             else total_reject_heavy++;
-            total_candidates += n_candidates;
-            total_memory += ts.token_set.size() * sizeof(int32_t);
+            total_candidates += n_guaranteed + (int32_t)ts.context_set.size();
+            total_memory += (ts.token_set.size() + ts.context_set.size()) * sizeof(int32_t);
         }
         printf("\n");
     }
@@ -511,12 +539,12 @@ static int mode_masking_report(const llama_grammar & grammar, const llama_vocab 
 
     bool allow_eog = cg.any_config_complete(grammar.configs);
 
-    // Build needs_simulation bitmask (replicate apply_impl logic)
+    // Build rejected_by_all + is_context bitmasks (replicate apply_impl logic)
     const bool have_candidates = !cg.dfa_candidates.empty();
-    std::vector<bool> needs_sim(n_vocab, !have_candidates);
+    std::vector<bool> rejected_by_all(n_vocab, true);
+    std::vector<bool> is_context(n_vocab, false);
 
     if (have_candidates) {
-        std::vector<bool> rejected_by_all(n_vocab, true);
         bool any_config_matched = false;
 
         for (const auto & cfg : grammar.configs) {
@@ -530,6 +558,12 @@ static int mode_masking_report(const llama_grammar & grammar, const llama_vocab 
             if (cfg.current.dfa_state >= state_cands.states.size()) continue;
             const auto & ts = state_cands.states[cfg.current.dfa_state];
             any_config_matched = true;
+
+            for (int32_t tok : ts.context_set) {
+                if (tok >= 0 && tok < n_vocab) {
+                    is_context[tok] = true;
+                }
+            }
 
             if (ts.accept_heavy) {
                 size_t ti = 0;
@@ -546,18 +580,26 @@ static int mode_masking_report(const llama_grammar & grammar, const llama_vocab 
                         rejected_by_all[tok] = false;
                     }
                 }
+                for (int32_t tok : ts.context_set) {
+                    if (tok >= 0 && tok < n_vocab) {
+                        rejected_by_all[tok] = false;
+                    }
+                }
             }
         }
-        if (any_config_matched) {
-            for (int32_t t = 0; t < n_vocab; t++) {
-                needs_sim[t] = !rejected_by_all[t];
-            }
+        if (!any_config_matched) {
+            std::fill(rejected_by_all.begin(), rejected_by_all.end(), false);
+            std::fill(is_context.begin(), is_context.end(), true);
         }
+    } else {
+        std::fill(rejected_by_all.begin(), rejected_by_all.end(), false);
+        std::fill(is_context.begin(), is_context.end(), true);
     }
 
     // Categorize each token
     int cnt_eog_accept = 0, cnt_eog_reject = 0;
-    int cnt_empty = 0, cnt_precomp = 0, cnt_sim_accept = 0, cnt_sim_reject = 0;
+    int cnt_empty = 0, cnt_precomp_reject = 0, cnt_precomp_accept = 0;
+    int cnt_sim_accept = 0, cnt_sim_reject = 0;
 
     printf("TOKEN_ID\tCATEGORY\tPIECE\n");
 
@@ -577,11 +619,14 @@ static int mode_masking_report(const llama_grammar & grammar, const llama_vocab 
             if (piece.empty() || piece[0] == 0) {
                 category = "empty-reject";
                 cnt_empty++;
-            } else if (!needs_sim[id]) {
+            } else if (rejected_by_all[id]) {
                 category = "precomp-reject";
-                cnt_precomp++;
+                cnt_precomp_reject++;
+            } else if (!is_context[id]) {
+                category = "precomp-accept";
+                cnt_precomp_accept++;
             } else {
-                // Simulate
+                // Context-dependent — simulate
                 auto sim_configs = grammar.configs;
                 bool valid = true;
                 for (size_t j = 0; j < piece.size(); j++) {
@@ -609,7 +654,8 @@ static int mode_masking_report(const llama_grammar & grammar, const llama_vocab 
     printf("#   eog-accept:     %6d\n", cnt_eog_accept);
     printf("#   eog-reject:     %6d\n", cnt_eog_reject);
     printf("#   empty-reject:   %6d\n", cnt_empty);
-    printf("#   precomp-reject: %6d\n", cnt_precomp);
+    printf("#   precomp-reject: %6d\n", cnt_precomp_reject);
+    printf("#   precomp-accept: %6d\n", cnt_precomp_accept);
     printf("#   sim-accept:     %6d\n", cnt_sim_accept);
     printf("#   sim-reject:     %6d\n", cnt_sim_reject);
     printf("#   total:          %6d\n", n_vocab);

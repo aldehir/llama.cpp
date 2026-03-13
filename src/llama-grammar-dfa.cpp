@@ -1167,14 +1167,16 @@ void dfa_state_candidates::walk_multi(
         const byte_dfa & dfa,
         const vocab_trie_node & node,
         const std::vector<std::pair<uint16_t, std::vector<uint16_t>>> & active_groups,
-        std::vector<std::vector<uint8_t>> & candidate_bits) {
+        std::vector<std::vector<uint8_t>> & accepted_bits,
+        std::vector<std::vector<uint8_t>> & context_bits) {
 
-    // For tokens terminating at this trie node: all active starting states
-    // get these as candidates (they survived the DFA walk to this point).
+    // Tokens terminating at this trie node: guaranteed accepted.
+    // The DFA is in a non-dead state and the token is fully consumed
+    // (stays within the current DFA segment).
     if (!node.tokens.empty()) {
         for (const auto & group : active_groups) {
             for (uint16_t orig : group.second) {
-                set_bits_for_tokens(candidate_bits[orig], node.tokens);
+                set_bits_for_tokens(accepted_bits[orig], node.tokens);
             }
         }
     }
@@ -1195,7 +1197,7 @@ void dfa_state_candidates::walk_multi(
                 continue;
             }
             if (dfa.accept[next_state]) {
-                // DFA segment completes — all tokens in subtree are candidates
+                // DFA segment completes on this byte
                 accept_origins.insert(accept_origins.end(),
                                       group.second.begin(), group.second.end());
             } else {
@@ -1204,11 +1206,26 @@ void dfa_state_candidates::walk_multi(
             }
         }
 
-        // Handle accept-state origins: use cached subtree tokens (O(1) copy)
         if (!accept_origins.empty()) {
-            for (uint16_t orig : accept_origins) {
-                set_bits_for_tokens(candidate_bits[orig],
-                                    node.children[b]->subtree_tokens);
+            const auto & child = *node.children[b];
+
+            // Tokens terminating exactly at the child node: DFA accepts on
+            // their last byte. These are guaranteed accepted (exact-accept).
+            if (!child.tokens.empty()) {
+                for (uint16_t orig : accept_origins) {
+                    set_bits_for_tokens(accepted_bits[orig], child.tokens);
+                }
+            }
+
+            // Tokens deeper in the subtree: DFA accepts mid-token, remaining
+            // bytes must be processed by subsequent grammar segments.
+            // These are context-dependent and need simulation.
+            for (int cb = 0; cb < 256; cb++) {
+                if (!child.children[cb]) continue;
+                for (uint16_t orig : accept_origins) {
+                    set_bits_for_tokens(context_bits[orig],
+                                        child.children[cb]->subtree_tokens);
+                }
             }
         }
 
@@ -1220,7 +1237,7 @@ void dfa_state_candidates::walk_multi(
             for (auto & kv : next_groups) {
                 merged.emplace_back(kv.first, std::move(kv.second));
             }
-            walk_multi(dfa, *node.children[b], merged, candidate_bits);
+            walk_multi(dfa, *node.children[b], merged, accepted_bits, context_bits);
         }
     }
 }
@@ -1237,10 +1254,10 @@ void dfa_state_candidates::precompute(const byte_dfa & dfa, const vocab_byte_tri
         return;
     }
 
-    // Allocate one bitset per DFA state for candidate tracking.
-    // Using bitsets avoids sort+dedup and makes reject-set construction trivial.
+    // Allocate two bitsets per DFA state: accepted (guaranteed) and context-dependent.
     size_t bits_size = (total_vocab_tokens + 7) / 8;
-    std::vector<std::vector<uint8_t>> candidate_bits(n_states, std::vector<uint8_t>(bits_size, 0));
+    std::vector<std::vector<uint8_t>> accepted_bits(n_states, std::vector<uint8_t>(bits_size, 0));
+    std::vector<std::vector<uint8_t>> context_bits(n_states, std::vector<uint8_t>(bits_size, 0));
 
     // Build initial active groups: each DFA state (except 0) starts as its own group
     std::vector<std::pair<uint16_t, std::vector<uint16_t>>> initial_groups;
@@ -1250,31 +1267,41 @@ void dfa_state_candidates::precompute(const byte_dfa & dfa, const vocab_byte_tri
     }
 
     // Single combined walk processes all DFA states together
-    walk_multi(dfa, trie.root, initial_groups, candidate_bits);
+    walk_multi(dfa, trie.root, initial_groups, accepted_bits, context_bits);
 
-    // Convert bitsets to adaptive accept/reject sets
+    // Convert bitsets to adaptive sets
     size_t n_accept_heavy = 0;
     size_t n_reject_heavy = 0;
 
     for (size_t s = 1; s < n_states; s++) {
-        // Count candidates from bitset
-        uint32_t n_cands = 0;
+        uint32_t n_accepted = 0;
+        uint32_t n_context = 0;
         for (size_t i = 0; i < bits_size; i++) {
-            // popcount byte
-            uint8_t v = candidate_bits[s][i];
-            // Brian Kernighan's bit counting
-            while (v) { n_cands++; v &= v - 1; }
+            uint8_t v = accepted_bits[s][i];
+            while (v) { n_accepted++; v &= v - 1; }
+            v = context_bits[s][i];
+            while (v) { n_context++; v &= v - 1; }
         }
 
         auto & state = states[s];
 
-        if (n_cands > total_vocab_tokens / 2) {
-            // Accept-heavy: store reject set
+        // Build context set (always stored explicitly, typically small)
+        state.context_set.reserve(n_context);
+        for (uint32_t t = 0; t < total_vocab_tokens; t++) {
+            if (context_bits[s][t / 8] & (1 << (t % 8))) {
+                state.context_set.push_back((int32_t) t);
+            }
+        }
+
+        // Build adaptive accepted/rejected set
+        if (n_accepted > total_vocab_tokens / 2) {
+            // Accept-heavy: store reject set (tokens not accepted and not context)
             state.accept_heavy = true;
             n_accept_heavy++;
-            state.token_set.reserve(total_vocab_tokens - n_cands);
+            state.token_set.reserve(total_vocab_tokens - n_accepted - n_context);
             for (uint32_t t = 0; t < total_vocab_tokens; t++) {
-                if (!(candidate_bits[s][t / 8] & (1 << (t % 8)))) {
+                if (!(accepted_bits[s][t / 8] & (1 << (t % 8))) &&
+                    !(context_bits[s][t / 8] & (1 << (t % 8)))) {
                     state.token_set.push_back((int32_t) t);
                 }
             }
@@ -1282,9 +1309,9 @@ void dfa_state_candidates::precompute(const byte_dfa & dfa, const vocab_byte_tri
             // Reject-heavy: store accept set
             state.accept_heavy = false;
             n_reject_heavy++;
-            state.token_set.reserve(n_cands);
+            state.token_set.reserve(n_accepted);
             for (uint32_t t = 0; t < total_vocab_tokens; t++) {
-                if (candidate_bits[s][t / 8] & (1 << (t % 8))) {
+                if (accepted_bits[s][t / 8] & (1 << (t % 8))) {
                     state.token_set.push_back((int32_t) t);
                 }
             }

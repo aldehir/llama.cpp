@@ -791,23 +791,20 @@ void llama_grammar_apply_impl(const struct llama_grammar & grammar, llama_token_
     const uint32_t n_vocab = grammar.vocab->n_tokens();
     const bool have_candidates = !grammar.compiled->dfa_candidates.empty();
 
-    // Build candidate bitmask from precomputed per-DFA-state adaptive token sets.
+    // Three-way classification using precomputed per-DFA-state token sets:
+    //   rejected      — token is dead in ALL configs → set logit to -INFINITY
+    //   guaranteed     — token is guaranteed accepted by at least one config → keep
+    //   context-dep    — token spans a DFA boundary, needs simulation to confirm
     //
-    // A token needs simulation if ANY config considers it a candidate.
-    // Equivalently, a token can be skipped only if ALL configs reject it.
+    // rejected_by_all[t]: true if ALL configs reject token t (neither accepted nor context)
+    // is_context[t]: true if ANY config marks token t as context-dependent
     //
-    // We track `rejected_by_all`: start all-true, then for each config AND in
-    // that config's reject set. At the end, needs_simulation = !rejected_by_all.
-    //
-    // For reject-heavy states (token_set = accept set): reject set is the complement.
-    //   → Clear bits for tokens IN the accept set (they're candidates, not rejected).
-    // For accept-heavy states (token_set = reject set): reject set is token_set itself.
-    //   → Only keep bits that are also in this reject set (AND with reject set).
-    std::vector<bool> needs_simulation(n_vocab, !have_candidates);
-    if (have_candidates) {
-        std::vector<bool> rejected_by_all(n_vocab, true);
-        bool any_config_matched = false;
+    // Final: reject if rejected_by_all, simulate if is_context, else guaranteed accept.
+    std::vector<bool> rejected_by_all(n_vocab, !have_candidates ? false : true);
+    std::vector<bool> is_context(n_vocab, false);
+    bool any_config_matched = !have_candidates;
 
+    if (have_candidates) {
         for (const auto & cfg : grammar.configs) {
             const auto & rule = grammar.compiled->rules[cfg.current.rule_id];
             const auto & alt = rule.alternates[cfg.current.alternate_idx];
@@ -822,37 +819,38 @@ void llama_grammar_apply_impl(const struct llama_grammar & grammar, llama_token_
             const auto & ts = state_cands.states[cfg.current.dfa_state];
             any_config_matched = true;
 
+            // OR in context-dependent tokens
+            for (int32_t tok : ts.context_set) {
+                if (tok >= 0 && (uint32_t)tok < n_vocab) {
+                    is_context[tok] = true;
+                }
+            }
+
             if (ts.accept_heavy) {
-                // token_set = reject set. A token is rejected by this config
-                // only if it's IN token_set. AND rejected_by_all with this reject set.
-                //
-                // Build a bitmask of this config's rejects, then AND.
-                // Since token_set is sorted, use merge-style iteration.
+                // token_set = reject set. Everything NOT in token_set is either
+                // guaranteed accepted or context-dependent (not rejected).
+                // Context tokens are not in the reject set by construction.
                 size_t ti = 0;
                 for (uint32_t t = 0; t < n_vocab; t++) {
                     if (ti < ts.token_set.size() && ts.token_set[ti] == (int32_t)t) {
-                        // Token is in reject set — leave rejected_by_all[t] as-is
                         ti++;
                     } else {
-                        // Token is a candidate for this config — it's NOT rejected
                         rejected_by_all[t] = false;
                     }
                 }
             } else {
-                // token_set = accept set. A token is rejected by this config
-                // if it's NOT in token_set. Clear rejected_by_all for tokens
-                // that ARE in the accept set (they're candidates, not rejected).
+                // token_set = accept set. Clear rejected_by_all for accepted tokens.
                 for (int32_t tok : ts.token_set) {
                     if (tok >= 0 && (uint32_t)tok < n_vocab) {
                         rejected_by_all[tok] = false;
                     }
                 }
-            }
-        }
-
-        if (any_config_matched) {
-            for (uint32_t t = 0; t < n_vocab; t++) {
-                needs_simulation[t] = !rejected_by_all[t];
+                // Also clear for context tokens (they're not rejected).
+                for (int32_t tok : ts.context_set) {
+                    if (tok >= 0 && (uint32_t)tok < n_vocab) {
+                        rejected_by_all[tok] = false;
+                    }
+                }
             }
         }
     }
@@ -873,13 +871,17 @@ void llama_grammar_apply_impl(const struct llama_grammar & grammar, llama_token_
             continue;
         }
 
-        if (!needs_simulation[id]) {
-            // Not a candidate at any active DFA state — definitely rejected
+        if (any_config_matched && rejected_by_all[id]) {
             cur_p->data[i].logit = -INFINITY;
             continue;
         }
 
-        // Candidate token — simulate to confirm
+        if (any_config_matched && !is_context[id]) {
+            // Guaranteed accept — no simulation needed
+            continue;
+        }
+
+        // Context-dependent token — simulate to confirm
         auto sim_configs = grammar.configs;
         bool valid = true;
         for (size_t j = 0; j < piece.size(); j++) {
