@@ -60,9 +60,6 @@ struct grammar_ast_node {
 
     // Check if this subtree is purely terminal (no RULE_REFs)
     bool is_purely_terminal() const;
-
-    // Count total AST nodes in this subtree
-    size_t node_count() const;
 };
 
 // ============================================================

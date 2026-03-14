@@ -8,7 +8,7 @@
 #include <stdexcept>
 
 #define MAX_REPETITION_THRESHOLD 2000
-#define MAX_INLINE_AST_NODES 50
+
 #define MAX_PENDING_NFA_STATES 128
 
 // ============================================================
@@ -57,17 +57,6 @@ bool grammar_ast_node::is_purely_terminal() const {
             return child && child->is_purely_terminal();
     }
     return false;
-}
-
-size_t grammar_ast_node::node_count() const {
-    size_t count = 1;
-    for (const auto & c : children) {
-        count += c->node_count();
-    }
-    if (child) {
-        count += child->node_count();
-    }
-    return count;
 }
 
 // ============================================================
@@ -618,19 +607,11 @@ void llama_grammar_ast_parser::inline_refs_in_node(ast_node_ptr & node) {
             if (node->rule_id < rule_classes.size() &&
                 (rule_classes[node->rule_id] == terminal_class::PURELY_TERMINAL ||
                  rule_classes[node->rule_id] == terminal_class::TRANSITIVELY_TERMINAL)) {
-                // Clone and recursively inline to measure final size
-                auto candidate = rules[node->rule_id]->clone();
-                inline_refs_in_node(candidate);
-                size_t final_size = candidate->node_count();
-                if (final_size > MAX_INLINE_AST_NODES) {
-                    LLAMA_LOG_DEBUG("%s: skipping inline of rule '%s' (id=%u, %zu nodes > %d limit)\n",
-                                    __func__, node->rule_name.c_str(), node->rule_id,
-                                    final_size, MAX_INLINE_AST_NODES);
-                    break;
-                }
-                LLAMA_LOG_DEBUG("%s: inlining terminal rule '%s' (id=%u, %zu nodes)\n",
-                                __func__, node->rule_name.c_str(), node->rule_id, final_size);
-                node = std::move(candidate);
+                LLAMA_LOG_DEBUG("%s: inlining terminal rule '%s' (id=%u)\n",
+                                __func__, node->rule_name.c_str(), node->rule_id);
+                node = rules[node->rule_id]->clone();
+                // Recursively inline any refs in the cloned subtree
+                inline_refs_in_node(node);
             }
             break;
         case grammar_ast_node::SEQUENCE:
