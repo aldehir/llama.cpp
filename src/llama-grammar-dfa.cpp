@@ -4,12 +4,16 @@
 #include "llama-vocab.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cassert>
 #include <chrono>
+#include <condition_variable>
 #include <cstring>
 #include <map>
+#include <mutex>
 #include <queue>
 #include <set>
+#include <thread>
 #include <unordered_map>
 
 // ============================================================
@@ -1283,8 +1287,9 @@ void compiled_grammar::precompute_token_candidates(const vocab_byte_trie & trie,
     compute_follow_sets();
 
     dfa_candidates.resize(dfas.size());
-    for (size_t i = 0; i < dfas.size(); i++) {
-        // Build follow DFA pointer list, filtering out nullable follow DFAs
+
+    // Precompute one DFA's candidates (called from worker threads or main thread)
+    auto precompute_one = [&](size_t i) {
         std::vector<const byte_dfa *> follow_dfa_ptrs;
         bool has_nullable_follow = false;
         for (uint32_t fid : dfa_follow_dfas[i]) {
@@ -1299,9 +1304,33 @@ void compiled_grammar::precompute_token_candidates(const vocab_byte_trie & trie,
                 follow_dfa_ptrs.push_back(&dfas[fid]);
             }
         }
-        // If has_nullable_follow or empty follow set, follow_dfa_ptrs stays empty → old behavior
-
         dfa_candidates[i].precompute(dfas[i], trie, total_vocab_tokens, follow_dfa_ptrs);
+    };
+
+    const size_t n_dfas = dfas.size();
+    const int n_threads = (n_dfas >= 4) ? 4 : 1;
+
+    if (n_threads <= 1) {
+        for (size_t i = 0; i < n_dfas; i++) {
+            precompute_one(i);
+        }
+    } else {
+        std::atomic<size_t> next_dfa{0};
+        std::vector<std::thread> workers;
+        workers.reserve(n_threads);
+
+        for (int t = 0; t < n_threads; t++) {
+            workers.emplace_back([&]() {
+                while (true) {
+                    size_t i = next_dfa.fetch_add(1);
+                    if (i >= n_dfas) break;
+                    precompute_one(i);
+                }
+            });
+        }
+        for (auto & w : workers) {
+            w.join();
+        }
     }
 
     auto t_end = std::chrono::steady_clock::now();
