@@ -72,7 +72,8 @@ static void print_usage(const char * prog) {
     printf("  --bench-file FILE          Like --bench-string but reads input from a file\n");
     printf("  --candidates               Dump candidate set analysis\n");
     printf("  --masking-report           Per-token accept/reject categorization\n");
-    printf("  --graph                    Output graphviz dot graph of grammar\n\n");
+    printf("  --graph                    Output graphviz dot graph of grammar\n");
+    printf("                             (with -m: annotate nodes with token counts)\n\n");
     printf("Options:\n");
     printf("  --test-file FILE           Test strings file (+pass / -fail per line)\n");
     printf("  --test-pass STR            String expected to be accepted (repeatable)\n");
@@ -888,7 +889,9 @@ static std::string format_ranges_label(const std::vector<byte_range> & ranges, s
     return s;
 }
 
-static int mode_graph(const std::string & grammar_str, const char * grammar_root) {
+static int mode_graph(const std::string & grammar_str, const char * grammar_root,
+                      const llama_grammar * grammar_with_candidates = nullptr,
+                      int32_t n_vocab = 0) {
     // Parse grammar via AST
     llama_grammar_ast_parser ast_parser;
     if (!ast_parser.parse(grammar_str.c_str())) {
@@ -910,6 +913,10 @@ static int mode_graph(const std::string & grammar_str, const char * grammar_root
     ast_parser.optimize();
     uint32_t start_idx = ast_parser.symbol_ids.at(grammar_root);
     auto cg = compile_grammar_from_ast(ast_parser.rules, start_idx);
+
+    // Use candidate data from full grammar if available
+    const compiled_grammar * cg_with_cands = grammar_with_candidates
+        ? grammar_with_candidates->compiled.get() : nullptr;
 
     // Output dot
     printf("digraph grammar {\n");
@@ -983,7 +990,17 @@ static int mode_graph(const std::string & grammar_str, const char * grammar_root
         printf("    subgraph cluster_dfa_%zu {\n", d);
         printf("        label=<<B>DFA %zu</B> (%zu states)>;\n", d, n_states - 1);
         printf("        style=\"rounded,dashed\"; color=\"#999999\";\n");
-        printf("        node [shape=circle, width=0.35, fixedsize=true, fontsize=8];\n");
+        // Check if we have candidate data for this DFA
+        const dfa_state_candidates * dc = nullptr;
+        if (cg_with_cands && d < cg_with_cands->dfa_candidates.size()) {
+            dc = &cg_with_cands->dfa_candidates[d];
+        }
+
+        if (dc) {
+            printf("        node [shape=Mrecord, fontsize=8];\n");
+        } else {
+            printf("        node [shape=circle, width=0.35, fixedsize=true, fontsize=8];\n");
+        }
         printf("\n");
 
         for (size_t s = 0; s < n_states; s++) {
@@ -994,12 +1011,33 @@ static int mode_graph(const std::string & grammar_str, const char * grammar_root
             bool is_accept = s < dfa.accept.size() && dfa.accept[s];
             bool is_start = (s == (size_t)dfa.start_state);
 
-            const char * shape = is_accept ? "doublecircle" : "circle";
-            std::string style;
-            if (is_start) style = " style=bold";
+            if (dc && s < dc->states.size()) {
+                const auto & ts = dc->states[s];
+                int32_t n_accepted, n_rejected, n_context;
+                n_context = (int32_t)ts.context_set.size();
+                if (ts.accept_heavy) {
+                    n_rejected = (int32_t)ts.token_set.size();
+                    n_accepted = n_vocab - n_rejected - n_context;
+                } else {
+                    n_accepted = (int32_t)ts.token_set.size();
+                    n_rejected = n_vocab - n_accepted - n_context;
+                }
 
-            printf("        dfa%zu_s%zu [label=\"%zu\", shape=%s%s];\n",
-                   d, s, s, shape, style.c_str());
+                std::string peripheries = is_accept ? " peripheries=2" : "";
+                std::string style_str = is_start ? " style=bold" : "";
+                const char * accept_marker = is_accept ? " *" : "";
+
+                printf("        dfa%zu_s%zu [label=\"{%zu%s|+%d -%d ?%d}\", shape=Mrecord%s%s];\n",
+                       d, s, s, accept_marker, n_accepted, n_rejected, n_context,
+                       peripheries.c_str(), style_str.c_str());
+            } else {
+                const char * shape = is_accept ? "doublecircle" : "circle";
+                std::string style;
+                if (is_start) style = " style=bold";
+
+                printf("        dfa%zu_s%zu [label=\"%zu\", shape=%s%s];\n",
+                       d, s, s, shape, style.c_str());
+            }
         }
 
         // Transitions - group by (source, target), compress byte ranges
@@ -1133,8 +1171,40 @@ int main(int argc, char ** argv) {
         return 1;
     }
 
-    // Graph mode: no model needed, just parse + compile
+    // Graph mode: model optional (enables token count annotations)
     if (mode == MODE_GRAPH) {
+        if (model_path) {
+            if (disable_logging) {
+                llama_log_set(llama_log_callback_null, nullptr);
+            }
+            llama_backend_init();
+
+            llama_model_params mparams = llama_model_default_params();
+            mparams.vocab_only = true;
+            llama_model * model = llama_model_load_from_file(model_path, mparams);
+            if (!model) {
+                fprintf(stderr, "error: could not load model\n");
+                return 1;
+            }
+            const llama_vocab * vocab = llama_model_get_vocab(model);
+            int32_t n_vocab = llama_vocab_n_tokens(vocab);
+
+            llama_grammar * grammar = llama_grammar_init_impl(
+                vocab, grammar_str.c_str(), grammar_root, false, nullptr, 0, nullptr, 0);
+            if (!grammar) {
+                fprintf(stderr, "error: grammar init failed\n");
+                llama_model_free(model);
+                llama_backend_free();
+                return 1;
+            }
+
+            int rc = mode_graph(grammar_str, grammar_root, grammar, n_vocab);
+
+            llama_grammar_free_impl(grammar);
+            llama_model_free(model);
+            llama_backend_free();
+            return rc;
+        }
         return mode_graph(grammar_str, grammar_root);
     }
 
