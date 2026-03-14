@@ -1658,10 +1658,18 @@ void common_peg_arena::build_grammar(const common_grammar_builder & builder, boo
                 const std::string delim(1, p.delimiter);
                 return R"(( [^)" + delim + R"(\\] | "\\" ( [)" + delim + R"(\\/ bfnrt] | "u" [0-9a-fA-F]{4} ) )*)";
             } else if constexpr (std::is_same_v<T, common_peg_until_parser>) {
-                if (p.delimiters.empty()) {
-                    return ".*";
+                //if (p.delimiters.empty()) {
+                //    return ".*";
+                //}
+                //return gbnf_excluding_pattern(p.delimiters);
+                std::string s;
+                for (const auto & delim : p.delimiters) {
+                    if (!s.empty()) {
+                        s += " | ";
+                    }
+                    s += gbnf_format_literal(delim);
                 }
-                return gbnf_excluding_pattern(p.delimiters);
+                return "(!(" + s + ") .)*";
             } else if constexpr (std::is_same_v<T, common_peg_schema_parser>) {
                 if (p.schema) {
                     if (p.raw && p.schema->contains("type") && p.schema->at("type").is_string() && p.schema->at("type") == "string") {

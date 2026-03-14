@@ -11,3 +11,6 @@ Files of interest:
 src/llama-grammar.cpp
 src/llama-grammar-dfa.cpp
 tools/grammar-test/
+
+Keep the docs/grammar-dfa.md doc updated when modifying the llamma-grammar
+logic
