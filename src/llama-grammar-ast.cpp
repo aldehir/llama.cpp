@@ -955,6 +955,50 @@ static void compile_node(
     }
 }
 
+// BFS on AST RULE_REFs to find rules reachable from start_rule
+static std::vector<bool> compute_reachable(
+        const std::vector<ast_node_ptr> & rules,
+        uint32_t start_rule_index) {
+    std::vector<bool> reachable(rules.size(), false);
+    std::vector<uint32_t> queue;
+    reachable[start_rule_index] = true;
+    queue.push_back(start_rule_index);
+
+    // Collect RULE_REFs from an AST node
+    std::function<void(const grammar_ast_node &)> collect_refs;
+    collect_refs = [&](const grammar_ast_node & node) {
+        switch (node.type) {
+            case grammar_ast_node::RULE_REF:
+                if (!reachable[node.rule_id]) {
+                    reachable[node.rule_id] = true;
+                    queue.push_back(node.rule_id);
+                }
+                break;
+            case grammar_ast_node::SEQUENCE:
+            case grammar_ast_node::ALTERNATION:
+                for (const auto & c : node.children) {
+                    collect_refs(*c);
+                }
+                break;
+            case grammar_ast_node::REPETITION:
+                if (node.child) collect_refs(*node.child);
+                break;
+            default:
+                break;
+        }
+    };
+
+    while (!queue.empty()) {
+        uint32_t rid = queue.back();
+        queue.pop_back();
+        if (rules[rid]) {
+            collect_refs(*rules[rid]);
+        }
+    }
+
+    return reachable;
+}
+
 compiled_grammar compile_grammar_from_ast(
         const std::vector<ast_node_ptr> & rules,
         uint32_t start_rule_index) {
@@ -962,9 +1006,20 @@ compiled_grammar compile_grammar_from_ast(
     cg.start_rule = start_rule_index;
     cg.rules.resize(rules.size());
 
+    // Determine which rules are reachable from the start rule
+    auto reachable = compute_reachable(rules, start_rule_index);
+
+    size_t n_skipped = 0;
+    for (size_t i = 0; i < rules.size(); i++) {
+        if (rules[i] && !reachable[i]) n_skipped++;
+    }
+    if (n_skipped > 0) {
+        LLAMA_LOG_INFO("%s: skipping %zu unreachable rules\n", __func__, n_skipped);
+    }
+
     for (size_t rule_idx = 0; rule_idx < rules.size(); rule_idx++) {
         const auto & ast = rules[rule_idx];
-        if (!ast) continue;
+        if (!ast || !reachable[rule_idx]) continue;
 
         // Collect alternates into a local vector first, because compile_node
         // may append synthetic rules to cg.rules, invalidating references.
