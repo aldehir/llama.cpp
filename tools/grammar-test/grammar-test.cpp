@@ -1076,6 +1076,8 @@ int main(int argc, char ** argv) {
             if (++i >= argc) { fprintf(stderr, "error: %s requires argument\n", arg.c_str()); return 1; }
             bench_string = read_file(argv[i]);
             if (bench_string.empty()) { fprintf(stderr, "error: bench file is empty or could not be read\n"); return 1; }
+            // Strip \r so Windows line endings don't break grammars that only expect \n
+            bench_string.erase(std::remove(bench_string.begin(), bench_string.end(), '\r'), bench_string.end());
         } else if (arg == "--candidates") {
             mode = MODE_CANDIDATES;
         } else if (arg == "--masking-report") {
