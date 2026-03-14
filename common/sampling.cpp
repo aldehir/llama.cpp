@@ -8,6 +8,8 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <future>
+#include <mutex>
 #include <unordered_map>
 
 // the ring buffer works similarly to std::deque, but with a fixed capacity
@@ -178,8 +180,156 @@ std::string common_params_sampling::print() const {
     return std::string(result);
 }
 
+// deferred grammar sampler — wraps a grammar sampler and allows its mask to be
+// precomputed asynchronously.  When trigger() is called, the grammar mask is
+// computed on a background thread.  The next apply() consumes the precomputed
+// mask if available, otherwise falls back to synchronous grammar application.
+
+// The precomputed result: a sorted list of rejected token IDs.
+// Sparse — only stores the rejected set, which is typically much smaller than n_vocab.
+struct grammar_precompute_result {
+    std::vector<llama_token> rejected; // sorted
+};
+
+struct common_sampler_deferred_grammar {
+    llama_sampler * inner;   // the real grammar sampler (owned)
+    int32_t         n_vocab;
+
+    std::mutex                                mtx;
+    std::future<grammar_precompute_result>    future;
+
+    void trigger() {
+        std::lock_guard<std::mutex> lock(mtx);
+
+        if (future.valid()) {
+            future.get();
+        }
+
+        auto * grmr = inner;
+        auto   nv   = n_vocab;
+
+        future = std::async(std::launch::async, [grmr, nv]() -> grammar_precompute_result {
+            std::vector<llama_token_data> candidates(nv);
+            for (int32_t i = 0; i < nv; ++i) {
+                candidates[i] = { i, 0.0f, 0.0f };
+            }
+
+            llama_token_data_array candidates_p = { candidates.data(), (size_t)nv, -1, false };
+            llama_sampler_apply(grmr, &candidates_p);
+
+            grammar_precompute_result result;
+            for (int32_t i = 0; i < nv; ++i) {
+                if (candidates[i].logit == -INFINITY) {
+                    result.rejected.push_back(candidates[i].id);
+                }
+            }
+            std::sort(result.rejected.begin(), result.rejected.end());
+
+            return result;
+        });
+    }
+
+    void wait() {
+        std::lock_guard<std::mutex> lock(mtx);
+        if (future.valid()) {
+            future.get();
+        }
+    }
+};
+
+static struct llama_sampler * common_sampler_init_deferred_grammar(llama_sampler * inner, int32_t n_vocab);
+
+static const char * common_sampler_deferred_grammar_name(const struct llama_sampler * smpl) {
+    const auto * ctx = (const common_sampler_deferred_grammar *) smpl->ctx;
+    return llama_sampler_name(ctx->inner);
+}
+
+static void common_sampler_deferred_grammar_accept(struct llama_sampler * smpl, llama_token token) {
+    auto * ctx = (common_sampler_deferred_grammar *) smpl->ctx;
+    // future should already be consumed by apply(), but be safe
+    ctx->wait();
+    llama_sampler_accept(ctx->inner, token);
+}
+
+static void common_sampler_deferred_grammar_apply(struct llama_sampler * smpl, llama_token_data_array * cur_p) {
+    auto * ctx = (common_sampler_deferred_grammar *) smpl->ctx;
+
+    std::lock_guard<std::mutex> lock(ctx->mtx);
+
+    if (ctx->future.valid()) {
+        auto result = ctx->future.get();
+        const auto & rejected = result.rejected; // sorted
+
+        if (cur_p->size == (size_t)ctx->n_vocab) {
+            // Dense cur_p (data[i].id == i) — direct index into rejected via merge scan
+            size_t ri = 0;
+            for (size_t i = 0; i < cur_p->size && ri < rejected.size(); ++i) {
+                if ((llama_token)i == rejected[ri]) {
+                    cur_p->data[i].logit = -INFINITY;
+                    ++ri;
+                }
+            }
+        } else {
+            // Sparse cur_p — binary search each candidate against rejected set
+            for (size_t i = 0; i < cur_p->size; ++i) {
+                if (std::binary_search(rejected.begin(), rejected.end(), cur_p->data[i].id)) {
+                    cur_p->data[i].logit = -INFINITY;
+                }
+            }
+        }
+    } else {
+        llama_sampler_apply(ctx->inner, cur_p);
+    }
+}
+
+static void common_sampler_deferred_grammar_reset(struct llama_sampler * smpl) {
+    auto * ctx = (common_sampler_deferred_grammar *) smpl->ctx;
+    ctx->wait();
+    llama_sampler_reset(ctx->inner);
+}
+
+static struct llama_sampler * common_sampler_deferred_grammar_clone(const struct llama_sampler * smpl) {
+    const auto * ctx = (const common_sampler_deferred_grammar *) smpl->ctx;
+    // NOTE: const_cast needed because wait() takes a lock — safe because clone is logically const
+    const_cast<common_sampler_deferred_grammar *>(ctx)->wait();
+
+    return common_sampler_init_deferred_grammar(llama_sampler_clone(ctx->inner), ctx->n_vocab);
+}
+
+static void common_sampler_deferred_grammar_free(struct llama_sampler * smpl) {
+    auto * ctx = (common_sampler_deferred_grammar *) smpl->ctx;
+    ctx->wait();
+    llama_sampler_free(ctx->inner);
+    delete ctx;
+}
+
+static struct llama_sampler_i common_sampler_deferred_grammar_iface = {
+    /* .name              = */ common_sampler_deferred_grammar_name,
+    /* .accept            = */ common_sampler_deferred_grammar_accept,
+    /* .apply             = */ common_sampler_deferred_grammar_apply,
+    /* .reset             = */ common_sampler_deferred_grammar_reset,
+    /* .clone             = */ common_sampler_deferred_grammar_clone,
+    /* .free              = */ common_sampler_deferred_grammar_free,
+    /* .backend_init      = */ nullptr,
+    /* .backend_accept    = */ nullptr,
+    /* .backend_apply     = */ nullptr,
+    /* .backend_set_input = */ nullptr,
+};
+
+static struct llama_sampler * common_sampler_init_deferred_grammar(llama_sampler * inner, int32_t n_vocab) {
+    auto * ctx       = new common_sampler_deferred_grammar;
+    ctx->inner   = inner;
+    ctx->n_vocab = n_vocab;
+
+    return new llama_sampler {
+        /* .iface = */ &common_sampler_deferred_grammar_iface,
+        /* .ctx   = */ ctx,
+    };
+}
+
 struct common_sampler * common_sampler_init(const struct llama_model * model, struct common_params_sampling & params) {
     const llama_vocab * vocab = llama_model_get_vocab(model);
+    const int32_t     n_vocab = llama_vocab_n_tokens(vocab);
 
     llama_sampler_chain_params lparams = llama_sampler_chain_default_params();
 
@@ -348,6 +498,11 @@ struct common_sampler * common_sampler_init(const struct llama_model * model, st
         params.backend_sampling = false;
     }
 
+    // wrap the grammar sampler so its mask can be precomputed asynchronously
+    if (grmr) {
+        grmr = common_sampler_init_deferred_grammar(grmr, n_vocab);
+    }
+
     auto * result = new common_sampler {
         /* .params  = */ params,
         /* .grmr    = */ grmr,
@@ -393,6 +548,17 @@ void common_sampler_reset(struct common_sampler * gsmpl) {
     }
 
     gsmpl->reset();
+}
+
+void common_sampler_trigger_grammar_precompute(struct common_sampler * gsmpl) {
+    if (!gsmpl || !gsmpl->grmr) {
+        return;
+    }
+
+    if (gsmpl->grmr->iface == &common_sampler_deferred_grammar_iface) {
+        auto * ctx = (common_sampler_deferred_grammar *) gsmpl->grmr->ctx;
+        ctx->trigger();
+    }
 }
 
 struct common_sampler * common_sampler_clone(common_sampler * gsmpl) {
@@ -468,10 +634,7 @@ llama_token common_sampler_sample(struct common_sampler * gsmpl, struct llama_co
     // Allow forcing grammar-first sampling via environment variable for benchmarking
     // the new DFA grammar engine's impact on the sampling pipeline.
     {
-        static const bool force_grammar_first = (std::getenv("LLAMA_GRAMMAR_FIRST") != nullptr);
-        if (force_grammar_first) {
-            grammar_first = true;
-        }
+        grammar_first = true;
     }
 
     llama_token id = LLAMA_TOKEN_NULL;

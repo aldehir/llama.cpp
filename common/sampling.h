@@ -46,6 +46,10 @@ void                    common_sampler_accept(struct common_sampler * gsmpl, lla
 void                    common_sampler_reset (struct common_sampler * gsmpl);
 struct common_sampler * common_sampler_clone (struct common_sampler * gsmpl);
 
+// trigger asynchronous precomputation of the grammar rejection mask
+// call after common_sampler_accept() to overlap grammar computation with llama_decode()
+void common_sampler_trigger_grammar_precompute(struct common_sampler * gsmpl);
+
 // arguments can be nullptr to skip printing
 void common_perf_print(const struct llama_context * ctx, const struct common_sampler * gsmpl);
 

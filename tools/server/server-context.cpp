@@ -2826,6 +2826,7 @@ private:
                 slot.i_batch = -1;
 
                 common_sampler_accept(slot.smpl.get(), id, true);
+                common_sampler_trigger_grammar_precompute(slot.smpl.get());
 
                 // here we have synchronized the llama_context (due to the sampling above), so we can do time measurement
                 const int64_t t_current = ggml_time_us();
@@ -2872,6 +2873,7 @@ private:
                 const auto ids = common_sampler_sample_and_accept_n(slot.smpl.get(), ctx, slot.i_batch_dft, slot.drafted);
                 slot.i_batch_dft.clear();
                 slot.drafted.clear();
+                common_sampler_trigger_grammar_precompute(slot.smpl.get());
 
                 const int64_t t_current = ggml_time_us();
 
