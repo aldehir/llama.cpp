@@ -28,6 +28,7 @@ struct grammar_ast_node {
         SEQUENCE,      // concatenation of children
         ALTERNATION,   // choice among children
         REPETITION,    // child repeated {min, max} times
+        EXCLUSION,     // !("str1" | "str2") - matches any string not containing excluded substrings
     };
     type_t type;
 
@@ -51,11 +52,17 @@ struct grammar_ast_node {
     uint64_t min_rep = 0;
     uint64_t max_rep = UINT64_MAX;  // unbounded
 
+    // EXCLUSION
+    std::vector<std::vector<uint32_t>> excluded_strings;  // code point sequences
+
     // Deep copy
     ast_node_ptr clone() const;
 
     // Check if this subtree is purely terminal (no RULE_REFs)
     bool is_purely_terminal() const;
+
+    // Count total AST nodes in this subtree
+    size_t node_count() const;
 };
 
 // ============================================================

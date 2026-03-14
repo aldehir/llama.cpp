@@ -89,6 +89,11 @@ grammar_nfa valid_utf8_char_nfa();
 // Build (or return cached) DFA for valid single UTF-8 character
 byte_dfa build_valid_utf8_dfa();
 
+// Build a complement DFA that matches any string NOT containing any of the
+// given byte sequences as a substring. Uses Aho-Corasick construction.
+// The resulting DFA has O(sum of needle lengths) states.
+byte_dfa build_exclusion_dfa(const std::vector<std::vector<uint8_t>> & needles);
+
 // ============================================================
 // Grammar compilation structures
 // ============================================================

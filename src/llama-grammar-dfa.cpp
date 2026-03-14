@@ -321,6 +321,137 @@ byte_dfa build_valid_utf8_dfa() {
 }
 
 // ============================================================
+// Exclusion DFA (Aho-Corasick complement)
+// ============================================================
+
+byte_dfa build_exclusion_dfa(const std::vector<std::vector<uint8_t>> & needles) {
+    // Aho-Corasick trie node
+    struct ac_node {
+        int children[256];
+        int fail;
+        bool output;
+
+        ac_node() : fail(0), output(false) {
+            std::fill(children, children + 256, -1);
+        }
+    };
+
+    std::vector<ac_node> nodes;
+    nodes.emplace_back();  // root = node 0
+
+    // Insert needles into trie
+    for (const auto & needle : needles) {
+        if (needle.empty()) {
+            // Empty exclusion string = exclude everything = match nothing
+            byte_dfa dfa;
+            dfa.transitions.resize(2);
+            dfa.transitions[0].fill(0);
+            dfa.transitions[1].fill(0);
+            dfa.accept.resize(2, false);
+            dfa.accept_can_continue.resize(2, false);
+            dfa.start_state = 1;
+            return dfa;
+        }
+        int cur = 0;
+        for (uint8_t b : needle) {
+            if (nodes[cur].children[b] == -1) {
+                nodes[cur].children[b] = (int)nodes.size();
+                nodes.emplace_back();
+            }
+            cur = nodes[cur].children[b];
+        }
+        nodes[cur].output = true;
+    }
+
+    // Build failure links using BFS
+    std::queue<int> bfs_queue;
+    for (int b = 0; b < 256; b++) {
+        if (nodes[0].children[b] != -1) {
+            nodes[nodes[0].children[b]].fail = 0;
+            bfs_queue.push(nodes[0].children[b]);
+        }
+    }
+
+    while (!bfs_queue.empty()) {
+        int u = bfs_queue.front();
+        bfs_queue.pop();
+
+        // Propagate output flag via suffix link
+        if (nodes[nodes[u].fail].output) {
+            nodes[u].output = true;
+        }
+
+        for (int b = 0; b < 256; b++) {
+            int v = nodes[u].children[b];
+            if (v == -1) {
+                continue;
+            }
+            // Compute failure link for v: follow u's failure chain
+            int f = nodes[u].fail;
+            while (f != 0 && nodes[f].children[b] == -1) {
+                f = nodes[f].fail;
+            }
+            if (nodes[f].children[b] != -1 && nodes[f].children[b] != v) {
+                nodes[v].fail = nodes[f].children[b];
+            } else {
+                nodes[v].fail = 0;
+            }
+            bfs_queue.push(v);
+        }
+    }
+
+    // Build complement DFA
+    // DFA state 0 = dead, DFA state i+1 = AC node i
+    int n_nodes = (int)nodes.size();
+    byte_dfa dfa;
+    dfa.transitions.resize(n_nodes + 1);
+    dfa.accept.resize(n_nodes + 1, false);
+    dfa.accept_can_continue.resize(n_nodes + 1, false);
+    dfa.start_state = 1;  // AC root = DFA state 1
+
+    // Dead state 0
+    dfa.transitions[0].fill(0);
+
+    for (int node_idx = 0; node_idx < n_nodes; node_idx++) {
+        uint16_t dfa_state = (uint16_t)(node_idx + 1);
+
+        if (nodes[node_idx].output) {
+            // Needle matched at this node -> dead in complement
+            dfa.transitions[dfa_state].fill(0);
+            dfa.accept[dfa_state] = false;
+            continue;
+        }
+
+        dfa.accept[dfa_state] = true;
+
+        bool has_outgoing = false;
+        for (int b = 0; b < 256; b++) {
+            // Aho-Corasick goto: follow failure links to find target
+            int target = node_idx;
+            while (target != 0 && nodes[target].children[b] == -1) {
+                target = nodes[target].fail;
+            }
+            if (nodes[target].children[b] != -1) {
+                target = nodes[target].children[b];
+            } else {
+                target = 0;  // back to root
+            }
+
+            if (nodes[target].output) {
+                dfa.transitions[dfa_state][b] = 0;  // needle completed -> dead
+            } else {
+                dfa.transitions[dfa_state][b] = (uint16_t)(target + 1);
+                has_outgoing = true;
+            }
+        }
+
+        dfa.accept_can_continue[dfa_state] = has_outgoing;
+    }
+
+    return dfa;
+}
+
+// ============================================================
 // NFA -> DFA (subset construction)
 // ============================================================
 

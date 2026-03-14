@@ -8,6 +8,7 @@
 #include <stdexcept>
 
 #define MAX_REPETITION_THRESHOLD 2000
+#define MAX_INLINE_AST_NODES 50
 
 // ============================================================
 // AST node methods
@@ -24,6 +25,7 @@ ast_node_ptr grammar_ast_node::clone() const {
     n->rule_id = rule_id;
     n->min_rep = min_rep;
     n->max_rep = max_rep;
+    n->excluded_strings = excluded_strings;
 
     for (const auto & c : children) {
         n->children.push_back(c->clone());
@@ -38,6 +40,7 @@ bool grammar_ast_node::is_purely_terminal() const {
     switch (type) {
         case LITERAL:
         case CHAR_CLASS:
+        case EXCLUSION:
             return true;
         case RULE_REF:
             return false;
@@ -53,6 +56,17 @@ bool grammar_ast_node::is_purely_terminal() const {
             return child && child->is_purely_terminal();
     }
     return false;
+}
+
+size_t grammar_ast_node::node_count() const {
+    size_t count = 1;
+    for (const auto & c : children) {
+        count += c->node_count();
+    }
+    if (child) {
+        count += child->node_count();
+    }
+    return count;
 }
 
 // ============================================================
@@ -279,6 +293,69 @@ const char * llama_grammar_ast_parser::parse_sequence(
                 throw std::runtime_error(std::string("expecting ')' at ") + pos);
             }
             pos = parse_space(pos + 1, is_nested);
+        } else if (*pos == '!') {
+            // Exclusion: !("literal1" | "literal2" | ...)
+            pos++;
+            if (*pos != '(') {
+                throw std::runtime_error(std::string("expecting '(' after '!' at ") + pos);
+            }
+            pos = parse_space(pos + 1, true);
+
+            auto excl = std::make_unique<grammar_ast_node>();
+            excl->type = grammar_ast_node::EXCLUSION;
+
+            // Parse first literal string
+            if (*pos != '"') {
+                throw std::runtime_error(
+                    std::string("expecting '\"' inside !() (only literals allowed) at ") + pos);
+            }
+            {
+                pos++;
+                std::vector<uint32_t> str;
+                while (*pos != '"') {
+                    if (!*pos) {
+                        throw std::runtime_error("unexpected end of input");
+                    }
+                    auto char_pair = parse_char(pos);
+                    pos = char_pair.second;
+                    str.push_back(char_pair.first);
+                }
+                pos = parse_space(pos + 1, true);
+                if (str.empty()) {
+                    throw std::runtime_error("empty string in exclusion");
+                }
+                excl->excluded_strings.push_back(std::move(str));
+            }
+
+            // Parse additional pipe-separated literals
+            while (*pos == '|') {
+                pos = parse_space(pos + 1, true);
+                if (*pos != '"') {
+                    throw std::runtime_error(
+                        std::string("expecting '\"' inside !() (only literals allowed) at ") + pos);
+                }
+                pos++;
+                std::vector<uint32_t> str;
+                while (*pos != '"') {
+                    if (!*pos) {
+                        throw std::runtime_error("unexpected end of input");
+                    }
+                    auto char_pair = parse_char(pos);
+                    pos = char_pair.second;
+                    str.push_back(char_pair.first);
+                }
+                pos = parse_space(pos + 1, true);
+                if (str.empty()) {
+                    throw std::runtime_error("empty string in exclusion");
+                }
+                excl->excluded_strings.push_back(std::move(str));
+            }
+
+            if (*pos != ')') {
+                throw std::runtime_error(std::string("expecting ')' at ") + pos);
+            }
+            pos = parse_space(pos + 1, is_nested);
+            item = std::move(excl);
         } else if (*pos == '.') {
             // Any char
             auto cc = std::make_unique<grammar_ast_node>();
@@ -499,6 +576,7 @@ bool llama_grammar_ast_parser::check_transitively_terminal(
         switch (node.type) {
             case grammar_ast_node::LITERAL:
             case grammar_ast_node::CHAR_CLASS:
+            case grammar_ast_node::EXCLUSION:
                 return true;
             case grammar_ast_node::RULE_REF:
                 return check_transitively_terminal(node.rule_id, in_progress);
@@ -533,16 +611,25 @@ void llama_grammar_ast_parser::inline_refs_in_node(ast_node_ptr & node) {
     switch (node->type) {
         case grammar_ast_node::LITERAL:
         case grammar_ast_node::CHAR_CLASS:
+        case grammar_ast_node::EXCLUSION:
             break;
         case grammar_ast_node::RULE_REF:
             if (node->rule_id < rule_classes.size() &&
                 (rule_classes[node->rule_id] == terminal_class::PURELY_TERMINAL ||
                  rule_classes[node->rule_id] == terminal_class::TRANSITIVELY_TERMINAL)) {
-                LLAMA_LOG_DEBUG("%s: inlining terminal rule '%s' (id=%u)\n",
-                                __func__, node->rule_name.c_str(), node->rule_id);
-                node = rules[node->rule_id]->clone();
-                // Recursively inline any refs in the cloned subtree
-                inline_refs_in_node(node);
+                // Clone and recursively inline to measure final size
+                auto candidate = rules[node->rule_id]->clone();
+                inline_refs_in_node(candidate);
+                size_t final_size = candidate->node_count();
+                if (final_size > MAX_INLINE_AST_NODES) {
+                    LLAMA_LOG_DEBUG("%s: skipping inline of rule '%s' (id=%u, %zu nodes > %d limit)\n",
+                                    __func__, node->rule_name.c_str(), node->rule_id,
+                                    final_size, MAX_INLINE_AST_NODES);
+                    break;
+                }
+                LLAMA_LOG_DEBUG("%s: inlining terminal rule '%s' (id=%u, %zu nodes)\n",
+                                __func__, node->rule_name.c_str(), node->rule_id, final_size);
+                node = std::move(candidate);
             }
             break;
         case grammar_ast_node::SEQUENCE:
@@ -572,6 +659,7 @@ void llama_grammar_ast_parser::flatten_nested(ast_node_ptr & node) {
         case grammar_ast_node::LITERAL:
         case grammar_ast_node::CHAR_CLASS:
         case grammar_ast_node::RULE_REF:
+        case grammar_ast_node::EXCLUSION:
             break;
         case grammar_ast_node::SEQUENCE: {
             // Flatten nested sequences
@@ -772,6 +860,51 @@ grammar_nfa ast_to_nfa(const grammar_ast_node & node) {
             return result;
         }
 
+        case grammar_ast_node::EXCLUSION: {
+            // Build exclusion DFA from code point strings, then convert to NFA
+            std::vector<std::vector<uint8_t>> needles;
+            for (const auto & str : node.excluded_strings) {
+                std::vector<uint8_t> bytes;
+                for (uint32_t cp : str) {
+                    auto cp_bytes = encode_utf8_bytes(cp);
+                    bytes.insert(bytes.end(), cp_bytes.begin(), cp_bytes.end());
+                }
+                needles.push_back(std::move(bytes));
+            }
+            auto dfa = build_exclusion_dfa(needles);
+            dfa.minimize();
+
+            // Convert DFA back to NFA (same pattern as negated char classes)
+            grammar_nfa nfa;
+            for (size_t i = 0; i < dfa.transitions.size(); i++) {
+                nfa.add_state();
+            }
+            nfa.start = dfa.start_state;
+            uint32_t nfa_accept = nfa.add_state();
+            nfa.accept = nfa_accept;
+
+            for (size_t i = 0; i < dfa.transitions.size(); i++) {
+                if (dfa.accept[i]) {
+                    nfa.states[i].epsilon_transitions.push_back(nfa_accept);
+                }
+            }
+            for (size_t i = 0; i < dfa.transitions.size(); i++) {
+                int b = 0;
+                while (b < 256) {
+                    uint16_t target = dfa.transitions[i][b];
+                    if (target == 0) { b++; continue; }
+                    int start_b = b;
+                    while (b < 255 && dfa.transitions[i][b + 1] == target) {
+                        b++;
+                    }
+                    nfa.states[i].byte_transitions.push_back(
+                        {(uint8_t)start_b, (uint8_t)b, (uint32_t)target});
+                    b++;
+                }
+            }
+            return nfa;
+        }
+
         case grammar_ast_node::RULE_REF:
             // Should not be called on non-terminal nodes
             assert(false && "ast_to_nfa called on RULE_REF node");
@@ -846,6 +979,25 @@ static void compile_node(
         case grammar_ast_node::CHAR_CLASS:
             append_terminal(pending_nfa, has_pending, ast_to_nfa(node));
             break;
+
+        case grammar_ast_node::EXCLUSION: {
+            // Build exclusion DFA directly as its own segment (avoids NFA round-trip)
+            flush_pending(cg, pending_nfa, has_pending, segments);
+            std::vector<std::vector<uint8_t>> needles;
+            for (const auto & str : node.excluded_strings) {
+                std::vector<uint8_t> bytes;
+                for (uint32_t cp : str) {
+                    auto cp_bytes = encode_utf8_bytes(cp);
+                    bytes.insert(bytes.end(), cp_bytes.begin(), cp_bytes.end());
+                }
+                needles.push_back(std::move(bytes));
+            }
+            auto dfa = build_exclusion_dfa(needles);
+            dfa.minimize();
+            uint32_t dfa_id = add_or_reuse_dfa(cg, std::move(dfa));
+            segments.push_back({compiled_segment::DFA_MATCH, dfa_id});
+            break;
+        }
 
         case grammar_ast_node::RULE_REF:
             // Non-terminal: flush pending terminals, emit RULE_CALL
@@ -983,7 +1135,9 @@ static std::vector<bool> compute_reachable(
             case grammar_ast_node::REPETITION:
                 if (node.child) collect_refs(*node.child);
                 break;
-            default:
+            case grammar_ast_node::LITERAL:
+            case grammar_ast_node::CHAR_CLASS:
+            case grammar_ast_node::EXCLUSION:
                 break;
         }
     };
