@@ -7,6 +7,7 @@
 #include "common.h"
 #include "llama.h"
 #include "log.h"
+#include "crashhandler.h"
 
 #include <atomic>
 #include <clocale>
@@ -69,6 +70,7 @@ static server_http_context::handler_t ex_wrapper(server_http_context::handler_t 
 }
 
 int main(int argc, char ** argv) {
+    crashhandler_init();
     std::setlocale(LC_NUMERIC, "C");
 
     // own arguments required by this example
