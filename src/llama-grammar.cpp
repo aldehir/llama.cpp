@@ -14,6 +14,91 @@
 #include <stdexcept>
 
 #define MAX_REPETITION_THRESHOLD 2000
+
+//
+// grammar_thread_pool
+//
+
+grammar_thread_pool::grammar_thread_pool() {
+    workers.reserve(N_THREADS);
+    for (int i = 0; i < N_THREADS; i++) {
+        workers.emplace_back([this, i]() {
+            while (true) {
+                std::unique_lock<std::mutex> lock(mtx);
+                cv_work.wait(lock, [this, i]() {
+                    return stop || (i < n_workers);
+                });
+                if (stop) return;
+
+                size_t lo = work_lo[i];
+                size_t hi = work_hi[i];
+                auto fn = work_fn;
+
+                lock.unlock();
+
+                fn(lo, hi);
+
+                lock.lock();
+                n_active--;
+                if (n_active == 0) {
+                    cv_done.notify_one();
+                }
+                // Wait until the caller has consumed the result before accepting new work.
+                cv_work.wait(lock, [this, i]() {
+                    return stop || (i >= n_workers);
+                });
+            }
+        });
+    }
+}
+
+grammar_thread_pool::~grammar_thread_pool() {
+    {
+        std::lock_guard<std::mutex> lock(mtx);
+        stop = true;
+    }
+    cv_work.notify_all();
+    for (auto & w : workers) {
+        w.join();
+    }
+}
+
+void grammar_thread_pool::run(const std::function<void(size_t, size_t)> & fn, size_t n_items) {
+    constexpr size_t MIN_ITEMS_PER_THREAD = 32;
+
+    int nt = std::min(N_THREADS, std::max(1, (int)(n_items / MIN_ITEMS_PER_THREAD)));
+    if (nt <= 1) {
+        fn(0, n_items);
+        return;
+    }
+
+    size_t chunk = (n_items + nt - 1) / nt;
+
+    {
+        std::lock_guard<std::mutex> lock(mtx);
+        work_fn  = fn;
+        n_workers = 0;
+        for (int t = 0; t < nt; t++) {
+            size_t lo = t * chunk;
+            size_t hi = std::min(lo + chunk, n_items);
+            if (lo >= hi) break;
+            work_lo[t] = lo;
+            work_hi[t] = hi;
+            n_workers++;
+        }
+        n_active = n_workers;
+    }
+    cv_work.notify_all();
+
+    {
+        std::unique_lock<std::mutex> lock(mtx);
+        cv_done.wait(lock, [this]() { return n_active == 0; });
+        // Reset n_workers to release workers from their second wait
+        n_workers = 0;
+    }
+    cv_work.notify_all();
+}
+
 //
 // helpers
 //
@@ -683,6 +768,7 @@ struct llama_grammar * llama_grammar_init_impl(
         /* .trigger_buffer = */   "",
         /* .trigger_tokens   = */ {},
         /* .trigger_patterns    = */ {},
+        /* .pool = */             std::make_shared<grammar_thread_pool>(),
     };
 }
 
@@ -750,6 +836,7 @@ struct llama_grammar * llama_grammar_init_impl(
         /* .trigger_buffer = */   "",
         std::move(vec_trigger_tokens),
         std::move(vec_trigger_patterns),
+        /* .pool = */             std::make_shared<grammar_thread_pool>(),
     };
 }
 
@@ -772,6 +859,7 @@ struct llama_grammar * llama_grammar_clone_impl(const struct llama_grammar & gra
         grammar.trigger_buffer,
         grammar.trigger_tokens,
         grammar.trigger_patterns,
+        std::make_shared<grammar_thread_pool>(),
     };
 }
 
@@ -815,6 +903,29 @@ static bool grammar_simulate_token(
     return true;
 }
 
+// Simulate multiple tokens in parallel using the grammar's persistent thread pool.
+// Thread-safe because grammar_simulate_token reads grammar as const and copies
+// configs locally per call.
+static void grammar_simulate_tokens_parallel(
+        const struct llama_grammar & grammar,
+        const int32_t * tokens, size_t n_tokens,
+        std::vector<uint8_t> & rejected_out) {
+    rejected_out.resize(n_tokens);
+
+    if (!grammar.pool) {
+        for (size_t i = 0; i < n_tokens; i++) {
+            rejected_out[i] = !grammar_simulate_token(grammar, tokens[i]);
+        }
+        return;
+    }
+
+    grammar.pool->run([&grammar, tokens, &rejected_out](size_t lo, size_t hi) {
+        for (size_t i = lo; i < hi; i++) {
+            rejected_out[i] = !grammar_simulate_token(grammar, tokens[i]);
+        }
+    }, n_tokens);
+}
+
 void llama_grammar_apply_impl(const struct llama_grammar & grammar, llama_token_data_array * cur_p) {
     GGML_ASSERT(grammar.vocab != nullptr);
 
@@ -829,6 +940,9 @@ void llama_grammar_apply_impl(const struct llama_grammar & grammar, llama_token_
 
     if (!have_candidates) {
         // No precomputed candidates — fall back to full simulation
+        // Collect non-EOG tokens, simulate in parallel, apply results
+        std::vector<int32_t> sim_tokens;
+        std::vector<size_t>  sim_indices;
         for (size_t i = 0; i < cur_p->size; ++i) {
             const llama_token id = cur_p->data[i].id;
             if (grammar.vocab->is_eog(id)) {
@@ -837,8 +951,14 @@ void llama_grammar_apply_impl(const struct llama_grammar & grammar, llama_token_
                 }
                 continue;
             }
-            if (!grammar_simulate_token(grammar, id)) {
-                cur_p->data[i].logit = -INFINITY;
+            sim_tokens.push_back(id);
+            sim_indices.push_back(i);
+        }
+        std::vector<uint8_t> sim_rejected;
+        grammar_simulate_tokens_parallel(grammar, sim_tokens.data(), sim_tokens.size(), sim_rejected);
+        for (size_t j = 0; j < sim_tokens.size(); j++) {
+            if (sim_rejected[j]) {
+                cur_p->data[sim_indices[j]].logit = -INFINITY;
             }
         }
         return;
@@ -889,6 +1009,8 @@ void llama_grammar_apply_impl(const struct llama_grammar & grammar, llama_token_
 
     if (!any_config_matched) {
         // No config matched a DFA segment — simulate every token
+        std::vector<int32_t> sim_tokens;
+        std::vector<size_t>  sim_indices;
         for (size_t i = 0; i < cur_p->size; ++i) {
             const llama_token id = cur_p->data[i].id;
             if (grammar.vocab->is_eog(id)) {
@@ -897,8 +1019,14 @@ void llama_grammar_apply_impl(const struct llama_grammar & grammar, llama_token_
                 }
                 continue;
             }
-            if (!grammar_simulate_token(grammar, id)) {
-                cur_p->data[i].logit = -INFINITY;
+            sim_tokens.push_back(id);
+            sim_indices.push_back(i);
+        }
+        std::vector<uint8_t> sim_rejected;
+        grammar_simulate_tokens_parallel(grammar, sim_tokens.data(), sim_tokens.size(), sim_rejected);
+        for (size_t j = 0; j < sim_tokens.size(); j++) {
+            if (sim_rejected[j]) {
+                cur_p->data[sim_indices[j]].logit = -INFINITY;
             }
         }
         return;
@@ -956,6 +1084,9 @@ void llama_grammar_apply_impl(const struct llama_grammar & grammar, llama_token_
             }
         }
 
+        // Collect context-dependent tokens, simulate in parallel
+        std::vector<int32_t> sim_tokens;
+        std::vector<size_t>  sim_indices;
         for (size_t i = 0; i < cur_p->size; ++i) {
             const llama_token id = cur_p->data[i].id;
 
@@ -975,8 +1106,14 @@ void llama_grammar_apply_impl(const struct llama_grammar & grammar, llama_token_
                 continue; // guaranteed accept
             }
 
-            if (!grammar_simulate_token(grammar, id)) {
-                cur_p->data[i].logit = -INFINITY;
+            sim_tokens.push_back(id);
+            sim_indices.push_back(i);
+        }
+        std::vector<uint8_t> sim_rejected;
+        grammar_simulate_tokens_parallel(grammar, sim_tokens.data(), sim_tokens.size(), sim_rejected);
+        for (size_t j = 0; j < sim_tokens.size(); j++) {
+            if (sim_rejected[j]) {
+                cur_p->data[sim_indices[j]].logit = -INFINITY;
             }
         }
         return;
@@ -1006,10 +1143,12 @@ void llama_grammar_apply_impl(const struct llama_grammar & grammar, llama_token_
             }
         }
 
-        // Simulate context-dependent tokens
-        for (int32_t tok : context_ids) {
-            if (!grammar_simulate_token(grammar, tok)) {
-                cur_p->data[tok].logit = -INFINITY;
+        // Simulate context-dependent tokens in parallel
+        std::vector<uint8_t> sim_rejected;
+        grammar_simulate_tokens_parallel(grammar, context_ids.data(), context_ids.size(), sim_rejected);
+        for (size_t j = 0; j < context_ids.size(); j++) {
+            if (sim_rejected[j]) {
+                cur_p->data[context_ids[j]].logit = -INFINITY;
             }
         }
         return;
@@ -1017,6 +1156,8 @@ void llama_grammar_apply_impl(const struct llama_grammar & grammar, llama_token_
 
     // Sparse cur_p (filtered by prior sampler): iterate cur_p entries,
     // use binary search against the small sorted sets.
+    std::vector<int32_t> sim_tokens;
+    std::vector<size_t>  sim_indices;
     for (size_t i = 0; i < cur_p->size; ++i) {
         const llama_token id = cur_p->data[i].id;
 
@@ -1033,9 +1174,15 @@ void llama_grammar_apply_impl(const struct llama_grammar & grammar, llama_token_
         }
 
         if (std::binary_search(context_ids.begin(), context_ids.end(), (int32_t)id)) {
-            if (!grammar_simulate_token(grammar, id)) {
-                cur_p->data[i].logit = -INFINITY;
-            }
+            sim_tokens.push_back(id);
+            sim_indices.push_back(i);
+        }
+    }
+    std::vector<uint8_t> sim_rejected;
+    grammar_simulate_tokens_parallel(grammar, sim_tokens.data(), sim_tokens.size(), sim_rejected);
+    for (size_t j = 0; j < sim_tokens.size(); j++) {
+        if (sim_rejected[j]) {
+            cur_p->data[sim_indices[j]].logit = -INFINITY;
         }
     }
 }

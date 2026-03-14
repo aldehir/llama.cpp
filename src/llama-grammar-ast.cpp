@@ -559,7 +559,7 @@ void llama_grammar_ast_parser::inline_refs_in_node(ast_node_ptr & node) {
 
 void llama_grammar_ast_parser::inline_terminal_refs() {
     for (size_t i = 0; i < rules.size(); i++) {
-        if (rule_classes[i] == terminal_class::NON_TERMINAL) {
+        if (rule_classes[i] != terminal_class::PURELY_TERMINAL) {
             inline_refs_in_node(rules[i]);
         }
     }

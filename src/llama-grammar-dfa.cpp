@@ -1489,7 +1489,7 @@ void dfa_state_candidates::precompute(const byte_dfa & dfa, const vocab_byte_tri
             // Accept-heavy: store reject set (tokens not accepted and not context)
             state.accept_heavy = true;
             n_accept_heavy++;
-            state.token_set.reserve(total_vocab_tokens - n_accepted - n_context);
+            // Note: n_accepted and n_context can overlap, so avoid underflow
             for (uint32_t t = 0; t < total_vocab_tokens; t++) {
                 if (!(accepted_bits[s][t / 8] & (1 << (t % 8))) &&
                     !(context_bits[s][t / 8] & (1 << (t % 8)))) {

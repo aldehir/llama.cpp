@@ -1,18 +1,10 @@
 Build llama-grammar-test:
 
-cmake --build build -t llama-grammar-test
+cmake --build build-user-reldebug -t llama-grammar-test
 
-Test with bench string:
+Test with bench file:
 
-./build/bin/llama-grammar-test -g grammars/json.gbnf -m ./models/ggml-vocab-llama-bpe.gguf --bench-string '{"a": 1, "b": 2}' --bench-iters 1
-
-
-or:
-
-./grammar-test.sh
-
-This runs both
-
+./build-user-reldebug/bin/llama-grammar-test -g grammars/ini.gbnf -m ./models/ggml-vocab-llama-bpe.gguf --bench-file example2.ini --bench-iters 1 --log-disable
 
 Files of interest:
 

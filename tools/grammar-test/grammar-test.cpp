@@ -1,4 +1,5 @@
 #include "common.h"
+#include "crashhandler.h"
 #include "llama.h"
 
 // Internal headers for grammar access (same pattern as tests)
@@ -68,6 +69,7 @@ static void print_usage(const char * prog) {
     printf("  --validate                 Validate test strings against grammar\n");
     printf("  --bench                    Benchmark grammar pipeline stages\n");
     printf("  --bench-string STR         Benchmark apply/accept per token through a string\n");
+    printf("  --bench-file FILE          Like --bench-string but reads input from a file\n");
     printf("  --candidates               Dump candidate set analysis\n");
     printf("  --masking-report           Per-token accept/reject categorization\n");
     printf("  --graph                    Output graphviz dot graph of grammar\n\n");
@@ -979,7 +981,7 @@ static int mode_graph(const std::string & grammar_str, const char * grammar_root
         size_t n_states = dfa.transitions.size();
 
         printf("    subgraph cluster_dfa_%zu {\n", d);
-        printf("        label=<<B>DFA %zu</B> (%zu states)>;\n", d, n_states);
+        printf("        label=<<B>DFA %zu</B> (%zu states)>;\n", d, n_states - 1);
         printf("        style=\"rounded,dashed\"; color=\"#999999\";\n");
         printf("        node [shape=circle, width=0.35, fixedsize=true, fontsize=8];\n");
         printf("\n");
@@ -1034,6 +1036,7 @@ static int mode_graph(const std::string & grammar_str, const char * grammar_root
 // ============================================================
 
 int main(int argc, char ** argv) {
+    crashhandler_init();
     // Args
     const char * model_path = nullptr;
     const char * grammar_path = nullptr;
@@ -1068,6 +1071,11 @@ int main(int argc, char ** argv) {
             mode = MODE_BENCH_STRING;
             if (++i >= argc) { fprintf(stderr, "error: %s requires argument\n", arg.c_str()); return 1; }
             bench_string = argv[i];
+        } else if (arg == "--bench-file") {
+            mode = MODE_BENCH_STRING;
+            if (++i >= argc) { fprintf(stderr, "error: %s requires argument\n", arg.c_str()); return 1; }
+            bench_string = read_file(argv[i]);
+            if (bench_string.empty()) { fprintf(stderr, "error: bench file is empty or could not be read\n"); return 1; }
         } else if (arg == "--candidates") {
             mode = MODE_CANDIDATES;
         } else if (arg == "--masking-report") {

@@ -3,10 +3,14 @@
 #include "llama.h"
 #include "llama-grammar-dfa.h"
 
+#include <condition_variable>
+#include <functional>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <regex>
 #include <string>
+#include <thread>
 #include <vector>
 
 struct llama_vocab;
@@ -83,6 +87,38 @@ struct llama_grammar_trigger_pattern {
     std::regex  regex;
 };
 
+// Persistent thread pool for parallelizing grammar_simulate_token() calls.
+// Workers sleep on a condition variable between apply() calls — no thread
+// creation/destruction per token.
+struct grammar_thread_pool {
+    static constexpr int N_THREADS = 4;
+
+    grammar_thread_pool();
+    ~grammar_thread_pool();
+
+    // Run fn(i) for i in [0, n_items) across worker threads, blocking until done.
+    // Falls back to single-threaded for small n_items.
+    void run(const std::function<void(size_t, size_t)> & fn, size_t n_items);
+
+    grammar_thread_pool(const grammar_thread_pool &) = delete;
+    grammar_thread_pool & operator=(const grammar_thread_pool &) = delete;
+
+private:
+    std::vector<std::thread>    workers;
+    std::mutex                  mtx;
+    std::condition_variable     cv_work;   // workers wait on this
+    std::condition_variable     cv_done;   // caller waits on this
+
+    // Work descriptor — set by run(), read by workers
+    std::function<void(size_t, size_t)> work_fn;
+    size_t                      work_lo[N_THREADS] = {};
+    size_t                      work_hi[N_THREADS] = {};
+
+    int                         n_active  = 0;     // workers still running
+    int                         n_workers = 0;     // workers to wake
+    bool                        stop      = false;
+};
+
 struct llama_grammar {
     // note: allow null vocab for testing (not great)
     const llama_vocab * vocab;
@@ -105,6 +141,8 @@ struct llama_grammar {
                              trigger_patterns;         // Regular expressions that trigger a lazy grammar. Must be a full match of the entire generated
                                                        // string, and the grammar will be given the string from the first match group onwards.
 
+    // Thread pool for parallel grammar simulation (shared across clones)
+    std::shared_ptr<grammar_thread_pool> pool;
 };
 
 //
