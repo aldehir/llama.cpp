@@ -1019,9 +1019,15 @@ static void compile_node(
 
         case grammar_ast_node::REPETITION:
             if (node.child->is_purely_terminal()) {
-                // Terminal repetition: build NFA directly
-                append_terminal(cg, pending_nfa, has_pending, segments, ast_to_nfa(node));
-            } else {
+                // Terminal repetition: build NFA, check size
+                grammar_nfa rep_nfa = ast_to_nfa(node);
+                if (rep_nfa.states.size() <= MAX_PENDING_NFA_STATES) {
+                    append_terminal(cg, pending_nfa, has_pending, segments, std::move(rep_nfa));
+                    break;
+                }
+                // NFA too large: fall through to synthetic rule path
+            }
+            {
                 // Non-terminal repetition: can't merge into NFA
                 // Must create a synthetic rule for the repetition
                 flush_pending(cg, pending_nfa, has_pending, segments);
@@ -1087,9 +1093,15 @@ static void compile_node(
 
         case grammar_ast_node::ALTERNATION:
             if (node.is_purely_terminal()) {
-                // All-terminal alternation: merge into NFA
-                append_terminal(cg, pending_nfa, has_pending, segments, ast_to_nfa(node));
-            } else {
+                // Terminal alternation: build NFA, check size before merging
+                grammar_nfa alt_nfa = ast_to_nfa(node);
+                if (alt_nfa.states.size() <= MAX_PENDING_NFA_STATES) {
+                    append_terminal(cg, pending_nfa, has_pending, segments, std::move(alt_nfa));
+                    break;
+                }
+                // NFA too large: fall through to synthetic rule path
+            }
+            {
                 // Mixed alternation: flush pending, create synthetic rule
                 flush_pending(cg, pending_nfa, has_pending, segments);
 
