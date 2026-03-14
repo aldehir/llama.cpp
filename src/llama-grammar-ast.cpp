@@ -9,6 +9,7 @@
 
 #define MAX_REPETITION_THRESHOLD 2000
 #define MAX_INLINE_AST_NODES 50
+#define MAX_PENDING_NFA_STATES 128
 
 // ============================================================
 // AST node methods
@@ -955,11 +956,16 @@ static void flush_pending(
     pending_nfa = grammar_nfa();
 }
 
-// Append terminal NFA to pending
+// Append terminal NFA to pending, flushing first if it's getting too large
 static void append_terminal(
+        compiled_grammar & cg,
         grammar_nfa & pending_nfa,
         bool & has_pending,
+        std::vector<compiled_segment> & segments,
         grammar_nfa && nfa) {
+    if (has_pending && pending_nfa.states.size() > MAX_PENDING_NFA_STATES) {
+        flush_pending(cg, pending_nfa, has_pending, segments);
+    }
     if (!has_pending) {
         pending_nfa = std::move(nfa);
         has_pending = true;
@@ -977,7 +983,7 @@ static void compile_node(
     switch (node.type) {
         case grammar_ast_node::LITERAL:
         case grammar_ast_node::CHAR_CLASS:
-            append_terminal(pending_nfa, has_pending, ast_to_nfa(node));
+            append_terminal(cg, pending_nfa, has_pending, segments, ast_to_nfa(node));
             break;
 
         case grammar_ast_node::EXCLUSION: {
@@ -1014,7 +1020,7 @@ static void compile_node(
         case grammar_ast_node::REPETITION:
             if (node.child->is_purely_terminal()) {
                 // Terminal repetition: build NFA directly
-                append_terminal(pending_nfa, has_pending, ast_to_nfa(node));
+                append_terminal(cg, pending_nfa, has_pending, segments, ast_to_nfa(node));
             } else {
                 // Non-terminal repetition: can't merge into NFA
                 // Must create a synthetic rule for the repetition
@@ -1082,7 +1088,7 @@ static void compile_node(
         case grammar_ast_node::ALTERNATION:
             if (node.is_purely_terminal()) {
                 // All-terminal alternation: merge into NFA
-                append_terminal(pending_nfa, has_pending, ast_to_nfa(node));
+                append_terminal(cg, pending_nfa, has_pending, segments, ast_to_nfa(node));
             } else {
                 // Mixed alternation: flush pending, create synthetic rule
                 flush_pending(cg, pending_nfa, has_pending, segments);
