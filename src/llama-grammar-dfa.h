@@ -205,8 +205,10 @@ struct dfa_state_candidates {
     std::vector<dfa_state_token_set> states;
 
     // Precompute candidates for all states of a DFA using the vocab trie.
+    // follow_dfas: DFAs that can follow this DFA in the grammar (for context filtering).
     void precompute(const byte_dfa & dfa, const vocab_byte_trie & trie,
-                    uint32_t total_vocab_tokens);
+                    uint32_t total_vocab_tokens,
+                    const std::vector<const byte_dfa *> & follow_dfas);
 
 private:
     // Walk trie with multiple DFA states simultaneously.
@@ -214,11 +216,20 @@ private:
     // have reached this dfa_state at this trie depth.
     // accepted_bits[s]: tokens guaranteed accepted (fully within DFA or exact-accept)
     // context_bits[s]: tokens that span beyond a DFA accept (need simulation)
+    // follow_dfas: used to filter context tokens (empty = old conservative behavior)
     void walk_multi(const byte_dfa & dfa,
                     const vocab_trie_node & node,
                     const std::vector<std::pair<uint16_t, std::vector<uint16_t>>> & active_groups,
                     std::vector<std::vector<uint8_t>> & accepted_bits,
-                    std::vector<std::vector<uint8_t>> & context_bits);
+                    std::vector<std::vector<uint8_t>> & context_bits,
+                    const std::vector<const byte_dfa *> & follow_dfas);
+
+    // Walk trie from an accept point, using follow DFAs to prune context tokens.
+    // Only marks tokens as context where at least one follow DFA is alive.
+    void walk_context_with_follow(const std::vector<const byte_dfa *> & follow_dfas,
+                                  const vocab_trie_node & node,
+                                  const std::vector<uint16_t> & accept_origins,
+                                  std::vector<std::vector<uint8_t>> & context_bits);
 };
 
 // ============================================================
@@ -232,6 +243,10 @@ struct compiled_grammar {
 
     // Per-DFA-state precomputed candidate token sets
     std::vector<dfa_state_candidates> dfa_candidates;
+
+    // Follow DFA sets: dfa_follow_dfas[dfa_id] = sorted list of follow DFA IDs.
+    // Computed by compute_follow_sets() during precomputation.
+    std::vector<std::vector<uint32_t>> dfa_follow_dfas;
 
     // Compile from parsed grammar rules (legacy flat format)
     static compiled_grammar compile(
@@ -255,6 +270,10 @@ struct compiled_grammar {
     bool any_config_complete(const std::vector<parse_config> & configs) const;
 
 private:
+    // Compute follow DFA sets for all DFAs in the grammar.
+    // Uses FIRST/FOLLOW set computation adapted for compiled grammar segments.
+    void compute_follow_sets();
+
     // Expand a config to reach a DFA_MATCH segment (or mark as complete)
     // Returns all reachable configs after resolving RULE_CALLs and rule completions
     void advance_to_terminal(

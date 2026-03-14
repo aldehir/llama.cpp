@@ -1031,15 +1031,146 @@ compiled_grammar compiled_grammar::compile(
     return cg;
 }
 
+void compiled_grammar::compute_follow_sets() {
+    const size_t n_rules = rules.size();
+    const size_t n_dfas = dfas.size();
+
+    // Step 1: nullable[rule_id] — true if any alternate is empty or all segments are nullable RULE_CALLs
+    std::vector<bool> nullable(n_rules, false);
+    for (bool changed = true; changed; ) {
+        changed = false;
+        for (size_t r = 0; r < n_rules; r++) {
+            if (nullable[r]) continue;
+            for (const auto & alt : rules[r].alternates) {
+                bool alt_nullable = true;
+                for (const auto & seg : alt) {
+                    if (seg.type == compiled_segment::DFA_MATCH || !nullable[seg.id]) {
+                        alt_nullable = false;
+                        break;
+                    }
+                }
+                if (alt_nullable) {
+                    nullable[r] = true;
+                    changed = true;
+                    break;
+                }
+            }
+        }
+    }
+
+    // Step 2: first_dfas[rule_id] — DFA IDs reachable from rule start
+    std::vector<std::set<uint32_t>> first_dfas_set(n_rules);
+    for (bool changed = true; changed; ) {
+        changed = false;
+        for (size_t r = 0; r < n_rules; r++) {
+            size_t old_size = first_dfas_set[r].size();
+            for (const auto & alt : rules[r].alternates) {
+                for (const auto & seg : alt) {
+                    if (seg.type == compiled_segment::DFA_MATCH) {
+                        first_dfas_set[r].insert(seg.id);
+                        break;
+                    }
+                    // RULE_CALL: add first_dfas of called rule
+                    first_dfas_set[r].insert(first_dfas_set[seg.id].begin(),
+                                             first_dfas_set[seg.id].end());
+                    if (!nullable[seg.id]) break;
+                }
+            }
+            if (first_dfas_set[r].size() != old_size) {
+                changed = true;
+            }
+        }
+    }
+
+    // Step 3 & 4: follow_of_rule[rule_id] and dfa_follows[dfa_id]
+    // For each segment, collect what can follow it.
+    std::vector<std::set<uint32_t>> follow_of_rule(n_rules);
+    std::vector<std::set<uint32_t>> dfa_follows_set(n_dfas);
+
+    // Helper: collect DFA IDs following position [from_idx, end) in an alternate.
+    // Returns true if end of alternate is reachable (all remaining segments nullable).
+    auto collect_following = [&](const std::vector<compiled_segment> & alt, size_t from_idx,
+                                 std::set<uint32_t> & target) -> bool {
+        for (size_t i = from_idx; i < alt.size(); i++) {
+            if (alt[i].type == compiled_segment::DFA_MATCH) {
+                target.insert(alt[i].id);
+                return false;
+            }
+            // RULE_CALL: add first_dfas of called rule
+            target.insert(first_dfas_set[alt[i].id].begin(),
+                          first_dfas_set[alt[i].id].end());
+            if (!nullable[alt[i].id]) return false;
+        }
+        return true;
+    };
+
+    for (bool changed = true; changed; ) {
+        changed = false;
+        for (size_t r = 0; r < n_rules; r++) {
+            for (const auto & alt : rules[r].alternates) {
+                for (size_t s = 0; s < alt.size(); s++) {
+                    std::set<uint32_t> & target =
+                        (alt[s].type == compiled_segment::DFA_MATCH)
+                            ? dfa_follows_set[alt[s].id]
+                            : follow_of_rule[alt[s].id];
+                    size_t old_size = target.size();
+                    bool reaches_end = collect_following(alt, s + 1, target);
+                    if (reaches_end) {
+                        target.insert(follow_of_rule[r].begin(), follow_of_rule[r].end());
+                    }
+                    if (target.size() != old_size) {
+                        changed = true;
+                    }
+                }
+            }
+        }
+    }
+
+    // Convert to sorted vectors
+    dfa_follow_dfas.resize(n_dfas);
+    for (size_t d = 0; d < n_dfas; d++) {
+        dfa_follow_dfas[d].assign(dfa_follows_set[d].begin(), dfa_follows_set[d].end());
+    }
+
+    LLAMA_LOG_DEBUG("%s: computed follow sets for %zu DFAs across %zu rules\n",
+                    __func__, n_dfas, n_rules);
+    for (size_t d = 0; d < n_dfas; d++) {
+        if (!dfa_follow_dfas[d].empty()) {
+            LLAMA_LOG_DEBUG("%s:   DFA %zu: %zu follow DFAs\n",
+                            __func__, d, dfa_follow_dfas[d].size());
+        }
+    }
+}
+
 void compiled_grammar::precompute_token_candidates(const vocab_byte_trie & trie, uint32_t total_vocab_tokens) {
     LLAMA_LOG_INFO("%s: precomputing token candidates for %zu DFAs (vocab size = %u)\n",
                    __func__, dfas.size(), total_vocab_tokens);
 
     auto t_start = std::chrono::steady_clock::now();
 
+    // Compute follow sets before the per-DFA loop
+    compute_follow_sets();
+
     dfa_candidates.resize(dfas.size());
     for (size_t i = 0; i < dfas.size(); i++) {
-        dfa_candidates[i].precompute(dfas[i], trie, total_vocab_tokens);
+        // Build follow DFA pointer list, filtering out nullable follow DFAs
+        std::vector<const byte_dfa *> follow_dfa_ptrs;
+        bool has_nullable_follow = false;
+        for (uint32_t fid : dfa_follow_dfas[i]) {
+            if (dfas[fid].accept[dfas[fid].start_state]) {
+                has_nullable_follow = true;
+                break;
+            }
+        }
+        if (!has_nullable_follow) {
+            follow_dfa_ptrs.reserve(dfa_follow_dfas[i].size());
+            for (uint32_t fid : dfa_follow_dfas[i]) {
+                follow_dfa_ptrs.push_back(&dfas[fid]);
+            }
+        }
+        // If has_nullable_follow or empty follow set, follow_dfa_ptrs stays empty → old behavior
+
+        dfa_candidates[i].precompute(dfas[i], trie, total_vocab_tokens, follow_dfa_ptrs);
     }
 
     auto t_end = std::chrono::steady_clock::now();
@@ -1344,12 +1475,78 @@ static void set_bits_for_tokens(std::vector<uint8_t> & bits, const std::vector<i
     }
 }
 
+// Recursive helper for walk_context_with_follow: walk the trie with follow DFA
+// states, marking tokens as context only where at least one follow DFA is alive.
+static void walk_context_follow_recursive(
+        const std::vector<const byte_dfa *> & follow_dfas,
+        const vocab_trie_node & node,
+        const std::vector<uint16_t> & follow_states,
+        const std::vector<uint16_t> & accept_origins,
+        std::vector<std::vector<uint8_t>> & context_bits) {
+    // Mark tokens at this node as context (we only reach here if some follow DFA is alive)
+    if (!node.tokens.empty()) {
+        for (uint16_t orig : accept_origins) {
+            set_bits_for_tokens(context_bits[orig], node.tokens);
+        }
+    }
+
+    for (int b = 0; b < 256; b++) {
+        if (!node.children[b]) continue;
+
+        // Advance all follow DFA states by byte b
+        std::vector<uint16_t> next_states(follow_dfas.size());
+        bool any_alive = false;
+        for (size_t d = 0; d < follow_dfas.size(); d++) {
+            next_states[d] = follow_dfas[d]->transitions[follow_states[d]][b];
+            if (next_states[d] != 0) {
+                any_alive = true;
+            }
+        }
+        if (!any_alive) continue;  // ALL follow DFAs dead — prune subtree
+
+        walk_context_follow_recursive(follow_dfas, *node.children[b], next_states,
+                                      accept_origins, context_bits);
+    }
+}
+
+void dfa_state_candidates::walk_context_with_follow(
+        const std::vector<const byte_dfa *> & follow_dfas,
+        const vocab_trie_node & node,
+        const std::vector<uint16_t> & accept_origins,
+        std::vector<std::vector<uint8_t>> & context_bits) {
+    // Initialize follow DFA states at their start states
+    std::vector<uint16_t> initial_states(follow_dfas.size());
+    for (size_t d = 0; d < follow_dfas.size(); d++) {
+        initial_states[d] = follow_dfas[d]->start_state;
+    }
+
+    // Walk from children of the accept node (the accept byte was already consumed)
+    for (int cb = 0; cb < 256; cb++) {
+        if (!node.children[cb]) continue;
+
+        // Advance all follow DFA states by byte cb
+        std::vector<uint16_t> next_states(follow_dfas.size());
+        bool any_alive = false;
+        for (size_t d = 0; d < follow_dfas.size(); d++) {
+            next_states[d] = follow_dfas[d]->transitions[initial_states[d]][cb];
+            if (next_states[d] != 0) {
+                any_alive = true;
+            }
+        }
+        if (!any_alive) continue;  // ALL follow DFAs dead — skip subtree
+
+        walk_context_follow_recursive(follow_dfas, *node.children[cb], next_states,
+                                      accept_origins, context_bits);
+    }
+}
+
 void dfa_state_candidates::walk_multi(
         const byte_dfa & dfa,
         const vocab_trie_node & node,
         const std::vector<std::pair<uint16_t, std::vector<uint16_t>>> & active_groups,
         std::vector<std::vector<uint8_t>> & accepted_bits,
-        std::vector<std::vector<uint8_t>> & context_bits) {
+        std::vector<std::vector<uint8_t>> & context_bits,
+        const std::vector<const byte_dfa *> & follow_dfas) {
 
     // Tokens terminating at this trie node: guaranteed accepted.
     // The DFA is in a non-dead state and the token is fully consumed
@@ -1408,12 +1605,19 @@ void dfa_state_candidates::walk_multi(
             // Tokens deeper in the subtree: DFA accepts mid-token, remaining
             // bytes must be processed by subsequent grammar segments.
             // These are context-dependent and need simulation.
-            for (int cb = 0; cb < 256; cb++) {
-                if (!child.children[cb]) continue;
-                for (uint16_t orig : accept_origins) {
-                    set_bits_for_tokens(context_bits[orig],
-                                        child.children[cb]->subtree_tokens);
+            if (follow_dfas.empty()) {
+                // No follow info — conservative fallback (mark all as context)
+                for (int cb = 0; cb < 256; cb++) {
+                    if (!child.children[cb]) continue;
+                    for (uint16_t orig : accept_origins) {
+                        set_bits_for_tokens(context_bits[orig],
+                                            child.children[cb]->subtree_tokens);
+                    }
                 }
+            } else {
+                // Use follow DFAs to filter: only mark tokens where at least
+                // one follow DFA can process the remaining bytes.
+                walk_context_with_follow(follow_dfas, child, accept_origins, context_bits);
             }
         }
 
@@ -1425,13 +1629,14 @@ void dfa_state_candidates::walk_multi(
             for (auto & kv : next_groups) {
                 merged.emplace_back(kv.first, std::move(kv.second));
             }
-            walk_multi(dfa, *node.children[b], merged, accepted_bits, context_bits);
+            walk_multi(dfa, *node.children[b], merged, accepted_bits, context_bits, follow_dfas);
         }
     }
 }
 
 void dfa_state_candidates::precompute(const byte_dfa & dfa, const vocab_byte_trie & trie,
-                                       uint32_t total_vocab_tokens) {
+                                       uint32_t total_vocab_tokens,
+                                       const std::vector<const byte_dfa *> & follow_dfas) {
     size_t n_states = dfa.transitions.size();
     states.resize(n_states);
 
@@ -1455,7 +1660,7 @@ void dfa_state_candidates::precompute(const byte_dfa & dfa, const vocab_byte_tri
     }
 
     // Single combined walk processes all DFA states together
-    walk_multi(dfa, trie.root, initial_groups, accepted_bits, context_bits);
+    walk_multi(dfa, trie.root, initial_groups, accepted_bits, context_bits, follow_dfas);
 
     // Convert bitsets to adaptive sets
     size_t n_accept_heavy = 0;
