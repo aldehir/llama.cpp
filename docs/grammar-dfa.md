@@ -8,7 +8,7 @@ It uses a byte-level DFA approach that eliminates partial UTF-8 handling entirel
 The engine has four layers:
 
 1. **Parse-time:** Grammar text is parsed into an AST, then optimized (terminal
-   inlining with size limits, Kleene detection, unreachable rule elimination).
+   inlining, Kleene detection, unreachable rule elimination).
 2. **Compile-time:** The AST is compiled to a `compiled_grammar`: terminal
    subtrees become minimized byte-level DFAs, rule references become
    `RULE_CALL` segments. DFAs are canonicalized and deduplicated.
@@ -31,7 +31,6 @@ Grammar text (GBNF)
   → Optimization (ast_parser.optimize):
       1. Classify rules: PURELY_TERMINAL / TRANSITIVELY_TERMINAL / NON_TERMINAL
       2. Inline terminal refs: replace RULE_REFs to terminal rules with their body
-         (subject to MAX_INLINE_AST_NODES size limit — see Inlining Size Limit)
       3. Flatten nested SEQUENCE/ALTERNATION nodes
   → Compiler (compile_grammar_from_ast):
       1. Compute reachable rules from start rule (BFS)
@@ -86,20 +85,10 @@ Rules are classified to enable inlining:
 - **NON_TERMINAL:** References non-terminal rules.
 
 Purely terminal and transitively terminal rules are inlined at their call sites,
-replacing the `RULE_REF` with a copy of the rule body, subject to the inlining
-size limit (see below). This reduces the number of compiled rule calls and
-enables larger DFA segments.
-
-#### Inlining Size Limit
-
-To prevent DFA state explosion from cascading inlining, the optimizer enforces
-a size limit (`MAX_INLINE_AST_NODES = 50`). Before inlining a terminal rule
-reference, the optimizer clones the target rule's AST, recursively inlines its
-own references, and measures the final node count. If the fully-expanded AST
-exceeds the limit, the `RULE_REF` is kept as-is and compiled as a `RULE_CALL`
-segment instead. This ensures that large terminal rules (e.g. JSON schema
-rules with many inlined fields) remain as separate compiled rules with their
-own DFA segments, rather than being absorbed into a single monolithic DFA.
+replacing the `RULE_REF` with a copy of the rule body. This reduces the number
+of compiled rule calls and enables larger DFA segments. Inlining is
+unconditional — DFA size is bounded at the compile level by NFA size limits
+(see below), not at the AST level.
 
 #### NFA Size Limits
 
