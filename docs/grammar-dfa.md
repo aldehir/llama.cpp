@@ -20,6 +20,10 @@ The engine has four layers:
 4. **Runtime:** Precomputed candidate sets narrow the token space to a small
    subset that must be simulated. Non-candidates are rejected in O(1).
 
+The result of layers 1-3 is cached in a process-global LRU cache (keyed by
+grammar string, root rule, and vocabulary). Repeated use of the same grammar
+(e.g. across server requests or sampler resets) skips all compilation.
+
 ## Architecture
 
 ### Compilation Pipeline
@@ -107,9 +111,9 @@ The compiler bounds DFA size through two mechanisms in `compile_node`:
    the combinatorial DFA state explosion that occurs when subset construction
    tracks which of many overlapping branches are active.
 
-Together with the inlining size limit, these ensure that individual DFAs
-typically stay under 50-100 states, keeping both NFA→DFA compilation and
-token candidate precomputation fast.
+Together, these mechanisms ensure that individual DFAs typically stay under
+50-100 states, keeping both NFA→DFA compilation and token candidate
+precomputation fast.
 
 #### Unreachable Rule Elimination
 
@@ -309,6 +313,21 @@ synchronization is needed beyond the atomic task counter.
 Currently uses 4 worker threads (falls back to sequential for < 4 DFAs).
 The work-stealing pattern naturally load-balances: larger DFAs take longer
 but threads simply grab the next available DFA index.
+
+### Grammar Cache
+
+The entire compilation pipeline (parse → optimize → compile → precompute) is
+cached in a process-global LRU cache keyed by `(grammar_str, grammar_root,
+vocab pointer)`. On cache hit, `llama_grammar_init_impl` skips all compilation
+and returns a new grammar instance sharing the cached `compiled_grammar` via
+`shared_ptr`. Only fresh runtime state (`init_configs`, trigger patterns, thread
+pool) is created.
+
+- **Capacity:** 5 entries (LRU eviction).
+- **Thread-safe:** Protected by `std::mutex`.
+- **Lookup:** Hash of `grammar_str` for fast reject, then full string comparison.
+- **Impact:** Eliminates 200-600ms of recompilation when the same grammar is
+  used across multiple requests (server) or on sampler reset.
 
 ### Intersection Across Configs
 

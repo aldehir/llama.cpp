@@ -1669,7 +1669,7 @@ void common_peg_arena::build_grammar(const common_grammar_builder & builder, boo
                     }
                     s += gbnf_format_literal(delim);
                 }
-                return "(!(" + s + ") .)*";
+                return "!(" + s + ")*";
             } else if constexpr (std::is_same_v<T, common_peg_schema_parser>) {
                 if (p.schema) {
                     if (p.raw && p.schema->contains("type") && p.schema->at("type").is_string() && p.schema->at("type") == "string") {

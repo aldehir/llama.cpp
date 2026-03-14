@@ -91,7 +91,7 @@ struct llama_grammar_trigger_pattern {
 // Workers sleep on a condition variable between apply() calls — no thread
 // creation/destruction per token.
 struct grammar_thread_pool {
-    static constexpr int N_THREADS = 4;
+    static constexpr int N_THREADS = 8;
 
     grammar_thread_pool();
     ~grammar_thread_pool();
