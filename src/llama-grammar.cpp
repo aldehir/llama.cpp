@@ -14,6 +14,8 @@
 #include <memory>
 #include <stdexcept>
 
+// #define LLAMA_GRAMMAR_TRACE_CONFIGS
+
 #define MAX_REPETITION_THRESHOLD 2000
 
 //
@@ -1018,6 +1020,7 @@ void llama_grammar_apply_impl(const struct llama_grammar & grammar, llama_token_
 
     bool allow_eog = grammar.compiled->any_config_complete(grammar.configs);
 
+#ifdef LLAMA_GRAMMAR_TRACE_CONFIGS
     fprintf(stderr, "GRAMMAR_APPLY: %zu configs, allow_eog=%d:\n",
                     grammar.configs.size(), (int)allow_eog);
     for (size_t ci = 0; ci < grammar.configs.size(); ci++) {
@@ -1050,6 +1053,7 @@ void llama_grammar_apply_impl(const struct llama_grammar & grammar, llama_token_
                         is_accept_heavy ? "accept-heavy" : "reject-heavy",
                         token_set_sz, context_set_sz);
     }
+#endif
 
     const uint32_t n_vocab = grammar.vocab->n_tokens();
     const bool have_candidates = !grammar.compiled->dfa_candidates.empty();
@@ -1352,6 +1356,7 @@ void llama_grammar_accept_impl(struct llama_grammar & grammar, llama_token token
         GGML_ABORT("fatal error");
     }
 
+#ifdef LLAMA_GRAMMAR_TRACE_CONFIGS
     fprintf(stderr, "GRAMMAR_ACCEPT: token %d (`%s`), %zu configs before:\n",
                     token, piece.c_str(), grammar.configs.size());
     for (size_t ci = 0; ci < grammar.configs.size(); ci++) {
@@ -1370,9 +1375,11 @@ void llama_grammar_accept_impl(struct llama_grammar & grammar, llama_token token
                         (uint32_t)cfg.current.segment_idx, seg_type_str, seg_id,
                         (uint32_t)cfg.current.dfa_state, cfg.call_stack.size());
     }
+#endif
 
     llama_grammar_accept_str(grammar, piece);
 
+#ifdef LLAMA_GRAMMAR_TRACE_CONFIGS
     fprintf(stderr, "GRAMMAR_ACCEPT: after accept, %zu configs:\n", grammar.configs.size());
     for (size_t ci = 0; ci < grammar.configs.size(); ci++) {
         const auto & cfg = grammar.configs[ci];
@@ -1390,6 +1397,7 @@ void llama_grammar_accept_impl(struct llama_grammar & grammar, llama_token token
                         (uint32_t)cfg.current.segment_idx, seg_type_str, seg_id,
                         (uint32_t)cfg.current.dfa_state, cfg.call_stack.size());
     }
+#endif
 }
 
 void llama_grammar_accept_str(struct llama_grammar & grammar, const std::string & piece) {

@@ -1401,18 +1401,32 @@ void compiled_grammar::advance_to_terminal(
 
     const auto & called_rule = rules[seg.id];
 
+    // Tail-call optimization: if this RULE_CALL is the last segment in the
+    // current alternate AND it calls the same rule we're already in, just
+    // loop back to the start without pushing a call frame.  This keeps the
+    // stack depth constant for Kleene star repetitions (body_rule ::=
+    // child body_rule | ε), preventing O(N) config explosion.
+    bool is_tail_self_call = (seg.id == cfg.current.rule_id) &&
+                             (cfg.current.segment_idx + 1 >= (uint8_t) alt.size());
+
     // For each alternate of the called rule, create a config
     for (size_t alt_idx = 0; alt_idx < called_rule.alternates.size(); alt_idx++) {
         parse_config new_cfg;
-        new_cfg.call_stack = cfg.call_stack;
 
-        // Push return frame: resume at the NEXT segment after this RULE_CALL
-        grammar_call_frame frame;
-        frame.rule_id       = cfg.current.rule_id;
-        frame.alternate_idx = cfg.current.alternate_idx;
-        frame.segment_idx   = cfg.current.segment_idx + 1;
-        frame.dfa_state     = 0;  // will be set when we reach a DFA segment
-        new_cfg.call_stack.push_back(frame);
+        if (is_tail_self_call) {
+            // Tail call — reuse current stack, just reset position
+            new_cfg.call_stack = cfg.call_stack;
+        } else {
+            // Normal call — push return frame
+            new_cfg.call_stack = cfg.call_stack;
+
+            grammar_call_frame frame;
+            frame.rule_id       = cfg.current.rule_id;
+            frame.alternate_idx = cfg.current.alternate_idx;
+            frame.segment_idx   = cfg.current.segment_idx + 1;
+            frame.dfa_state     = 0;  // will be set when we reach a DFA segment
+            new_cfg.call_stack.push_back(frame);
+        }
 
         new_cfg.current.rule_id       = seg.id;
         new_cfg.current.alternate_idx = (uint8_t) alt_idx;
