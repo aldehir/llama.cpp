@@ -10,10 +10,73 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <list>
 #include <memory>
 #include <stdexcept>
 
 #define MAX_REPETITION_THRESHOLD 2000
+
+//
+// grammar_cache — LRU cache for compiled grammars
+//
+// Caches the compiled_grammar (DFAs + precomputed token candidates) keyed by
+// (grammar_str, grammar_root, vocab pointer).  On cache hit the expensive
+// parse → optimize → compile → precompute pipeline is skipped entirely.
+//
+
+namespace {
+
+struct grammar_cache {
+    static constexpr size_t MAX_ENTRIES = 5;
+
+    struct entry {
+        size_t                            hash;         // std::hash of grammar_str (fast reject)
+        std::string                       grammar_str;
+        std::string                       grammar_root;
+        const llama_vocab               * vocab;
+        std::shared_ptr<compiled_grammar> compiled;
+    };
+
+    std::mutex         mtx;
+    std::list<entry>   entries;   // front = most recently used
+
+    // Returns cached compiled_grammar on hit, nullptr on miss.
+    std::shared_ptr<compiled_grammar> get(
+            const std::string     & str,
+            const std::string     & root,
+            const llama_vocab     * vocab) {
+        std::lock_guard<std::mutex> lock(mtx);
+        const size_t h = std::hash<std::string>{}(str);
+        for (auto it = entries.begin(); it != entries.end(); ++it) {
+            if (it->hash == h && it->vocab == vocab
+                    && it->grammar_root == root
+                    && it->grammar_str  == str) {
+                auto result = it->compiled;
+                entries.splice(entries.begin(), entries, it);  // move to front
+                return result;
+            }
+        }
+        return nullptr;
+    }
+
+    void put(const std::string                     & str,
+             const std::string                     & root,
+             const llama_vocab                     * vocab,
+             std::shared_ptr<compiled_grammar>       cg) {
+        std::lock_guard<std::mutex> lock(mtx);
+        if (entries.size() >= MAX_ENTRIES) {
+            entries.pop_back();  // evict LRU
+        }
+        entries.push_front({
+            std::hash<std::string>{}(str),
+            str, root, vocab, std::move(cg),
+        });
+    }
+};
+
+grammar_cache g_grammar_cache;
+
+} // namespace
 
 //
 // grammar_thread_pool
@@ -781,24 +844,50 @@ struct llama_grammar * llama_grammar_init_impl(
                             size_t num_trigger_patterns,
                const llama_token * trigger_tokens,
                             size_t num_trigger_tokens) {
-    llama_grammar_ast_parser ast_parser;
+    const std::string str_grammar(grammar_str);
+    const std::string str_root(grammar_root);
 
-    if (!ast_parser.parse(grammar_str) || ast_parser.rules.empty()) {
-        fprintf(stderr, "%s: failed to parse grammar\n", __func__);
-        return nullptr;
+    // Check the grammar cache first
+    auto cg = g_grammar_cache.get(str_grammar, str_root, vocab);
+
+    if (cg) {
+        LLAMA_LOG_INFO("%s: grammar cache hit\n", __func__);
+    } else {
+        // Cache miss — full parse → optimize → compile → precompute pipeline
+        llama_grammar_ast_parser ast_parser;
+
+        if (!ast_parser.parse(grammar_str) || ast_parser.rules.empty()) {
+            fprintf(stderr, "%s: failed to parse grammar\n", __func__);
+            return nullptr;
+        }
+
+        if (ast_parser.symbol_ids.find("root") == ast_parser.symbol_ids.end()) {
+            fprintf(stderr, "%s: grammar does not contain a 'root' symbol\n", __func__);
+            return nullptr;
+        }
+
+        const uint32_t start_rule_index = ast_parser.symbol_ids.at(grammar_root);
+
+        ast_parser.optimize();
+
+        cg = std::make_shared<compiled_grammar>(
+            compile_grammar_from_ast(ast_parser.rules, start_rule_index));
+
+        // Precompute token candidate sets if vocab is available
+        if (vocab) {
+            auto trie = vocab->get_grammar_trie();
+
+            auto t_precomp_start = std::chrono::steady_clock::now();
+            cg->precompute_token_candidates(*trie, vocab->n_tokens());
+            auto t_precomp_end = std::chrono::steady_clock::now();
+            double precomp_ms = std::chrono::duration<double, std::milli>(t_precomp_end - t_precomp_start).count();
+            LLAMA_LOG_INFO("%s: grammar DFA precomputation took %.2f ms\n", __func__, precomp_ms);
+        }
+
+        // Insert into cache
+        g_grammar_cache.put(str_grammar, str_root, vocab, cg);
     }
 
-    if (ast_parser.symbol_ids.find("root") == ast_parser.symbol_ids.end()) {
-        fprintf(stderr, "%s: grammar does not contain a 'root' symbol\n", __func__);
-        return nullptr;
-    }
-
-    const uint32_t start_rule_index = ast_parser.symbol_ids.at(grammar_root);
-
-    ast_parser.optimize();
-
-    auto cg = std::make_shared<compiled_grammar>(
-        compile_grammar_from_ast(ast_parser.rules, start_rule_index));
     auto dfa_configs = cg->init_configs();
 
     std::vector<llama_token>    vec_trigger_tokens;
@@ -814,16 +903,10 @@ struct llama_grammar * llama_grammar_init_impl(
         trigger.regex = std::regex(trigger.pattern);
     }
 
-    // Get cached vocab trie and precompute candidate sets if vocab is available
+    // Get vocab trie (already cached by vocab)
     std::shared_ptr<vocab_byte_trie> trie;
     if (vocab) {
         trie = vocab->get_grammar_trie();
-
-        auto t_precomp_start = std::chrono::steady_clock::now();
-        cg->precompute_token_candidates(*trie, vocab->n_tokens());
-        auto t_precomp_end = std::chrono::steady_clock::now();
-        double precomp_ms = std::chrono::duration<double, std::milli>(t_precomp_end - t_precomp_start).count();
-        LLAMA_LOG_INFO("%s: grammar DFA precomputation took %.2f ms\n", __func__, precomp_ms);
     }
 
     return new llama_grammar {
@@ -934,6 +1017,39 @@ void llama_grammar_apply_impl(const struct llama_grammar & grammar, llama_token_
     }
 
     bool allow_eog = grammar.compiled->any_config_complete(grammar.configs);
+
+    fprintf(stderr, "GRAMMAR_APPLY: %zu configs, allow_eog=%d:\n",
+                    grammar.configs.size(), (int)allow_eog);
+    for (size_t ci = 0; ci < grammar.configs.size(); ci++) {
+        const auto & cfg = grammar.configs[ci];
+        const auto & rule = grammar.compiled->rules[cfg.current.rule_id];
+        const auto & alt = rule.alternates[cfg.current.alternate_idx];
+        const char * seg_type_str = "COMPLETE";
+        uint32_t seg_id = 0;
+        bool is_accept_heavy = false;
+        size_t token_set_sz = 0, context_set_sz = 0;
+        if (cfg.current.segment_idx < alt.size()) {
+            const auto & seg = alt[cfg.current.segment_idx];
+            seg_type_str = seg.type == compiled_segment::DFA_MATCH ? "DFA" : "RULE_CALL";
+            seg_id = seg.id;
+            if (seg.type == compiled_segment::DFA_MATCH &&
+                seg.id < grammar.compiled->dfa_candidates.size()) {
+                const auto & sc = grammar.compiled->dfa_candidates[seg.id];
+                if (cfg.current.dfa_state < sc.states.size()) {
+                    const auto & ts = sc.states[cfg.current.dfa_state];
+                    is_accept_heavy = ts.accept_heavy;
+                    token_set_sz = ts.token_set.size();
+                    context_set_sz = ts.context_set.size();
+                }
+            }
+        }
+        fprintf(stderr, "  config[%zu]: rule=%u alt=%u seg=%u(%s id=%u) dfa_state=%u stack=%zu | %s token_set=%zu context_set=%zu\n",
+                        ci, cfg.current.rule_id, (uint32_t)cfg.current.alternate_idx,
+                        (uint32_t)cfg.current.segment_idx, seg_type_str, seg_id,
+                        (uint32_t)cfg.current.dfa_state, cfg.call_stack.size(),
+                        is_accept_heavy ? "accept-heavy" : "reject-heavy",
+                        token_set_sz, context_set_sz);
+    }
 
     const uint32_t n_vocab = grammar.vocab->n_tokens();
     const bool have_candidates = !grammar.compiled->dfa_candidates.empty();
@@ -1236,7 +1352,44 @@ void llama_grammar_accept_impl(struct llama_grammar & grammar, llama_token token
         GGML_ABORT("fatal error");
     }
 
+    fprintf(stderr, "GRAMMAR_ACCEPT: token %d (`%s`), %zu configs before:\n",
+                    token, piece.c_str(), grammar.configs.size());
+    for (size_t ci = 0; ci < grammar.configs.size(); ci++) {
+        const auto & cfg = grammar.configs[ci];
+        const auto & rule = grammar.compiled->rules[cfg.current.rule_id];
+        const auto & alt = rule.alternates[cfg.current.alternate_idx];
+        const char * seg_type_str = "COMPLETE";
+        uint32_t seg_id = 0;
+        if (cfg.current.segment_idx < alt.size()) {
+            const auto & seg = alt[cfg.current.segment_idx];
+            seg_type_str = seg.type == compiled_segment::DFA_MATCH ? "DFA" : "RULE_CALL";
+            seg_id = seg.id;
+        }
+        fprintf(stderr, "  config[%zu]: rule=%u alt=%u seg=%u(%s id=%u) dfa_state=%u stack_depth=%zu\n",
+                        ci, cfg.current.rule_id, (uint32_t)cfg.current.alternate_idx,
+                        (uint32_t)cfg.current.segment_idx, seg_type_str, seg_id,
+                        (uint32_t)cfg.current.dfa_state, cfg.call_stack.size());
+    }
+
     llama_grammar_accept_str(grammar, piece);
+
+    fprintf(stderr, "GRAMMAR_ACCEPT: after accept, %zu configs:\n", grammar.configs.size());
+    for (size_t ci = 0; ci < grammar.configs.size(); ci++) {
+        const auto & cfg = grammar.configs[ci];
+        const auto & rule = grammar.compiled->rules[cfg.current.rule_id];
+        const auto & alt = rule.alternates[cfg.current.alternate_idx];
+        const char * seg_type_str = "COMPLETE";
+        uint32_t seg_id = 0;
+        if (cfg.current.segment_idx < alt.size()) {
+            const auto & seg = alt[cfg.current.segment_idx];
+            seg_type_str = seg.type == compiled_segment::DFA_MATCH ? "DFA" : "RULE_CALL";
+            seg_id = seg.id;
+        }
+        fprintf(stderr, "  config[%zu]: rule=%u alt=%u seg=%u(%s id=%u) dfa_state=%u stack_depth=%zu\n",
+                        ci, cfg.current.rule_id, (uint32_t)cfg.current.alternate_idx,
+                        (uint32_t)cfg.current.segment_idx, seg_type_str, seg_id,
+                        (uint32_t)cfg.current.dfa_state, cfg.call_stack.size());
+    }
 }
 
 void llama_grammar_accept_str(struct llama_grammar & grammar, const std::string & piece) {

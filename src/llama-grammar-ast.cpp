@@ -999,6 +999,21 @@ static void compile_node(
             break;
 
         case grammar_ast_node::REPETITION:
+            // Special case: !("needle")*
+            //
+            // The exclusion DFA (Aho-Corasick complement) already handles
+            // matching any string not containing the needle, tracking the AC
+            // state across all bytes. Wrapping it in a Kleene star NFA via
+            // ast_to_nfa creates powerset states where the exclusion's
+            // empty-string match bypasses the check entirely.
+            //
+            // Instead, emit just the exclusion DFA as its own DFA segment.
+            if (node.max_rep == UINT64_MAX && node.min_rep == 0 &&
+                node.child->type == grammar_ast_node::EXCLUSION) {
+                flush_pending(cg, pending_nfa, has_pending, segments);
+                compile_node(cg, *node.child, pending_nfa, has_pending, segments);
+                break;
+            }
             if (node.child->is_purely_terminal()) {
                 // Terminal repetition: build NFA, check size
                 grammar_nfa rep_nfa = ast_to_nfa(node);
