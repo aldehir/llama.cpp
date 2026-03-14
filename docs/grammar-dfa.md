@@ -13,9 +13,10 @@ The engine has four layers:
    subtrees become minimized byte-level DFAs, rule references become
    `RULE_CALL` segments. DFAs are canonicalized and deduplicated.
 3. **Init-time:** A vocab trie (cached per vocabulary) is walked against each
-   DFA state to precompute token candidate sets. Follow-set analysis enables
-   context-dependent token filtering. Candidate sets use an adaptive
-   representation that stores whichever of the accept or reject set is smaller.
+   DFA state to precompute token candidate sets (parallelized across DFAs).
+   Follow-set analysis enables context-dependent token filtering. Candidate
+   sets use an adaptive representation that stores whichever of the accept or
+   reject set is smaller.
 4. **Runtime:** Precomputed candidate sets narrow the token space to a small
    subset that must be simulated. Non-candidates are rejected in O(1).
 
@@ -37,7 +38,11 @@ Grammar text (GBNF)
       2. For each reachable rule:
            For each alternate (ALTERNATION children or single body):
              Split into segments at RULE_REF boundaries
-             For each terminal segment:
+             Terminal content accumulated into pending NFA:
+               → Auto-flush when NFA exceeds MAX_PENDING_NFA_STATES (128)
+               → Large terminal ALTERNATIONs/REPETITIONs (NFA > 128 states)
+                 are compiled as synthetic rules instead of merging
+             For each flushed NFA segment:
                → ast_to_nfa: AST → Thompson NFA (byte-level)
                  Handles LITERAL, CHAR_CLASS, SEQUENCE, ALTERNATION, REPETITION,
                  EXCLUSION (via Aho-Corasick complement DFA)
@@ -95,6 +100,27 @@ exceeds the limit, the `RULE_REF` is kept as-is and compiled as a `RULE_CALL`
 segment instead. This ensures that large terminal rules (e.g. JSON schema
 rules with many inlined fields) remain as separate compiled rules with their
 own DFA segments, rather than being absorbed into a single monolithic DFA.
+
+#### NFA Size Limits
+
+The compiler bounds DFA size through two mechanisms in `compile_node`:
+
+1. **Pending NFA auto-flush:** Terminal content (literals, char classes, etc.)
+   is accumulated into a pending NFA via `append_terminal`. When the pending
+   NFA exceeds `MAX_PENDING_NFA_STATES` (128 states), it is flushed as a DFA
+   segment before appending more. This splits long terminal sequences into
+   multiple smaller DFAs at natural AST node boundaries.
+
+2. **Large alternation/repetition splitting:** When a terminal `ALTERNATION` or
+   `REPETITION` node's NFA exceeds the threshold, it is compiled as a synthetic
+   rule instead of being merged into the pending NFA. For alternations, each
+   branch becomes a separate alternate with its own DFA segments, preventing
+   the combinatorial DFA state explosion that occurs when subset construction
+   tracks which of many overlapping branches are active.
+
+Together with the inlining size limit, these ensure that individual DFAs
+typically stay under 50-100 states, keeping both NFA→DFA compilation and
+token candidate precomputation fast.
 
 #### Unreachable Rule Elimination
 
@@ -283,6 +309,18 @@ Context-dependent tokens are stored separately in `context_set`.
 This keeps storage proportional to `min(|accept|, |reject|)` rather than always
 storing the full candidate set.
 
+### Parallel Precomputation
+
+Token candidate precomputation is parallelized across DFAs using worker
+threads with atomic work-stealing. Each DFA's trie walk reads only shared
+immutable data (the DFA transition tables, the vocab trie, the follow DFA
+sets) and writes exclusively to its own `dfa_candidates[i]` entry, so no
+synchronization is needed beyond the atomic task counter.
+
+Currently uses 4 worker threads (falls back to sequential for < 4 DFAs).
+The work-stealing pattern naturally load-balances: larger DFAs take longer
+but threads simply grab the next available DFA index.
+
 ### Intersection Across Configs
 
 At runtime, multiple configs may be active with different DFA states. A token
@@ -420,14 +458,15 @@ complementing an arbitrary DFA, which can itself cause state explosion.
 ### Compile Time (One-Time)
 - AST parsing + optimization: sub-millisecond for typical grammars.
 - NFA construction + subset construction + minimization: milliseconds for typical
-  grammars (JSON schemas, function calls).
+  grammars. NFA size limits (128 states) and alternation splitting keep
+  individual DFAs under ~50-100 states, preventing exponential blowup.
 - DFA canonicalization + deduplication: negligible overhead, saves precomputation
   time by avoiding redundant DFAs.
 - Trie construction: < 5ms for 128k vocab (amortized to zero if cached).
 - Follow-set computation: sub-millisecond.
-- Candidate precomputation: 50-200ms depending on grammar complexity and DFA
-  state count. Multi-state walk and follow-set filtering reduce this
-  significantly for complex grammars.
+- Candidate precomputation: parallelized across 4 threads. Typical times:
+  ~170ms for JSON grammars, ~280ms for complex tool-calling grammars (128k
+  vocab). Multi-state walk and follow-set filtering keep per-DFA cost low.
 
 ### Token Evaluation (Hot Path)
 - **Non-candidates:** O(1) rejection via bitmask lookup.
@@ -439,8 +478,8 @@ complementing an arbitrary DFA, which can itself cause state explosion.
   candidates at any given state.
 
 ### Memory
-- DFA transition tables: 256 x 2 bytes x N states per segment. Typically 5-20
-  states per segment, a few KB per rule.
+- DFA transition tables: 256 x 2 bytes x N states per segment. Typically 10-55
+  states per segment (bounded by NFA size limits), a few KB per rule.
 - Vocab trie: ~3-5 MB (shared across all grammars via vocab cache).
 - Candidate sets: 2-12 MB total (depends on grammar; adaptive representation
   and follow-set filtering minimize this).
