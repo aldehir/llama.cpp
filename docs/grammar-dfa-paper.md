@@ -1,34 +1,36 @@
-# ByteGrammar: Byte-Level DFA Compilation with Precomputed Token Candidate Sets for Grammar-Constrained LLM Decoding
+# ByteGrammar: Engineering Refinements to DFA-Based Grammar-Constrained LLM Decoding
 
 **Working Title Alternatives:**
 
-- *TrieDFA: Trie-Accelerated Deterministic Automata for Structured LLM Output*
-- *GrammarForge: Compiling Context-Free Grammars to Byte-Level Automata for Token-Space Constraint Enforcement*
-- *DFADecode: From GBNF to Byte Automata — A Multi-Stage Compilation Approach to Grammar-Constrained Sampling*
-- *TokenSieve: Precomputed DFA-Vocabulary Intersection for Efficient Structured Decoding*
+- *ByteGrammar: Multi-State Trie Walks and Follow-Set Pruning for Grammar-Constrained Decoding*
+- *GrammarForge: Optimizing the XGrammar Pipeline with DFA Deduplication, Kleene Detection, and Aho-Corasick Exclusion*
+- *FollowSieve: FIRST/FOLLOW Analysis for Reducing Context-Dependent Token Simulation in Structured Decoding*
+- *TokenSieve: Amortized DFA-Vocabulary Intersection via Multi-State Trie Traversal*
 
 ---
 
 ## Abstract
 
-We present **ByteGrammmar**, a multi-stage compilation and runtime system for
+We present **ByteGrammar**, a multi-stage compilation and runtime system for
 constraining large language model (LLM) token sampling to conform to a
-user-specified context-free grammar. The system compiles grammars written in
-GBNF (a BNF variant) through a pipeline of AST parsing, terminal inlining, NFA
-construction via Thompson's algorithm, subset construction to DFA, Hopcroft
-minimization, and state canonicalization. The key innovation is a
-*precomputation phase* that walks a vocabulary byte-trie against all DFA states
-simultaneously, producing per-state token candidate sets that reduce runtime
-token validation from O(V) per sampling step to O(A), where A << V is the
-number of candidate tokens. We describe the three-way token classification
-(guaranteed-accept, context-dependent, rejected), the adaptive set
-representation that stores whichever of the accept or reject set is smaller,
-FIRST/FOLLOW set analysis for context-dependent token pruning, and an
-Aho-Corasick complement construction for exclusion patterns. The system
-achieves 10-100x speedups over naive per-token simulation for structured
-grammars, with precomputation completing in 170-280ms for typical grammars on
-128k-token vocabularies. All automata operate on raw bytes rather than Unicode
-code points, eliminating partial UTF-8 handling entirely.
+user-specified context-free grammar. Following the approach established by
+XGrammar (Dong et al., 2024), the system precomputes per-DFA-state token
+candidate sets by walking a vocabulary byte-trie, reducing runtime token
+validation from O(V) per sampling step to O(A), where A << V. Building on this
+shared foundation, our system contributes several engineering refinements: (1)
+a *multi-state trie walk* that amortizes traversal cost across all DFA states
+simultaneously, (2) *FIRST/FOLLOW set analysis* adapted to the compiled
+grammar's segment structure for pruning context-dependent tokens, (3) an
+*Aho-Corasick complement construction* for exclusion patterns, (4) *Kleene
+detection* that rewrites self-recursive rules to single DFA segments, and (5)
+*DFA canonicalization and deduplication* that avoids redundant precomputation
+for structurally identical automata. The compilation pipeline transforms GBNF
+grammars through AST parsing, terminal inlining, Thompson NFA construction,
+subset construction, and Hopcroft minimization — operating entirely on raw
+bytes to eliminate partial UTF-8 handling. The system achieves 10-100x
+speedups over naive per-token simulation for structured grammars, with
+precomputation completing in 170-280ms for typical grammars on 128k-token
+vocabularies.
 
 ## 1. Introduction
 
@@ -57,31 +59,46 @@ achieves this through a multi-stage compilation pipeline that precomputes, for
 every reachable DFA state, which tokens are guaranteed valid, which are
 guaranteed invalid, and which require runtime simulation.
 
-### 1.1 Contributions
+### 1.1 Relationship to Prior Work
 
-1. A **byte-level DFA compilation pipeline** that transforms context-free
-   grammars (in GBNF notation) through AST parsing, optimization, Thompson NFA
-   construction, subset construction, Hopcroft minimization, and
-   canonicalization — operating entirely on raw bytes to eliminate UTF-8
-   partial-character edge cases.
+The general approach of precomputing per-DFA-state token masks via vocabulary
+trie traversal is shared with XGrammar (Dong et al., 2024), which introduced
+the three-way token classification (guaranteed-accept, context-dependent,
+rejected) and the adaptive representation that stores the smaller of the accept
+or reject set. Our system adopts this framework and the overall architecture of
+byte-level DFA compilation with precomputed candidate sets.
 
-2. A **vocabulary trie precomputation** algorithm that walks all DFA states
-   simultaneously through a byte-level trie of the vocabulary, classifying
-   every token into guaranteed-accept, context-dependent, or rejected categories
-   for each DFA state.
+### 1.2 Contributions
 
-3. An **adaptive candidate set representation** that stores whichever of the
-   accept or reject set is smaller, with FIRST/FOLLOW set analysis that prunes
-   context-dependent tokens using grammar-structural information.
+Within this shared framework, our system introduces the following refinements:
 
-4. An **Aho-Corasick complement construction** for exclusion patterns
-   (`!("str1" | "str2")`) that produces linear-size DFAs for substring
-   avoidance.
+1. A **multi-state trie walk** (`walk_multi`) that advances all DFA states
+   through the vocabulary trie simultaneously, grouping states by their
+   transition target at each byte. States reaching the same next state share
+   the recursive traversal, amortizing cost across the full DFA state space.
 
-5. A **Kleene detection and rewriting** optimization that identifies
-   self-recursive grammar rules matching the pattern `R ::= body R | epsilon`
-   and compiles them to single DFA segments, eliminating recursive call
-   overhead.
+2. **FIRST/FOLLOW set analysis** adapted to the compiled grammar's segment
+   structure (`compute_follow_sets`). Context-dependent tokens — where the DFA
+   accepts mid-token — are walked through the *follow DFAs* computed from
+   grammar-structural FIRST/FOLLOW sets. Tokens unreachable by any follow DFA
+   are pruned at precomputation time rather than simulated at runtime.
+
+3. An **Aho-Corasick complement construction** for GBNF exclusion patterns
+   (`!("str1" | "str2")`), producing linear-size DFAs for substring avoidance
+   without the state explosion of naive negation.
+
+4. **Kleene detection and rewriting** that identifies self-recursive rules
+   matching `R ::= body R | epsilon` and compiles them to single `DFA(body+)`
+   segments, eliminating recursive call overhead.
+
+5. **DFA canonicalization and deduplication**: after Hopcroft minimization,
+   states are renumbered in BFS order, ensuring structurally identical DFAs
+   have identical representations. Duplicate DFAs are detected via `operator==`
+   and share a single precomputed candidate set.
+
+6. **NFA size bounding** with automatic segment splitting: pending NFAs are
+   flushed at 128 states, and large alternation/repetition subtrees are
+   compiled as synthetic rules, preventing subset construction blowup.
 
 ## 2. Background and Problem Setting
 
@@ -586,9 +603,10 @@ or parallel request serving).
 ## 7. Related Work
 
 **Outlines** (Willard & Louf, 2023) pioneered the use of finite-state machines
-for grammar-constrained generation, using regex-based indexing. Our work extends
-this to full context-free grammars with a multi-level compilation pipeline and
-vocabulary-trie precomputation.
+for grammar-constrained generation, using regex-based indexing to precompute
+which tokens are valid for each automaton state. This work established the
+core insight that token validity can be determined offline for regular
+languages.
 
 **LMQL** (Beurer-Kellner et al., 2023) provides a query language for
 constrained generation with eager token masking. It operates at a higher level
@@ -596,16 +614,24 @@ of abstraction, using scripted constraints rather than compiled automata.
 
 **Guidance** (Microsoft, 2023) interleaves generation with programmatic
 constraints, supporting context-free grammars through a parser-based approach.
-Unlike our DFA-based system, it does not precompute token candidate sets.
 
 **GrammarFlow** and similar systems use Earley parsing or GLL parsing for
-runtime grammar enforcement. Our DFA-based approach trades generality (no
-left-recursive grammars) for performance (O(1) per-byte transitions).
+runtime grammar enforcement. DFA-based approaches like ours trade generality
+(no left-recursive grammars) for performance (O(1) per-byte transitions).
 
-**XGrammar** (Dong et al., 2024) proposes a similar precomputation approach
-with adaptive token masking. Our system adds FIRST/FOLLOW set pruning for
-context-dependent tokens, Aho-Corasick exclusion patterns, and Kleene
-detection for self-recursive rules.
+**XGrammar** (Dong et al., 2024) is the most directly related work and
+establishes the architecture our system builds on. XGrammar introduced: (a) the
+three-way token classification into guaranteed-accept, context-dependent, and
+rejected categories per DFA state; (b) the adaptive representation that stores
+whichever of the accept or reject set is smaller; (c) vocabulary trie
+precomputation for offline candidate set construction; and (d) the overall
+pipeline of grammar compilation to byte-level DFAs with precomputed token
+masks. Our system adopts this framework wholesale and contributes engineering
+refinements within it: multi-state trie walks that amortize traversal across
+DFA states, FIRST/FOLLOW set analysis for context-dependent token pruning,
+Aho-Corasick exclusion patterns, Kleene detection for self-recursive rules,
+and DFA canonicalization for deduplication. These are optimizations to the
+XGrammar architecture rather than a fundamentally different approach.
 
 ## 8. Limitations and Future Work
 
@@ -632,16 +658,18 @@ detection for self-recursive rules.
 
 ## 9. Conclusion
 
-We have presented a comprehensive system for grammar-constrained LLM decoding
-that compiles context-free grammars to byte-level DFAs and precomputes
-per-state token candidate sets via a vocabulary trie walk. The three-way token
-classification (guaranteed-accept, context-dependent, rejected) with adaptive
-set representation and FIRST/FOLLOW pruning reduces per-step filtering cost by
-10-100x for structured grammars, while the grammar and trie caches eliminate
-recompilation overhead. The system is production-deployed within llama.cpp,
-serving grammar-constrained generation across a wide range of applications
-including JSON schema enforcement, function calling, and structured data
-extraction.
+We have presented a grammar-constrained LLM decoding system that builds on the
+XGrammar architecture of byte-level DFA compilation with precomputed per-state
+token candidate sets. Our implementation within llama.cpp contributes several
+engineering refinements — multi-state trie walks, FIRST/FOLLOW pruning of
+context-dependent tokens, Aho-Corasick exclusion patterns, Kleene detection,
+and DFA deduplication — that reduce both precomputation cost and runtime
+simulation load. The three-way token classification with adaptive set
+representation reduces per-step filtering cost by 10-100x for structured
+grammars, while grammar and trie caches eliminate recompilation overhead. The
+system is production-deployed within llama.cpp, serving grammar-constrained
+generation across JSON schema enforcement, function calling, and structured
+data extraction.
 
 ## References
 
