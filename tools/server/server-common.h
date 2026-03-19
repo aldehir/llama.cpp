@@ -276,6 +276,15 @@ std::vector<server_tokens> tokenize_input_prompts(
                                         bool add_special,
                                         bool parse_special);
 
+// Tokenize a chat prompt by splitting at message boundaries and tokenizing each segment independently.
+// Returns a server_tokens with msg_boundaries populated with exact token positions.
+// BOS is only added to the first segment. parse_special is always true for chat prompts.
+server_tokens tokenize_chat_prompt(
+    const llama_vocab                           * vocab,
+    const std::string                           & prompt,
+    const std::vector<common_chat_msg_boundary> & boundaries,
+    bool                                          add_special);
+
 //
 // OAI utils
 //

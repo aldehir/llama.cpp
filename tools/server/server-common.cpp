@@ -784,6 +784,49 @@ std::vector<server_tokens> tokenize_input_prompts(const llama_vocab * vocab, mtm
     return result;
 }
 
+server_tokens tokenize_chat_prompt(
+        const llama_vocab                           * vocab,
+        const std::string                           & prompt,
+        const std::vector<common_chat_msg_boundary> & boundaries,
+        bool                                          add_special) {
+    llama_tokens all_tokens;
+    std::vector<common_chat_msg_boundary_token> token_boundaries;
+    token_boundaries.reserve(boundaries.size());
+
+    for (size_t i = 0; i < boundaries.size(); i++) {
+        const auto & b = boundaries[i];
+        std::string segment = prompt.substr(b.start, b.end - b.start);
+
+        // Only add BOS for the first segment
+        bool add_bos = (i == 0) && add_special;
+        llama_tokens seg_tokens = common_tokenize(vocab, segment, add_bos, /* parse_special */ true);
+
+        int32_t token_start = (int32_t) all_tokens.size();
+        all_tokens.insert(all_tokens.end(), seg_tokens.begin(), seg_tokens.end());
+        int32_t token_end = (int32_t) all_tokens.size();
+
+        token_boundaries.push_back({b.role, token_start, token_end});
+    }
+
+    // If boundaries don't cover the start of the prompt (e.g., BOS prefix before first marker),
+    // tokenize the prefix and shift all token boundaries
+    if (!boundaries.empty() && boundaries[0].start > 0) {
+        std::string prefix = prompt.substr(0, boundaries[0].start);
+        llama_tokens prefix_tokens = common_tokenize(vocab, prefix, add_special, /* parse_special */ true);
+        int32_t shift = (int32_t) prefix_tokens.size();
+        prefix_tokens.insert(prefix_tokens.end(), all_tokens.begin(), all_tokens.end());
+        all_tokens = std::move(prefix_tokens);
+        for (auto & tb : token_boundaries) {
+            tb.token_start += shift;
+            tb.token_end   += shift;
+        }
+    }
+
+    server_tokens result(all_tokens, /* has_mtmd */ false);
+    result.msg_boundaries = std::move(token_boundaries);
+    return result;
+}
+
 //
 // OAI utils
 //
