@@ -926,9 +926,10 @@ static common_chat_params common_chat_params_init_ministral_3(const common_chat_
     }
 
     // Ministral uses Mistral v7 format with [INST] and [SYSTEM_PROMPT] markers
-    data.msg_boundaries = common_chat_find_msg_boundaries(data.prompt,
-        {"[SYSTEM_PROMPT]", "[INST]"},
-        {"system",          "user"});
+    data.msg_boundaries = common_chat_find_msg_boundaries(data.prompt, {
+        {"[SYSTEM_PROMPT]", "system"},
+        {"[INST]",          "user"},
+    });
 
     return data;
 }
@@ -1076,9 +1077,13 @@ static common_chat_params common_chat_params_init_gpt_oss(const common_chat_temp
     }
 
     // Detect message boundaries using <|start|> markers
-    data.msg_boundaries = common_chat_find_msg_boundaries(data.prompt,
-        {"<|start|>system", "<|start|>developer", "<|start|>user", "<|start|>assistant", "<|start|>tool"},
-        {"system",          "developer",          "user",          "assistant",          "tool"});
+    data.msg_boundaries = common_chat_find_msg_boundaries(data.prompt, {
+        {"<|start|>system",    "system"},
+        {"<|start|>developer", "developer"},
+        {"<|start|>user",      "user"},
+        {"<|start|>assistant", "assistant"},
+        {"<|start|>tool",      "tool"},
+    });
 
     return data;
 }
@@ -1170,9 +1175,13 @@ static common_chat_params common_chat_params_init_functionary_v3_2(const common_
     }
 
     // Functionary v3.2 uses Llama3 format
-    data.msg_boundaries = common_chat_find_msg_boundaries(data.prompt,
-        {"<|start_header_id|>system", "<|start_header_id|>user", "<|start_header_id|>assistant", "<|start_header_id|>tool", "<|start_header_id|>ipython"},
-        {"system",                    "user",                    "assistant",                    "tool",                    "ipython"});
+    data.msg_boundaries = common_chat_find_msg_boundaries(data.prompt, {
+        {"<|start_header_id|>system",    "system"},
+        {"<|start_header_id|>user",      "user"},
+        {"<|start_header_id|>assistant", "assistant"},
+        {"<|start_header_id|>tool",      "tool"},
+        {"<|start_header_id|>ipython",   "ipython"},
+    });
 
     return data;
 }
@@ -1292,9 +1301,11 @@ static common_chat_params common_chat_params_init_kimi_k2(const common_chat_temp
     }
 
     // Kimi K2 uses <|im_user|>, <|im_assistant|>, <|im_system|> markers
-    data.msg_boundaries = common_chat_find_msg_boundaries(data.prompt,
-        {"<|im_system|>", "<|im_user|>", "<|im_assistant|>"},
-        {"system",        "user",        "assistant"});
+    data.msg_boundaries = common_chat_find_msg_boundaries(data.prompt, {
+        {"<|im_system|>",    "system"},
+        {"<|im_user|>",      "user"},
+        {"<|im_assistant|>", "assistant"},
+    });
 
     return data;
 }
@@ -1373,9 +1384,12 @@ static common_chat_params common_chat_params_init_lfm2(const common_chat_templat
     }
 
     // LFM2 uses ChatML format
-    data.msg_boundaries = common_chat_find_msg_boundaries(data.prompt,
-        {"<|im_start|>system", "<|im_start|>user", "<|im_start|>assistant", "<|im_start|>tool"},
-        {"system",             "user",             "assistant",             "tool"});
+    data.msg_boundaries = common_chat_find_msg_boundaries(data.prompt, {
+        {"<|im_start|>system",    "system"},
+        {"<|im_start|>user",      "user"},
+        {"<|im_start|>assistant", "assistant"},
+        {"<|im_start|>tool",      "tool"},
+    });
 
     return data;
 }
@@ -1451,11 +1465,15 @@ static common_chat_params common_chat_params_init_gigachat_v3(
 
     // GigaChat uses "role<|role_sep|>" pattern for message boundaries
     // Common roles: "developer system", "system", "user", "assistant", "function call", "function result"
-    data.msg_boundaries = common_chat_find_msg_boundaries(data.prompt,
-        {"developer system<|role_sep|>", "system<|role_sep|>", "user<|role_sep|>", "assistant<|role_sep|>",
-         "function call<|role_sep|>", "function result<|role_sep|>", "function descriptions<|role_sep|>"},
-        {"system",                       "system",             "user",             "assistant",
-         "tool",                         "tool",               "tool"});
+    data.msg_boundaries = common_chat_find_msg_boundaries(data.prompt, {
+        {"developer system<|role_sep|>",      "system"},
+        {"system<|role_sep|>",                "system"},
+        {"user<|role_sep|>",                  "user"},
+        {"assistant<|role_sep|>",             "assistant"},
+        {"function call<|role_sep|>",         "tool"},
+        {"function result<|role_sep|>",       "tool"},
+        {"function descriptions<|role_sep|>", "tool"},
+    });
 
     return data;
 }

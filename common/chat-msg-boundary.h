@@ -6,6 +6,12 @@
 #include <string>
 #include <vector>
 
+// A pattern-to-role mapping for message boundary detection.
+struct common_chat_msg_marker {
+    std::string pattern;  // the start-of-message marker string to search for
+    std::string role;     // the role this marker represents
+};
+
 // A message boundary in the rendered prompt string.
 // [start, end) are byte offsets: start is inclusive, end is exclusive.
 struct common_chat_msg_boundary {
@@ -84,13 +90,11 @@ struct aho_corasick_match {
 std::vector<aho_corasick_match> aho_corasick_search(const aho_corasick & ac, const std::string & text);
 
 // Find message boundaries in the rendered prompt.
-// start_sequences[i] is the marker string, roles[i] is the role name for that marker.
-// Multiple start_sequences can map to the same role.
+// Multiple markers can map to the same role.
 // Returns boundaries sorted by position; end of each = start of next, or end of prompt.
 std::vector<common_chat_msg_boundary> common_chat_find_msg_boundaries(
-    const std::string &              prompt,
-    const std::vector<std::string> & start_sequences,
-    const std::vector<std::string> & roles);
+    const std::string &                        prompt,
+    const std::vector<common_chat_msg_marker> & markers);
 
 // Auto-detect template family from the rendered prompt and find message boundaries.
 // Recognizes ChatML, Llama3, Gemma, Mistral, Command R, and Phi-3 families.

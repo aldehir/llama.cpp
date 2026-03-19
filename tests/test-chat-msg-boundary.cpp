@@ -72,9 +72,11 @@ static void test_boundaries_gpt_oss() {
         "<|start|>user<|channel|>final<|message|>Hello!<|end|>"
         "<|start|>assistant";
 
-    auto boundaries = common_chat_find_msg_boundaries(prompt,
-        {"<|start|>system", "<|start|>user", "<|start|>assistant"},
-        {"system",          "user",          "assistant"});
+    auto boundaries = common_chat_find_msg_boundaries(prompt, {
+        {"<|start|>system",    "system"},
+        {"<|start|>user",      "user"},
+        {"<|start|>assistant", "assistant"},
+    });
 
     assert(boundaries.size() == 3);
 
@@ -98,9 +100,11 @@ static void test_boundaries_chatml() {
         "<|im_start|>user\nHello!<|im_end|>\n"
         "<|im_start|>assistant\n";
 
-    auto boundaries = common_chat_find_msg_boundaries(prompt,
-        {"<|im_start|>system", "<|im_start|>user", "<|im_start|>assistant"},
-        {"system",             "user",             "assistant"});
+    auto boundaries = common_chat_find_msg_boundaries(prompt, {
+        {"<|im_start|>system",    "system"},
+        {"<|im_start|>user",      "user"},
+        {"<|im_start|>assistant", "assistant"},
+    });
 
     assert(boundaries.size() == 3);
     assert(boundaries[0].role == "system");
@@ -122,9 +126,11 @@ static void test_boundaries_llama3() {
         "<|start_header_id|>user<|end_header_id|>\n\nHi<|eot_id|>"
         "<|start_header_id|>assistant<|end_header_id|>\n\n";
 
-    auto boundaries = common_chat_find_msg_boundaries(prompt,
-        {"<|start_header_id|>system", "<|start_header_id|>user", "<|start_header_id|>assistant"},
-        {"system",                    "user",                    "assistant"});
+    auto boundaries = common_chat_find_msg_boundaries(prompt, {
+        {"<|start_header_id|>system",    "system"},
+        {"<|start_header_id|>user",      "user"},
+        {"<|start_header_id|>assistant", "assistant"},
+    });
 
     assert(boundaries.size() == 3);
     assert(boundaries[0].role == "system");
@@ -134,10 +140,10 @@ static void test_boundaries_llama3() {
 
 static void test_boundaries_empty() {
     printf("  test_boundaries_empty...\n");
-    auto boundaries = common_chat_find_msg_boundaries("", {"<|start|>"}, {"system"});
+    auto boundaries = common_chat_find_msg_boundaries("", {{"<|start|>", "system"}});
     assert(boundaries.empty());
 
-    boundaries = common_chat_find_msg_boundaries("hello", {}, {});
+    boundaries = common_chat_find_msg_boundaries("hello", {});
     assert(boundaries.empty());
 }
 
