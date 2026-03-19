@@ -1,0 +1,150 @@
+#include "chat-msg-boundary.h"
+
+#include <algorithm>
+
+std::vector<aho_corasick_match> aho_corasick_search(const aho_corasick & ac, const std::string & text) {
+    std::vector<aho_corasick_match> matches;
+    int cur = 0;
+
+    for (size_t i = 0; i < text.size(); i++) {
+        char ch = text[i];
+
+        // Follow fail links until we find a transition or reach root
+        while (cur != 0 && ac.nodes[cur].children.find(ch) == ac.nodes[cur].children.end()) {
+            cur = ac.nodes[cur].fail;
+        }
+
+        auto it = ac.nodes[cur].children.find(ch);
+        if (it != ac.nodes[cur].children.end()) {
+            cur = it->second;
+        }
+        // else cur stays at 0 (root)
+
+        // Check for matches at this node and via suffix links
+        int tmp = cur;
+        while (tmp != 0) {
+            if (ac.nodes[tmp].output >= 0) {
+                int    idx     = ac.nodes[tmp].output;
+                size_t pat_len = ac.patterns[idx].size();
+                matches.push_back({idx, i + 1 - pat_len});
+            }
+            tmp = ac.nodes[tmp].fail;
+        }
+    }
+
+    // Sort by position, then by longest pattern first for same position
+    std::sort(matches.begin(), matches.end(), [&](const aho_corasick_match & a, const aho_corasick_match & b) {
+        if (a.pos != b.pos) {
+            return a.pos < b.pos;
+        }
+        return ac.patterns[a.pattern_idx].size() > ac.patterns[b.pattern_idx].size();
+    });
+
+    return matches;
+}
+
+std::vector<common_chat_msg_boundary> common_chat_find_msg_boundaries(
+        const std::string &              prompt,
+        const std::vector<std::string> & start_sequences,
+        const std::vector<std::string> & roles) {
+    if (start_sequences.empty() || prompt.empty()) {
+        return {};
+    }
+
+    // Build automaton
+    aho_corasick ac;
+    for (size_t i = 0; i < start_sequences.size(); i++) {
+        ac.add_pattern(start_sequences[i], (int) i);
+    }
+    ac.build();
+
+    // Search
+    auto matches = aho_corasick_search(ac, prompt);
+    if (matches.empty()) {
+        return {};
+    }
+
+    // Convert matches to boundaries.
+    // At each position, keep only the longest (first after sort) match.
+    std::vector<common_chat_msg_boundary> boundaries;
+    size_t prev_pos = (size_t) -1;
+
+    for (const auto & m : matches) {
+        if (m.pos == prev_pos) {
+            continue;  // skip shorter matches at the same position
+        }
+        prev_pos = m.pos;
+
+        // Close the previous boundary
+        if (!boundaries.empty()) {
+            boundaries.back().end = m.pos;
+        }
+
+        int role_idx = m.pattern_idx < (int) roles.size() ? m.pattern_idx : 0;
+        boundaries.push_back({roles[role_idx], m.pos, prompt.size()});
+    }
+
+    return boundaries;
+}
+
+std::vector<common_chat_msg_boundary> common_chat_detect_msg_boundaries(const std::string & prompt) {
+    if (prompt.empty()) {
+        return {};
+    }
+
+    // ChatML family: <|im_start|>role
+    if (prompt.find("<|im_start|>") != std::string::npos) {
+        return common_chat_find_msg_boundaries(prompt,
+            {"<|im_start|>system", "<|im_start|>user", "<|im_start|>assistant", "<|im_start|>tool"},
+            {"system",             "user",             "assistant",             "tool"});
+    }
+
+    // Llama 3 family: <|start_header_id|>role
+    if (prompt.find("<|start_header_id|>") != std::string::npos) {
+        return common_chat_find_msg_boundaries(prompt,
+            {"<|start_header_id|>system", "<|start_header_id|>user", "<|start_header_id|>assistant",
+             "<|start_header_id|>tool", "<|start_header_id|>ipython"},
+            {"system",                    "user",                    "assistant",
+             "tool",                      "ipython"});
+    }
+
+    // Gemma family: <start_of_turn>role
+    if (prompt.find("<start_of_turn>") != std::string::npos) {
+        return common_chat_find_msg_boundaries(prompt,
+            {"<start_of_turn>user", "<start_of_turn>model"},
+            {"user",                "assistant"});
+    }
+
+    // Command R family: <|START_OF_TURN_TOKEN|><|ROLE_TOKEN|>
+    if (prompt.find("<|START_OF_TURN_TOKEN|>") != std::string::npos) {
+        return common_chat_find_msg_boundaries(prompt,
+            {"<|START_OF_TURN_TOKEN|><|SYSTEM_TOKEN|>", "<|START_OF_TURN_TOKEN|><|USER_TOKEN|>",
+             "<|START_OF_TURN_TOKEN|><|CHATBOT_TOKEN|>"},
+            {"system",                                  "user",
+             "assistant"});
+    }
+
+    // Phi-3 family: <|system|>, <|user|>, <|assistant|>
+    if (prompt.find("<|user|>") != std::string::npos && prompt.find("<|assistant|>") != std::string::npos
+            && prompt.find("<|end|>") != std::string::npos) {
+        return common_chat_find_msg_boundaries(prompt,
+            {"<|system|>", "<|user|>", "<|assistant|>"},
+            {"system",     "user",     "assistant"});
+    }
+
+    // Mistral family: [INST] and [SYSTEM_PROMPT]
+    if (prompt.find("[INST]") != std::string::npos) {
+        return common_chat_find_msg_boundaries(prompt,
+            {"[SYSTEM_PROMPT]", "[INST]"},
+            {"system",          "user"});
+    }
+
+    // DeepSeek v2/v3 family
+    if (prompt.find("<｜User｜>") != std::string::npos || prompt.find("<｜Assistant｜>") != std::string::npos) {
+        return common_chat_find_msg_boundaries(prompt,
+            {"<｜User｜>", "<｜Assistant｜>"},
+            {"user",       "assistant"});
+    }
+
+    return {};
+}

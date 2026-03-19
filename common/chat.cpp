@@ -1,4 +1,5 @@
 #include "chat.h"
+#include "chat-msg-boundary.h"
 
 #include "chat-auto-parser.h"
 #include "chat-peg-parser.h"
@@ -924,6 +925,11 @@ static common_chat_params common_chat_params_init_ministral_3(const common_chat_
         };
     }
 
+    // Ministral uses Mistral v7 format with [INST] and [SYSTEM_PROMPT] markers
+    data.msg_boundaries = common_chat_find_msg_boundaries(data.prompt,
+        {"[SYSTEM_PROMPT]", "[INST]"},
+        {"system",          "user"});
+
     return data;
 }
 
@@ -1069,6 +1075,11 @@ static common_chat_params common_chat_params_init_gpt_oss(const common_chat_temp
         };
     }
 
+    // Detect message boundaries using <|start|> markers
+    data.msg_boundaries = common_chat_find_msg_boundaries(data.prompt,
+        {"<|start|>system", "<|start|>developer", "<|start|>user", "<|start|>assistant", "<|start|>tool"},
+        {"system",          "developer",          "user",          "assistant",          "tool"});
+
     return data;
 }
 
@@ -1157,6 +1168,11 @@ static common_chat_params common_chat_params_init_functionary_v3_2(const common_
             { COMMON_GRAMMAR_TRIGGER_TYPE_PATTERN, ">>>(?!all)" }
         };
     }
+
+    // Functionary v3.2 uses Llama3 format
+    data.msg_boundaries = common_chat_find_msg_boundaries(data.prompt,
+        {"<|start_header_id|>system", "<|start_header_id|>user", "<|start_header_id|>assistant", "<|start_header_id|>tool", "<|start_header_id|>ipython"},
+        {"system",                    "user",                    "assistant",                    "tool",                    "ipython"});
 
     return data;
 }
@@ -1275,6 +1291,11 @@ static common_chat_params common_chat_params_init_kimi_k2(const common_chat_temp
         };
     }
 
+    // Kimi K2 uses <|im_user|>, <|im_assistant|>, <|im_system|> markers
+    data.msg_boundaries = common_chat_find_msg_boundaries(data.prompt,
+        {"<|im_system|>", "<|im_user|>", "<|im_assistant|>"},
+        {"system",        "user",        "assistant"});
+
     return data;
 }
 
@@ -1351,6 +1372,11 @@ static common_chat_params common_chat_params_init_lfm2(const common_chat_templat
         };
     }
 
+    // LFM2 uses ChatML format
+    data.msg_boundaries = common_chat_find_msg_boundaries(data.prompt,
+        {"<|im_start|>system", "<|im_start|>user", "<|im_start|>assistant", "<|im_start|>tool"},
+        {"system",             "user",             "assistant",             "tool"});
+
     return data;
 }
 
@@ -1422,6 +1448,15 @@ static common_chat_params common_chat_params_init_gigachat_v3(
             {COMMON_GRAMMAR_TRIGGER_TYPE_WORD, tool_call_start_prefix}
         };
     }
+
+    // GigaChat uses "role<|role_sep|>" pattern for message boundaries
+    // Common roles: "developer system", "system", "user", "assistant", "function call", "function result"
+    data.msg_boundaries = common_chat_find_msg_boundaries(data.prompt,
+        {"developer system<|role_sep|>", "system<|role_sep|>", "user<|role_sep|>", "assistant<|role_sep|>",
+         "function call<|role_sep|>", "function result<|role_sep|>", "function descriptions<|role_sep|>"},
+        {"system",                       "system",             "user",             "assistant",
+         "tool",                         "tool",               "tool"});
+
     return data;
 }
 
@@ -1621,6 +1656,10 @@ static common_chat_params common_chat_templates_apply_jinja(const struct common_
                 autoparser.reasoning.mode == autoparser::reasoning_mode::FORCED_OPEN ||
                 autoparser.reasoning.mode == autoparser::reasoning_mode::FORCED_CLOSED;
         }
+
+        // Detect message boundaries for common template families handled by the autoparser
+        auto_params.msg_boundaries = common_chat_detect_msg_boundaries(auto_params.prompt);
+
         return auto_params;
     } catch (const std::exception & e) {
         throw std::invalid_argument(std::string("Unable to generate parser for this template. Automatic parser generation failed: ") + e.what());

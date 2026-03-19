@@ -2,6 +2,7 @@
 
 #pragma once
 
+#include "chat-msg-boundary.h"
 #include "common.h"
 #include "jinja/parser.h"
 #include "nlohmann/json_fwd.hpp"
@@ -219,6 +220,7 @@ struct common_chat_params {
     std::vector<std::string>            preserved_tokens;
     std::vector<std::string>            additional_stops;
     std::string                         parser;
+    std::vector<common_chat_msg_boundary> msg_boundaries;  // message [start, end) byte offsets in prompt
 };
 
 // per-message parsing syntax
