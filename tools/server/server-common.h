@@ -125,6 +125,9 @@ std::vector<size_t> lora_get_enabled_ids(const std::vector<common_adapter_lora_i
 struct server_tokens {
     bool has_mtmd = false;
 
+    // message boundaries expressed as token positions (empty if not a chat completion)
+    std::vector<common_chat_msg_boundary_token> msg_boundaries;
+
 private: // disallow accessing these members directly, risking out-of-sync
 
     // map a **start** index in tokens to the image chunk

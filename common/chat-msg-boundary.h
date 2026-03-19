@@ -1,10 +1,15 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include <map>
 #include <queue>
 #include <string>
 #include <vector>
+
+struct llama_vocab;
+
+using llama_token = int32_t;
 
 // A pattern-to-role mapping for message boundary detection.
 struct common_chat_msg_marker {
@@ -100,3 +105,21 @@ std::vector<common_chat_msg_boundary> common_chat_find_msg_boundaries(
 // Recognizes ChatML, Llama3, Gemma, Mistral, Command R, and Phi-3 families.
 // Returns empty vector if the template family is not recognized.
 std::vector<common_chat_msg_boundary> common_chat_detect_msg_boundaries(const std::string & prompt);
+
+// A message boundary expressed as token positions.
+// [token_start, token_end) are token indices: token_start is inclusive, token_end is exclusive.
+struct common_chat_msg_boundary_token {
+    std::string role;
+    int32_t     token_start;  // first token index belonging to this message
+    int32_t     token_end;    // first token index of the next message (or total token count)
+};
+
+// Convert byte-offset boundaries to token-position boundaries.
+// Walks the token list, accumulates byte lengths via common_token_to_piece(),
+// and maps each byte-offset boundary to the token index where it falls.
+// `special` controls whether special tokens are decoded to their text form.
+std::vector<common_chat_msg_boundary_token> common_chat_msg_boundaries_to_tokens(
+    const llama_vocab                           * vocab,
+    const std::vector<llama_token>              & tokens,
+    const std::vector<common_chat_msg_boundary> & boundaries,
+    bool                                          special);

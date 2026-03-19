@@ -1,4 +1,5 @@
 #include "chat-msg-boundary.h"
+#include "common.h"
 
 #include <algorithm>
 
@@ -156,4 +157,45 @@ std::vector<common_chat_msg_boundary> common_chat_detect_msg_boundaries(const st
     }
 
     return {};
+}
+
+std::vector<common_chat_msg_boundary_token> common_chat_msg_boundaries_to_tokens(
+        const llama_vocab                           * vocab,
+        const std::vector<llama_token>              & tokens,
+        const std::vector<common_chat_msg_boundary> & boundaries,
+        bool                                          special) {
+    if (boundaries.empty() || tokens.empty()) {
+        return {};
+    }
+
+    std::vector<common_chat_msg_boundary_token> result;
+    result.reserve(boundaries.size());
+
+    size_t byte_offset = 0;
+    size_t b_idx       = 0;
+
+    for (int32_t t = 0; t < (int32_t) tokens.size(); t++) {
+        // Advance past any boundaries whose start falls at or before the current byte offset
+        while (b_idx < boundaries.size() && boundaries[b_idx].start <= byte_offset) {
+            if (b_idx > 0 && !result.empty()) {
+                result.back().token_end = t;
+            }
+            result.push_back({boundaries[b_idx].role, t, (int32_t) tokens.size()});
+            b_idx++;
+        }
+
+        std::string piece = common_token_to_piece(vocab, tokens[t], special);
+        byte_offset += piece.size();
+    }
+
+    // Pick up any remaining boundaries that start at or after the last token's bytes
+    while (b_idx < boundaries.size()) {
+        if (!result.empty()) {
+            result.back().token_end = (int32_t) tokens.size();
+        }
+        result.push_back({boundaries[b_idx].role, (int32_t) tokens.size(), (int32_t) tokens.size()});
+        b_idx++;
+    }
+
+    return result;
 }

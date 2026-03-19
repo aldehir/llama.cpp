@@ -3057,6 +3057,20 @@ std::unique_ptr<server_res_generator> server_routes::handle_completions_impl(
             inputs = tokenize_input_prompts(ctx_server.vocab, ctx_server.mctx, prompt, true, true);
         }
 
+        // Convert byte-offset message boundaries to token-position boundaries
+        if (data.contains("msg_boundaries") && !inputs.empty()) {
+            const auto & boundaries_json = data.at("msg_boundaries");
+            std::vector<common_chat_msg_boundary> byte_boundaries;
+            byte_boundaries.reserve(boundaries_json.size());
+            for (const auto & b : boundaries_json) {
+                byte_boundaries.push_back({b.at("role"), b.at("start"), b.at("end")});
+            }
+            for (auto & input : inputs) {
+                input.msg_boundaries = common_chat_msg_boundaries_to_tokens(
+                    ctx_server.vocab, input.get_text_tokens(), byte_boundaries, true);
+            }
+        }
+
         // tasks.reserve(inputs.size()); // TODO: this is inaccurate due to child tasks
 
         for (size_t i = 0; i < inputs.size(); i++) {

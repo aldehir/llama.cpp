@@ -1100,6 +1100,13 @@ json oaicompat_chat_params_parse(
     if (!chat_params.parser.empty()) {
         llama_params["chat_parser"] = chat_params.parser;
     }
+    if (!chat_params.msg_boundaries.empty()) {
+        auto boundaries_json = json::array();
+        for (const auto & b : chat_params.msg_boundaries) {
+            boundaries_json.push_back({{"role", b.role}, {"start", b.start}, {"end", b.end}});
+        }
+        llama_params["msg_boundaries"] = boundaries_json;
+    }
 
     // Reasoning budget: pass parameters through to sampling layer
     {
