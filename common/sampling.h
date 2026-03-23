@@ -64,12 +64,6 @@ struct llama_sampler * common_sampler_get(const struct common_sampler * gsmpl);
 //
 llama_token common_sampler_sample(struct common_sampler * gsmpl, struct llama_context * ctx, int idx, bool grammar_first = false);
 
-// Sample using externally-provided logits instead of reading from a llama_context.
-// Useful for testing (e.g., fuzz testing with random logits) where no context is available.
-// The logits array must have n_vocab elements. Applies the same rejection-sampling logic
-// as common_sampler_sample (grammar check, resample if rejected).
-llama_token common_sampler_sample_from_logits(struct common_sampler * gsmpl, const struct llama_vocab * vocab, const float * logits, bool grammar_first = false);
-
 // generalized version of common_sampler_sample
 //
 // will cross-reference the sampled tokens with a batch of draft tokens and accept those that match
