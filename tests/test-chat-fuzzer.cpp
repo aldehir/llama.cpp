@@ -1,7 +1,7 @@
 //  Fuzz test for grammar-constrained decoding of chat templates.
 //
 //  Loads a vocab-only model from a GGUF file, generates random token sequences
-//  constrained by the grammar sampler, and verifies the output is parseable.
+//  constrained by common_sampler (with grammar), and verifies the output is parseable.
 //
 //  Usage:
 //    ./test-chat-fuzzer --model <vocab.gguf> [--seed N] [--iterations N] [--max-tokens N] [--template <filter>] [--detailed]
@@ -13,6 +13,7 @@
 #include "chat.h"
 #include "common.h"
 #include "log.h"
+#include "sampling.h"
 
 #include <algorithm>
 #include <cassert>
@@ -114,60 +115,34 @@ static std::vector<std::string> get_template_paths() {
 }
 
 // ---------------------------------------------------------------------------
-// Grammar sampler creation (mirrors common/sampling.cpp)
+// Build a common_sampler from chat params (grammar + sampling chain)
 // ---------------------------------------------------------------------------
 
-static llama_sampler * create_grammar_sampler(
-        const llama_vocab        * vocab,
-        const common_chat_params & params) {
-    if (params.grammar.empty()) {
-        return nullptr;
+static common_sampler * create_sampler(
+        const llama_model        * model,
+        const common_chat_params & chat_params,
+        uint32_t                   seed) {
+
+    const llama_vocab * vocab = llama_model_get_vocab(model);
+
+    common_params_sampling sparams;
+    sparams.seed    = seed;
+    sparams.grammar = chat_params.grammar;
+    sparams.grammar_lazy = chat_params.grammar_lazy;
+    sparams.grammar_triggers = chat_params.grammar_triggers;
+
+    // Convert preserved token strings to token IDs (same as server-task.cpp)
+    for (const auto & t : chat_params.preserved_tokens) {
+        auto ids = common_tokenize(vocab, t, /* add_special= */ false, /* parse_special= */ true);
+        if (ids.size() == 1) {
+            sparams.preserved_tokens.insert(ids[0]);
+        }
     }
 
-    if (params.grammar_lazy) {
-        std::vector<std::string> trigger_patterns;
-        std::vector<llama_token> trigger_tokens;
+    // Use high temperature so the random logits produce diverse sampling
+    sparams.temp = 1.0f;
 
-        for (const auto & trigger : params.grammar_triggers) {
-            switch (trigger.type) {
-                case COMMON_GRAMMAR_TRIGGER_TYPE_WORD:
-                    trigger_patterns.push_back(regex_escape(trigger.value));
-                    break;
-                case COMMON_GRAMMAR_TRIGGER_TYPE_PATTERN:
-                    trigger_patterns.push_back(trigger.value);
-                    break;
-                case COMMON_GRAMMAR_TRIGGER_TYPE_PATTERN_FULL: {
-                    const auto & pattern = trigger.value;
-                    std::string anchored = "^$";
-                    if (!pattern.empty()) {
-                        anchored = (pattern.front() != '^' ? "^" : "")
-                            + pattern
-                            + (pattern.back() != '$' ? "$" : "");
-                    }
-                    trigger_patterns.push_back(anchored);
-                    break;
-                }
-                case COMMON_GRAMMAR_TRIGGER_TYPE_TOKEN:
-                    trigger_tokens.push_back(trigger.token);
-                    break;
-                default:
-                    break;
-            }
-        }
-
-        std::vector<const char *> trigger_patterns_c;
-        trigger_patterns_c.reserve(trigger_patterns.size());
-        for (const auto & p : trigger_patterns) {
-            trigger_patterns_c.push_back(p.c_str());
-        }
-
-        return llama_sampler_init_grammar_lazy_patterns(
-            vocab, params.grammar.c_str(), "root",
-            trigger_patterns_c.data(), trigger_patterns_c.size(),
-            trigger_tokens.data(), trigger_tokens.size());
-    }
-
-    return llama_sampler_init_grammar(vocab, params.grammar.c_str(), "root");
+    return common_sampler_init(model, sparams);
 }
 
 // ---------------------------------------------------------------------------
@@ -180,56 +155,41 @@ struct fuzz_generation {
 };
 
 static fuzz_generation generate_fuzz_sequence(
-        const llama_vocab * vocab,
-        llama_sampler     * grammar_smpl,
-        std::mt19937      & rng,
-        int                 max_tokens) {
+        const llama_vocab  * vocab,
+        common_sampler     * smpl,
+        std::mt19937       & rng,
+        int                  max_tokens) {
 
-    llama_sampler_reset(grammar_smpl);
+    common_sampler_reset(smpl);
 
     const int32_t n_vocab = llama_vocab_n_tokens(vocab);
     const llama_token tok_eos = llama_vocab_eos(vocab);
     const llama_token tok_eot = llama_vocab_eot(vocab);
 
-    std::vector<llama_token_data> candidates(n_vocab);
+    std::vector<float> logits(n_vocab);
     std::vector<llama_token> tokens;
 
-    // Random logit distribution — simulates random model output
     std::uniform_real_distribution<float> logit_dist(-1.0f, 1.0f);
 
     for (int step = 0; step < max_tokens; step++) {
-        // Fill with random logits
+        // Fill with random logits — simulates random model output
         for (int32_t i = 0; i < n_vocab; i++) {
-            candidates[i] = { i, logit_dist(rng), 0.0f };
+            logits[i] = logit_dist(rng);
         }
 
-        // Grammar sampler masks disallowed tokens (sets logit to -inf)
-        llama_token_data_array arr = { candidates.data(), (size_t)n_vocab, -1, false };
-        llama_sampler_apply(grammar_smpl, &arr);
+        // Use common_sampler with its full rejection-sampling logic:
+        // 1. Apply chain samplers (temp, top-k, etc.)
+        // 2. Check if sampled token is accepted by grammar
+        // 3. If not, resample with grammar mask applied first
+        llama_token tok = common_sampler_sample_from_logits(smpl, vocab, logits.data());
 
-        // Collect allowed tokens and sample from them using the random logits as weights
-        std::vector<llama_token> allowed;
-        std::vector<float>       weights;
-
-        for (int32_t i = 0; i < n_vocab; i++) {
-            if (candidates[i].logit > -1e9f) {  // not masked
-                allowed.push_back(candidates[i].id);
-                // Use exp(logit) as weight so higher random logits are more likely
-                weights.push_back(std::exp(candidates[i].logit));
-            }
+        if (tok == LLAMA_TOKEN_NULL) {
+            break;
         }
 
-        if (allowed.empty()) {
-            break;  // grammar complete or no valid continuations
-        }
-
-        std::discrete_distribution<size_t> dist(weights.begin(), weights.end());
-        llama_token tok = allowed[dist(rng)];
-
-        llama_sampler_accept(grammar_smpl, tok);
+        common_sampler_accept(smpl, tok, /* accept_grammar= */ true);
         tokens.push_back(tok);
 
-        // Stop on EOS/EOT
         if (tok == tok_eos || tok == tok_eot) {
             break;
         }
@@ -266,12 +226,14 @@ static const fuzz_mode fuzz_modes[] = {
 };
 
 static bool run_fuzz_tests(
-        const llama_vocab * vocab,
+        const llama_model * model,
         const std::string & template_filter,
         int                 iterations,
         int                 max_tokens,
         uint32_t            seed,
         bool                detailed) {
+
+    const llama_vocab * vocab = llama_model_get_vocab(model);
 
     bool all_passed     = true;
     int  total_tests    = 0;
@@ -325,9 +287,10 @@ static bool run_fuzz_tests(
                     common_chat_format_name(params.format),
                     (int)params.grammar_lazy);
 
-            llama_sampler * grammar_smpl = create_grammar_sampler(vocab, params);
-            if (!grammar_smpl) {
-                fprintf(stderr, "    FAIL: could not create grammar sampler\n");
+            // Create common_sampler with the grammar from chat params
+            common_sampler * smpl = create_sampler(model, params, seed);
+            if (!smpl) {
+                fprintf(stderr, "    FAIL: could not create sampler\n");
                 total_failures++;
                 all_passed = false;
                 continue;
@@ -351,7 +314,7 @@ static bool run_fuzz_tests(
             for (int iter = 0; iter < iterations; iter++) {
                 total_tests++;
 
-                auto gen = generate_fuzz_sequence(vocab, grammar_smpl, rng, max_tokens);
+                auto gen = generate_fuzz_sequence(vocab, smpl, rng, max_tokens);
 
                 if (gen.tokens.empty()) {
                     continue;
@@ -422,7 +385,7 @@ static bool run_fuzz_tests(
                 fprintf(stderr, "    OK (%d iterations)\n", iterations);
             }
 
-            llama_sampler_free(grammar_smpl);
+            common_sampler_free(smpl);
         }
     }
 
@@ -506,7 +469,7 @@ int main(int argc, char ** argv) {
     const llama_vocab * vocab = llama_model_get_vocab(model);
     fprintf(stderr, "Vocab size: %d\n\n", llama_vocab_n_tokens(vocab));
 
-    bool passed = run_fuzz_tests(vocab, template_filter, iterations, max_tokens, seed, detailed);
+    bool passed = run_fuzz_tests(model, template_filter, iterations, max_tokens, seed, detailed);
 
     llama_model_free(model);
     llama_backend_free();

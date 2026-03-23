@@ -530,6 +530,64 @@ llama_token common_sampler_sample(struct common_sampler * gsmpl, struct llama_co
     return id;
 }
 
+llama_token common_sampler_sample_from_logits(struct common_sampler * gsmpl, const struct llama_vocab * vocab, const float * logits, bool grammar_first) {
+    const auto tm = gsmpl->tm();
+
+    const int n_vocab = llama_vocab_n_tokens(vocab);
+
+    auto & grmr  = gsmpl->grmr;
+    auto & chain = gsmpl->chain;
+    auto & cur   = gsmpl->cur;
+    auto & cur_p = gsmpl->cur_p;
+
+    auto fill_logits = [&]() {
+        cur.resize(n_vocab);
+        for (int i = 0; i < n_vocab; i++) {
+            cur[i] = llama_token_data{i, logits[i], 0.0f};
+        }
+        cur_p = { cur.data(), cur.size(), -1, false };
+    };
+
+    fill_logits();
+
+    if (grammar_first) {
+        llama_sampler_apply(grmr, &cur_p);
+    }
+
+    llama_sampler_apply(chain, &cur_p);
+
+    llama_token id = cur_p.data[cur_p.selected].id;
+
+    if (grammar_first) {
+        return id;
+    }
+
+    // grammar-based rejection sampling
+    {
+        llama_token_data       single_token_data       = { id, 1.0f, 0.0f };
+        llama_token_data_array single_token_data_array = { &single_token_data, 1, -1, false };
+
+        llama_sampler_apply(grmr, &single_token_data_array);
+
+        const bool is_valid = single_token_data_array.data[0].logit != -INFINITY;
+        if (is_valid) {
+            return id;
+        }
+    }
+
+    // resampling: apply grammar first, then chain
+    fill_logits();
+
+    llama_sampler_apply(grmr,  &cur_p);
+    llama_sampler_apply(chain, &cur_p);
+
+    GGML_ASSERT(cur_p.selected != -1 && "no selected token during sampling - check your sampling configuration");
+
+    id = cur_p.data[cur_p.selected].id;
+
+    return id;
+}
+
 std::vector<llama_token> common_sampler_sample_and_accept_n(struct common_sampler * gsmpl, struct llama_context * ctx, const std::vector<int> & idxs, const llama_tokens & draft, bool grammar_first) {
     GGML_ASSERT(idxs.size() == draft.size() + 1 && "idxs.size() must be draft.size() + 1");
 
