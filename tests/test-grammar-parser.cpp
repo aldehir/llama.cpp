@@ -650,5 +650,50 @@ int main()
         {LLAMA_GRETYPE_END, 0},
     });
 
+    // Left factorization with partial literal prefix: "true" and "try" share "tr"
+    verify_parsing(R"""(
+        root ::= "true" | "try"
+    )""", {
+        {"root", 0},
+        {"root_1", 1},
+    }, {
+        // root (index 0)
+        // "true" and "try" expanded to single chars, factored on common "tr"
+        {LLAMA_GRETYPE_CHAR, 't'},
+        {LLAMA_GRETYPE_CHAR, 'r'},
+        {LLAMA_GRETYPE_RULE_REF, /* root_1 */ 1},
+        {LLAMA_GRETYPE_END, 0},
+        // root_1 (index 1)
+        {LLAMA_GRETYPE_CHAR, 'u'},
+        {LLAMA_GRETYPE_CHAR, 'e'},
+        {LLAMA_GRETYPE_ALT, 0},
+        {LLAMA_GRETYPE_CHAR, 'y'},
+        {LLAMA_GRETYPE_END, 0},
+    });
+
+    // Left factorization with three literals sharing partial prefix
+    verify_parsing(R"""(
+        root ::= "abc" | "abd" | "xyz"
+    )""", {
+        {"root", 0},
+        {"root_1", 1},
+    }, {
+        // root (index 0)
+        // "abc" and "abd" share "ab", "xyz" is separate
+        {LLAMA_GRETYPE_CHAR, 'a'},
+        {LLAMA_GRETYPE_CHAR, 'b'},
+        {LLAMA_GRETYPE_RULE_REF, /* root_1 */ 1},
+        {LLAMA_GRETYPE_ALT, 0},
+        {LLAMA_GRETYPE_CHAR, 'x'},
+        {LLAMA_GRETYPE_CHAR, 'y'},
+        {LLAMA_GRETYPE_CHAR, 'z'},
+        {LLAMA_GRETYPE_END, 0},
+        // root_1 (index 1)
+        {LLAMA_GRETYPE_CHAR, 'c'},
+        {LLAMA_GRETYPE_ALT, 0},
+        {LLAMA_GRETYPE_CHAR, 'd'},
+        {LLAMA_GRETYPE_END, 0},
+    });
+
     return 0;
 }

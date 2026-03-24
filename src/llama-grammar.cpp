@@ -697,8 +697,34 @@ static bool ast_elements_equal(
     return false;
 }
 
+// Expand multi-codepoint LITERALs into single-codepoint LITERALs so that
+// left factorization can find shared character-level prefixes naturally.
+static void expand_literals(llama_grammar_ast_alternates & alts) {
+    for (auto & seq : alts.sequences) {
+        llama_grammar_ast_sequence expanded;
+        for (auto & elem : seq) {
+            if (elem.type == LLAMA_GRAMMAR_AST_LITERAL && elem.literal_code_points.size() > 1) {
+                for (uint32_t cp : elem.literal_code_points) {
+                    llama_grammar_ast_element single;
+                    single.type = LLAMA_GRAMMAR_AST_LITERAL;
+                    single.literal_code_points.push_back(cp);
+                    expanded.push_back(std::move(single));
+                }
+            } else {
+                expanded.push_back(std::move(elem));
+            }
+            // Recurse into groups
+            if (expanded.back().type == LLAMA_GRAMMAR_AST_GROUP && expanded.back().group) {
+                expand_literals(*expanded.back().group);
+            }
+        }
+        seq = std::move(expanded);
+    }
+}
+
 void llama_grammar_parser::left_factor() {
     for (auto & rule : ast.rules) {
+        expand_literals(rule.alternates);
         left_factor_alternates(rule.alternates, rule.name);
     }
 }
