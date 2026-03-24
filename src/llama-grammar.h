@@ -42,6 +42,10 @@ enum llama_gretype {
 
     // inverse token (!<[token-id]>)
     LLAMA_GRETYPE_TOKEN_NOT      = 9,
+
+    // zero-width trigger marker: when the PDA crosses this element,
+    // grammar enforcement (logit masking) activates
+    LLAMA_GRETYPE_TRIGGER        = 10,
 };
 
 typedef struct llama_grammar_element {
@@ -141,6 +145,7 @@ struct llama_grammar {
     // (useful e.g. for tool_choice=required)
     bool                     lazy             = false;
     bool                     awaiting_trigger = false; // Initialized to true for lazy grammars only
+    bool                     has_trigger_rule = false; // True if a TRIGGER marker was injected (grammar-tracked triggering)
     std::string              trigger_buffer;           // Output buffered by lazy grammar. Will be cleared once trigger is found.
     std::vector<token_pos>   trigger_buffer_positions; // Tokens buffered by lazy grammar. Used to replay when a trigger is found.
     std::vector<llama_token> trigger_tokens;           // Tokens that trigger a lazy grammar, or tokens to force printing of (even if special).

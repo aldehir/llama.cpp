@@ -260,6 +260,7 @@ static void print_rule_binary(FILE * file, const llama_grammar_rule & rule) {
             case LLAMA_GRETYPE_CHAR_ANY:       fprintf(file, "CHAR_ANY");       break;
             case LLAMA_GRETYPE_TOKEN:          fprintf(file, "TOKEN");          break;
             case LLAMA_GRETYPE_TOKEN_NOT:      fprintf(file, "TOKEN_NOT");      break;
+            case LLAMA_GRETYPE_TRIGGER:        fprintf(file, "TRIGGER");        break;
         }
         switch (elem.type) {
             case LLAMA_GRETYPE_END:
@@ -286,6 +287,9 @@ static void print_rule_binary(FILE * file, const llama_grammar_rule & rule) {
                 fprintf(file, "<[");
                 fprintf(file, "%u", elem.value);
                 fprintf(file, "]> ");
+                break;
+            case LLAMA_GRETYPE_TRIGGER:
+                fprintf(file, " ");
                 break;
         }
     }
@@ -827,10 +831,13 @@ static bool llama_grammar_match_token(
 
 // transforms a grammar pushdown stack into N possible stacks, all ending
 // at a character range (terminal element)
+// triggered_stacks: if non-null, stacks that pass through a TRIGGER marker are routed here
+//                   instead of new_stacks. This allows callers to separate pre/post-trigger paths.
 static void llama_grammar_advance_stack(
         const llama_grammar_rules  & rules,
         const llama_grammar_stack  & stack,
-              llama_grammar_stacks & new_stacks) {
+              llama_grammar_stacks & new_stacks,
+              llama_grammar_stacks * triggered_stacks = nullptr) {
     if (stack.empty()) {
         if (std::find(new_stacks.begin(), new_stacks.end(), stack) == new_stacks.end()) {
             new_stacks.emplace_back(stack);
@@ -855,7 +862,7 @@ static void llama_grammar_advance_stack(
                     // if alternate is nonempty, add to stack
                     new_stack.push_back(subpos);
                 }
-                llama_grammar_advance_stack(rules, new_stack, new_stacks);
+                llama_grammar_advance_stack(rules, new_stack, new_stacks, triggered_stacks);
                 while (!llama_grammar_is_end_of_sequence(subpos)) {
                     // scan to end of alternate def
                     subpos++;
@@ -867,6 +874,20 @@ static void llama_grammar_advance_stack(
                     break;
                 }
             } while (true);
+            break;
+        }
+        case LLAMA_GRETYPE_TRIGGER: {
+            // zero-width marker: skip it and continue with the next element.
+            // Route all resulting stacks to triggered_stacks if provided.
+            llama_grammar_stack new_stack(stack.begin(), stack.end() - 1);
+            if (!llama_grammar_is_end_of_sequence(pos + 1)) {
+                new_stack.push_back(pos + 1);
+            }
+            if (triggered_stacks) {
+                llama_grammar_advance_stack(rules, new_stack, *triggered_stacks, triggered_stacks);
+            } else {
+                llama_grammar_advance_stack(rules, new_stack, new_stacks, nullptr);
+            }
             break;
         }
         case LLAMA_GRETYPE_CHAR:
@@ -971,7 +992,8 @@ static void llama_grammar_accept_chr(
         struct llama_grammar       & grammar,
         const llama_grammar_stack  & stack,
               uint32_t               chr,
-              llama_grammar_stacks & new_stacks) {
+              llama_grammar_stacks & new_stacks,
+              llama_grammar_stacks * triggered_stacks = nullptr) {
     if (stack.empty()) {
         return;
     }
@@ -989,19 +1011,28 @@ static void llama_grammar_accept_chr(
         if (!llama_grammar_is_end_of_sequence(match.second)) {
             new_stack.push_back(match.second);
         }
-        llama_grammar_advance_stack(grammar.rules, new_stack, new_stacks);
+        llama_grammar_advance_stack(grammar.rules, new_stack, new_stacks, triggered_stacks);
     }
 }
 
 void llama_grammar_accept(struct llama_grammar * grammar, uint32_t chr) {
+    const bool tracking_trigger = grammar->awaiting_trigger;
+
     llama_grammar_stacks stacks_new;
+    llama_grammar_stacks stacks_triggered;
     stacks_new.reserve(grammar->stacks.size());
 
     for (const auto & stack : grammar->stacks) {
-        llama_grammar_accept_chr(*grammar, stack, chr, stacks_new);
+        llama_grammar_accept_chr(*grammar, stack, chr, stacks_new,
+            tracking_trigger ? &stacks_triggered : nullptr);
     }
 
-    grammar->stacks = std::move(stacks_new);
+    if (tracking_trigger && !stacks_triggered.empty()) {
+        grammar->stacks = std::move(stacks_triggered);
+        grammar->awaiting_trigger = false;
+    } else {
+        grammar->stacks = std::move(stacks_new);
+    }
 }
 
 llama_grammar_candidates llama_grammar_reject_candidates_for_stack(
@@ -1139,6 +1170,7 @@ struct llama_grammar * llama_grammar_init_impl(
         /* .partial_utf8 = */             {},
         /* .lazy = */                     false,
         /* .awaiting_trigger = */         false,
+        /* .has_trigger_rule = */         false,
         /* .trigger_buffer = */           "",
         /* .trigger_buffer_positions = */ {},
         /* .trigger_tokens = */           {},
@@ -1184,6 +1216,28 @@ struct llama_grammar * llama_grammar_init_impl(
             vec_rules[i].push_back(*pos);
         }
         vec_rules[i].push_back({LLAMA_GRETYPE_END, 0});
+    }
+
+    // If the grammar contains a "trigger" rule, inject a TRIGGER marker into the start rule
+    // right after each RULE_REF to the trigger. This enables grammar-tracked lazy triggering.
+    auto trigger_it = parser.symbol_ids.find("trigger");
+    if (trigger_it != parser.symbol_ids.end()) {
+        const uint32_t trigger_rule_id = trigger_it->second;
+        auto & start_rule = vec_rules[start_rule_index];
+
+        // Scan the start rule for RULE_REF(trigger) and insert TRIGGER marker after each one.
+        // We iterate in reverse to keep insertion indices stable.
+        for (int i = (int)start_rule.size() - 1; i >= 0; i--) {
+            if (start_rule[i].type == LLAMA_GRETYPE_RULE_REF &&
+                start_rule[i].value == trigger_rule_id) {
+                start_rule.insert(start_rule.begin() + i + 1, {LLAMA_GRETYPE_TRIGGER, 0});
+            }
+        }
+
+        // Auto-enable lazy mode
+        lazy = true;
+
+        LLAMA_LOG_DEBUG("Grammar has 'trigger' rule (id %u), injected TRIGGER marker into start rule\n", trigger_rule_id);
     }
 
     // Check for left recursion
@@ -1238,6 +1292,8 @@ struct llama_grammar * llama_grammar_init_impl(
     // Important: vec_rules has to be moved here, not copied, because stacks contains
     // pointers to elements of vec_rules. If vec_rules were copied into llama_grammar
     // then the pointers would be invalidated when the local vec_rules goes out of scope.
+    const bool has_trigger = (trigger_it != parser.symbol_ids.end());
+
     return new llama_grammar {
         vocab,
         std::move(vec_rules),
@@ -1245,6 +1301,7 @@ struct llama_grammar * llama_grammar_init_impl(
         /* .partial_utf8 = */             {},
         /* .lazy = */                     lazy,
         /* .awaiting_trigger = */         lazy,
+        /* .has_trigger_rule = */         has_trigger,
         /* .trigger_buffer = */           "",
         /* .trigger_buffer_positions = */ {},
         std::move(vec_trigger_tokens),
@@ -1268,6 +1325,7 @@ struct llama_grammar * llama_grammar_clone_impl(const struct llama_grammar & gra
         grammar.partial_utf8,
         grammar.lazy,
         grammar.awaiting_trigger,
+        grammar.has_trigger_rule,
         grammar.trigger_buffer,
         grammar.trigger_buffer_positions,
         grammar.trigger_tokens,
@@ -1337,6 +1395,25 @@ void llama_grammar_accept_impl(struct llama_grammar & grammar, llama_token token
     GGML_ASSERT(grammar.vocab != nullptr);
 
     const auto & piece = grammar.vocab->token_to_piece(token);
+
+    // Grammar-tracked trigger: the grammar always advances, and accept_token
+    // handles the trigger transition internally via the TRIGGER marker.
+    if (grammar.has_trigger_rule) {
+        if (grammar.vocab->is_eog(token)) {
+            // Before trigger: EOG is fine (no enforcement yet)
+            if (grammar.awaiting_trigger) {
+                return;
+            }
+            for (const auto & stack : grammar.stacks) {
+                if (stack.empty()) {
+                    return;
+                }
+            }
+            GGML_ABORT("fatal error");
+        }
+        llama_grammar_accept_token(grammar, token, piece);
+        return;
+    }
 
     if (grammar.awaiting_trigger) {
         if (std::find(grammar.trigger_tokens.begin(), grammar.trigger_tokens.end(), token) != grammar.trigger_tokens.end()) {
@@ -1412,7 +1489,10 @@ void llama_grammar_accept_token(struct llama_grammar & grammar, llama_token toke
     const auto   decoded     = decode_utf8(piece, grammar.partial_utf8);
     const auto & code_points = decoded.first;
 
+    const bool tracking_trigger = grammar.awaiting_trigger;
+
     llama_grammar_stacks stacks_new;
+    llama_grammar_stacks stacks_triggered;
     stacks_new.reserve(grammar.stacks.size());
 
     for (const auto & stack : grammar.stacks) {
@@ -1428,20 +1508,29 @@ void llama_grammar_accept_token(struct llama_grammar & grammar, llama_token toke
                 if (!llama_grammar_is_end_of_sequence(pos + 1)) {
                     new_stack.push_back(pos + 1);
                 }
-                llama_grammar_advance_stack(grammar.rules, new_stack, stacks_new);
+                llama_grammar_advance_stack(grammar.rules, new_stack, stacks_new,
+                    tracking_trigger ? &stacks_triggered : nullptr);
             }
         } else {
             llama_grammar_stacks current_stacks = {stack};
+            llama_grammar_stacks current_triggered;
 
             for (auto it = code_points.begin(), end = code_points.end() - 1; it != end; ++it) {
                 llama_grammar_stacks next_stacks;
+                llama_grammar_stacks next_triggered;
 
                 for (const auto & cur_stack : current_stacks) {
-                    llama_grammar_accept_chr(grammar, cur_stack, *it, next_stacks);
+                    llama_grammar_accept_chr(grammar, cur_stack, *it, next_stacks,
+                        tracking_trigger ? &next_triggered : nullptr);
+                }
+                // Stacks that already crossed the trigger continue as triggered
+                for (const auto & cur_stack : current_triggered) {
+                    llama_grammar_accept_chr(grammar, cur_stack, *it, next_triggered, nullptr);
                 }
 
-                current_stacks = std::move(next_stacks);
-                if (current_stacks.empty()) {
+                current_stacks    = std::move(next_stacks);
+                current_triggered = std::move(next_triggered);
+                if (current_stacks.empty() && current_triggered.empty()) {
                     break;
                 }
             }
@@ -1451,13 +1540,32 @@ void llama_grammar_accept_token(struct llama_grammar & grammar, llama_token toke
                     stacks_new.emplace_back(surviving_stack);
                 }
             }
+            for (auto & surviving_stack : current_triggered) {
+                if (std::find(stacks_triggered.begin(), stacks_triggered.end(), surviving_stack) == stacks_triggered.end()) {
+                    stacks_triggered.emplace_back(surviving_stack);
+                }
+            }
         }
     }
 
-    grammar.stacks = std::move(stacks_new);
+    // If any stacks crossed the trigger, commit to those and activate enforcement
+    if (tracking_trigger && !stacks_triggered.empty()) {
+        grammar.stacks = std::move(stacks_triggered);
+        grammar.awaiting_trigger = false;
+        LLAMA_LOG_DEBUG("Grammar trigger rule reached, activating enforcement\n");
+    } else {
+        grammar.stacks = std::move(stacks_new);
+    }
+
     grammar.partial_utf8 = decoded.second;
 
     if (grammar.stacks.empty()) {
+        if (grammar.awaiting_trigger) {
+            // Before trigger, stacks dying is expected if grammar can't match the freeform output.
+            // This shouldn't happen if the grammar has a proper wildcard prefix.
+            LLAMA_LOG_WARN("Grammar stacks empty while awaiting trigger after piece: %s\n", piece.c_str());
+            return;
+        }
         throw std::runtime_error("Unexpected empty grammar stack after accepting piece: " + piece + " (" + std::to_string(token) + ")");
     }
 }
