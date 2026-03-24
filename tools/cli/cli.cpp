@@ -10,7 +10,6 @@
 #include <array>
 #include <atomic>
 #include <algorithm>
-#include <climits>
 #include <filesystem>
 #include <fstream>
 #include <thread>
@@ -100,25 +99,12 @@ struct cli_context {
                 task.params.chat_parser_params.parser.load(chat_params.parser);
             }
 
-            // reasoning budget sampler — always enabled for models with thinking tags
-            // so the grammar sampler can defer during active reasoning
-            if (!chat_params.thinking_end_tag.empty()) {
-                const llama_vocab * vocab = llama_model_get_vocab(
-                    llama_get_model(ctx_server.get_llama_context()));
-
-                task.params.sampling.reasoning_budget_tokens =
-                    reasoning_budget >= 0 ? reasoning_budget : INT32_MAX;
-                task.params.sampling.generation_prompt = chat_params.generation_prompt;
-
-                if (!chat_params.thinking_start_tag.empty()) {
-                    task.params.sampling.reasoning_budget_start =
-                        common_tokenize(vocab, chat_params.thinking_start_tag, false, true);
-                }
-                task.params.sampling.reasoning_budget_end =
-                    common_tokenize(vocab, chat_params.thinking_end_tag, false, true);
-                task.params.sampling.reasoning_budget_forced =
-                    common_tokenize(vocab, reasoning_budget_message + chat_params.thinking_end_tag, false, true);
-            }
+            // reasoning budget sampler
+            task.params.sampling.generation_prompt        = chat_params.generation_prompt;
+            task.params.sampling.thinking_start_tag       = chat_params.thinking_start_tag;
+            task.params.sampling.thinking_end_tag         = chat_params.thinking_end_tag;
+            task.params.sampling.reasoning_budget         = reasoning_budget;
+            task.params.sampling.reasoning_budget_message = reasoning_budget_message;
 
             rd.post_task({std::move(task)});
         }

@@ -282,11 +282,12 @@ struct common_params_sampling {
     std::string generation_prompt;
 
     // reasoning budget sampler parameters
-    // these are populated by the server/CLI based on chat template params
-    int32_t                  reasoning_budget_tokens   = -1;   // -1 = disabled, >= 0 = token budget
-    std::vector<llama_token> reasoning_budget_start;           // start tag token sequence
-    std::vector<llama_token> reasoning_budget_end;             // end tag token sequence
-    std::vector<llama_token> reasoning_budget_forced;          // forced sequence (message + end tag)
+    // when thinking_end_tag is non-empty the sampler is always created;
+    // budget defaults to INT32_MAX (unlimited) when not explicitly set.
+    int32_t     reasoning_budget         = -1;  // -1 = unlimited, >= 0 = token budget
+    std::string thinking_start_tag;             // e.g. "<think>"
+    std::string thinking_end_tag;               // e.g. "</think>"
+    std::string reasoning_budget_message;       // message injected before end tag when budget exhausted
 
     bool backend_sampling = false;
 

@@ -9,7 +9,6 @@
 
 #include "server-common.h"
 
-#include <climits>
 #include <random>
 #include <sstream>
 #include <fstream>
@@ -1111,16 +1110,10 @@ json oaicompat_chat_params_parse(
             reasoning_budget = json_value(body, "thinking_budget_tokens", -1);
         }
 
-        // Always pass reasoning budget params for models with thinking tags
-        // so the grammar sampler can defer during active reasoning.
-        // Default to INT32_MAX (effectively unlimited) when not explicitly set.
-        if (!chat_params.thinking_end_tag.empty()) {
-            llama_params["reasoning_budget_tokens"] =
-                reasoning_budget >= 0 ? reasoning_budget : INT32_MAX;
-            llama_params["reasoning_budget_start_tag"] = chat_params.thinking_start_tag;
-            llama_params["reasoning_budget_end_tag"] = chat_params.thinking_end_tag;
-            llama_params["reasoning_budget_message"] = opt.reasoning_budget_message;
-        }
+        llama_params["reasoning_budget"]         = reasoning_budget;
+        llama_params["thinking_start_tag"]       = chat_params.thinking_start_tag;
+        llama_params["thinking_end_tag"]         = chat_params.thinking_end_tag;
+        llama_params["reasoning_budget_message"] = opt.reasoning_budget_message;
     }
 
     // Handle "logprobs" field

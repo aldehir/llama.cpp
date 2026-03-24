@@ -475,30 +475,11 @@ task_params server_task::params_from_json_cmpl(
         }
     }
 
-    // Parse reasoning budget sampler parameters
-    {
-        const int32_t budget = json_value(data, "reasoning_budget_tokens", (int32_t) -1);
-        if (budget >= 0) {
-            const auto start_tag = json_value(data, "reasoning_budget_start_tag", std::string());
-            const auto end_tag   = json_value(data, "reasoning_budget_end_tag", std::string());
-            const auto message   = json_value(data, "reasoning_budget_message", std::string());
-            params.sampling.reasoning_budget_tokens = budget;
-
-            if (!start_tag.empty()) {
-                params.sampling.reasoning_budget_start = common_tokenize(vocab, start_tag, false, true);
-            }
-            if (!end_tag.empty()) {
-                params.sampling.reasoning_budget_end = common_tokenize(vocab, end_tag, false, true);
-                params.sampling.reasoning_budget_forced = common_tokenize(vocab, message + end_tag, false, true);
-            }
-
-            SRV_DBG("reasoning budget: tokens=%d, generation_prompt='%s', start=%zu toks, end=%zu toks, forced=%zu toks\n",
-                budget, params.sampling.generation_prompt.c_str(),
-                params.sampling.reasoning_budget_start.size(),
-                params.sampling.reasoning_budget_end.size(),
-                params.sampling.reasoning_budget_forced.size());
-        }
-    }
+    // Reasoning budget sampler parameters — tokenization is handled by common_sampler_init
+    params.sampling.reasoning_budget         = json_value(data, "reasoning_budget",         (int32_t) -1);
+    params.sampling.thinking_start_tag       = json_value(data, "thinking_start_tag",       std::string());
+    params.sampling.thinking_end_tag         = json_value(data, "thinking_end_tag",         std::string());
+    params.sampling.reasoning_budget_message = json_value(data, "reasoning_budget_message", std::string());
 
     {
         params.sampling.logit_bias.clear();

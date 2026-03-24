@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <climits>
 #include <cmath>
 #include <cstring>
 #include <unordered_map>
@@ -285,16 +286,22 @@ struct common_sampler * common_sampler_init(const struct llama_model * model, st
         }
     }
 
-    // reasoning budget sampler — added first so it can force tokens before other samplers
+    // reasoning budget sampler — added first so it can force tokens before other samplers.
+    // created automatically for any model with thinking tags so that grammar
+    // deferral during active reasoning is always available.
     struct llama_sampler * rbudget = nullptr;
-    if (params.reasoning_budget_tokens >= 0 && !params.reasoning_budget_forced.empty()) {
+    if (!params.thinking_end_tag.empty() && vocab) {
+        const int32_t budget = params.reasoning_budget >= 0
+            ? params.reasoning_budget : INT32_MAX;
+
+        auto start_tokens  = !params.thinking_start_tag.empty()
+            ? common_tokenize(vocab, params.thinking_start_tag, false, true)
+            : std::vector<llama_token>{};
+        auto end_tokens    = common_tokenize(vocab, params.thinking_end_tag, false, true);
+        auto forced_tokens = common_tokenize(vocab, params.reasoning_budget_message + params.thinking_end_tag, false, true);
+
         rbudget = common_reasoning_budget_init(
-            vocab,
-            params.reasoning_budget_start,
-            params.reasoning_budget_end,
-            params.reasoning_budget_forced,
-            params.reasoning_budget_tokens,
-            prefill_tokens);
+            vocab, start_tokens, end_tokens, forced_tokens, budget, prefill_tokens);
         samplers.push_back(rbudget);
     }
 
