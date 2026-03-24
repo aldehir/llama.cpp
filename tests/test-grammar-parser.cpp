@@ -533,5 +533,122 @@ int main()
         {LLAMA_GRETYPE_END, 0},
     });
 
+    // Left factorization tests
+
+    // Basic left factorization: two sequences sharing a common prefix
+    verify_parsing(R"""(
+        root ::= "a" "b" "c" | "a" "b" "d"
+    )""", {
+        {"root", 0},
+        {"root_1", 1},
+    }, {
+        // root (index 0)
+        {LLAMA_GRETYPE_CHAR, 'a'},
+        {LLAMA_GRETYPE_CHAR, 'b'},
+        {LLAMA_GRETYPE_RULE_REF, /* root_1 */ 1},
+        {LLAMA_GRETYPE_END, 0},
+        // root_1 (index 1)
+        {LLAMA_GRETYPE_CHAR, 'c'},
+        {LLAMA_GRETYPE_ALT, 0},
+        {LLAMA_GRETYPE_CHAR, 'd'},
+        {LLAMA_GRETYPE_END, 0},
+    });
+
+    // Partial overlap: some sequences share prefix, others don't
+    verify_parsing(R"""(
+        root ::= "x" "y" | "x" "z" | "w"
+    )""", {
+        {"root", 0},
+        {"root_1", 1},
+    }, {
+        // root (index 0)
+        {LLAMA_GRETYPE_CHAR, 'x'},
+        {LLAMA_GRETYPE_RULE_REF, /* root_1 */ 1},
+        {LLAMA_GRETYPE_ALT, 0},
+        {LLAMA_GRETYPE_CHAR, 'w'},
+        {LLAMA_GRETYPE_END, 0},
+        // root_1 (index 1)
+        {LLAMA_GRETYPE_CHAR, 'y'},
+        {LLAMA_GRETYPE_ALT, 0},
+        {LLAMA_GRETYPE_CHAR, 'z'},
+        {LLAMA_GRETYPE_END, 0},
+    });
+
+    // No common prefix: left factorization should be a no-op
+    verify_parsing(R"""(
+        root ::= "a" | "b" | "c"
+    )""", {
+        {"root", 0},
+    }, {
+        // root (index 0)
+        {LLAMA_GRETYPE_CHAR, 'a'},
+        {LLAMA_GRETYPE_ALT, 0},
+        {LLAMA_GRETYPE_CHAR, 'b'},
+        {LLAMA_GRETYPE_ALT, 0},
+        {LLAMA_GRETYPE_CHAR, 'c'},
+        {LLAMA_GRETYPE_END, 0},
+    });
+
+    // Three sequences sharing a prefix, factored together
+    verify_parsing(R"""(
+        root ::= "a" "x" | "a" "y" | "a" "z"
+    )""", {
+        {"root", 0},
+        {"root_1", 1},
+    }, {
+        // root (index 0)
+        {LLAMA_GRETYPE_CHAR, 'a'},
+        {LLAMA_GRETYPE_RULE_REF, /* root_1 */ 1},
+        {LLAMA_GRETYPE_END, 0},
+        // root_1 (index 1)
+        {LLAMA_GRETYPE_CHAR, 'x'},
+        {LLAMA_GRETYPE_ALT, 0},
+        {LLAMA_GRETYPE_CHAR, 'y'},
+        {LLAMA_GRETYPE_ALT, 0},
+        {LLAMA_GRETYPE_CHAR, 'z'},
+        {LLAMA_GRETYPE_END, 0},
+    });
+
+    // Left factorization with rule references
+    verify_parsing(R"""(
+        root  ::= item ";" | item ","
+        item  ::= "x"
+    )""", {
+        {"item", 1},
+        {"root", 0},
+        {"root_2", 2},
+    }, {
+        // root (index 0)
+        {LLAMA_GRETYPE_RULE_REF, /* item */ 1},
+        {LLAMA_GRETYPE_RULE_REF, /* root_2 */ 2},
+        {LLAMA_GRETYPE_END, 0},
+        // item (index 1)
+        {LLAMA_GRETYPE_CHAR, 'x'},
+        {LLAMA_GRETYPE_END, 0},
+        // root_2 (index 2)
+        {LLAMA_GRETYPE_CHAR, ';'},
+        {LLAMA_GRETYPE_ALT, 0},
+        {LLAMA_GRETYPE_CHAR, ','},
+        {LLAMA_GRETYPE_END, 0},
+    });
+
+    // Left factorization where one sequence is a prefix of another
+    verify_parsing(R"""(
+        root ::= "a" "b" | "a" "b" "c"
+    )""", {
+        {"root", 0},
+        {"root_1", 1},
+    }, {
+        // root (index 0)
+        {LLAMA_GRETYPE_CHAR, 'a'},
+        {LLAMA_GRETYPE_CHAR, 'b'},
+        {LLAMA_GRETYPE_RULE_REF, /* root_1 */ 1},
+        {LLAMA_GRETYPE_END, 0},
+        // root_1 (index 1)
+        {LLAMA_GRETYPE_ALT, 0},
+        {LLAMA_GRETYPE_CHAR, 'c'},
+        {LLAMA_GRETYPE_END, 0},
+    });
+
     return 0;
 }

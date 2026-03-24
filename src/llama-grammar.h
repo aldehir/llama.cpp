@@ -186,6 +186,12 @@ struct llama_grammar_parser {
     bool parse(const char * src);
     void print(FILE * file);
 
+    // AST optimization: left factorization
+    void left_factor();
+    void left_factor_alternates(
+            llama_grammar_ast_alternates & alts,
+            const std::string             & rule_name);
+
     // codegen: AST to PDA rules
     void codegen();
     void codegen_rule(const llama_grammar_ast_rule & rule);

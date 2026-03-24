@@ -658,6 +658,141 @@ const char * llama_grammar_parser::parse_rule(const char * src) {
     return parse_space(pos, true);
 }
 
+// AST optimization: left factorization
+
+static bool ast_elements_equal(
+        const llama_grammar_ast_element & a,
+        const llama_grammar_ast_element & b) {
+    if (a.type != b.type) {
+        return false;
+    }
+    switch (a.type) {
+        case LLAMA_GRAMMAR_AST_LITERAL:
+            return a.literal_code_points == b.literal_code_points;
+        case LLAMA_GRAMMAR_AST_CHAR_RANGE:
+            if (a.char_range_negated != b.char_range_negated) {
+                return false;
+            }
+            if (a.char_ranges.size() != b.char_ranges.size()) {
+                return false;
+            }
+            for (size_t i = 0; i < a.char_ranges.size(); i++) {
+                if (a.char_ranges[i].first != b.char_ranges[i].first ||
+                    a.char_ranges[i].last  != b.char_ranges[i].last) {
+                    return false;
+                }
+            }
+            return true;
+        case LLAMA_GRAMMAR_AST_RULE_REF:
+            return a.rule_ref_id == b.rule_ref_id;
+        case LLAMA_GRAMMAR_AST_ANY_CHAR:
+            return true;
+        case LLAMA_GRAMMAR_AST_TOKEN:
+            return a.token_id == b.token_id && a.token_negated == b.token_negated;
+        case LLAMA_GRAMMAR_AST_GROUP:
+            return false; // deep comparison not supported
+        case LLAMA_GRAMMAR_AST_REPETITION:
+            return false; // deep comparison not supported
+    }
+    return false;
+}
+
+void llama_grammar_parser::left_factor() {
+    for (auto & rule : ast.rules) {
+        left_factor_alternates(rule.alternates, rule.name);
+    }
+}
+
+void llama_grammar_parser::left_factor_alternates(
+        llama_grammar_ast_alternates & alts,
+        const std::string             & rule_name) {
+    if (alts.sequences.size() <= 1) {
+        return;
+    }
+
+    std::vector<llama_grammar_ast_sequence> new_sequences;
+
+    size_t i = 0;
+    while (i < alts.sequences.size()) {
+        // Skip empty sequences
+        if (alts.sequences[i].empty()) {
+            new_sequences.push_back(std::move(alts.sequences[i]));
+            i++;
+            continue;
+        }
+
+        // Find consecutive sequences sharing the same first element
+        size_t group_start = i;
+        size_t group_end   = i + 1;
+        while (group_end < alts.sequences.size() &&
+               !alts.sequences[group_end].empty() &&
+               ast_elements_equal(alts.sequences[group_start][0], alts.sequences[group_end][0])) {
+            group_end++;
+        }
+
+        if (group_end - group_start <= 1) {
+            // Single sequence, no factoring needed
+            new_sequences.push_back(std::move(alts.sequences[i]));
+            i++;
+            continue;
+        }
+
+        // Find the longest common prefix among sequences [group_start, group_end)
+        size_t prefix_len = alts.sequences[group_start].size();
+        for (size_t j = group_start + 1; j < group_end; j++) {
+            size_t max_len = std::min(prefix_len, alts.sequences[j].size());
+            size_t k = 0;
+            while (k < max_len && ast_elements_equal(alts.sequences[group_start][k], alts.sequences[j][k])) {
+                k++;
+            }
+            prefix_len = k;
+        }
+
+        GGML_ASSERT(prefix_len >= 1);
+
+        // Build the factored sequence: prefix + GROUP(suffixes)
+        llama_grammar_ast_sequence factored;
+
+        // Copy prefix elements from the first sequence
+        for (size_t k = 0; k < prefix_len; k++) {
+            factored.push_back(std::move(alts.sequences[group_start][k]));
+        }
+
+        // Collect suffixes into a new alternates for the group
+        auto suffix_alts = std::make_unique<llama_grammar_ast_alternates>();
+        for (size_t j = group_start; j < group_end; j++) {
+            llama_grammar_ast_sequence suffix;
+            for (size_t k = prefix_len; k < alts.sequences[j].size(); k++) {
+                suffix.push_back(std::move(alts.sequences[j][k]));
+            }
+            suffix_alts->sequences.push_back(std::move(suffix));
+        }
+
+        // Recursively factor the suffix alternates
+        left_factor_alternates(*suffix_alts, rule_name);
+
+        // If the suffix alternates is a single sequence, inline it rather than
+        // creating an unnecessary group
+        if (suffix_alts->sequences.size() == 1) {
+            for (auto & elem : suffix_alts->sequences[0]) {
+                factored.push_back(std::move(elem));
+            }
+        } else {
+            // Create a GROUP element for the suffixes
+            llama_grammar_ast_element group_elem;
+            group_elem.type = LLAMA_GRAMMAR_AST_GROUP;
+            group_elem.group_rule_id = generate_symbol_id(rule_name);
+            group_elem.group = std::move(suffix_alts);
+            factored.push_back(std::move(group_elem));
+        }
+
+        new_sequences.push_back(std::move(factored));
+        i = group_end;
+    }
+
+    alts.sequences = std::move(new_sequences);
+}
+
 // Codegen: AST to PDA rules
 
 void llama_grammar_parser::codegen() {
@@ -799,6 +934,9 @@ bool llama_grammar_parser::parse(const char * src) {
         while (*pos) {
             pos = parse_rule(pos);
         }
+
+        // Phase 1.5: AST optimization — left factorization
+        left_factor();
 
         // Phase 2: Generate PDA rules from AST
         codegen();
