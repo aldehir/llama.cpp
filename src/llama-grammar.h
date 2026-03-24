@@ -2,7 +2,9 @@
 
 #include "llama.h"
 
+#include <cstdint>
 #include <map>
+#include <memory>
 #include <regex>
 #include <string>
 #include <vector>
@@ -83,11 +85,79 @@ std::vector<llama_grammar_candidate> llama_grammar_reject_candidates_for_stack(
         const llama_grammar_stack      & stack,
         const llama_grammar_candidates & candidates);
 
+//
+// grammar AST types
+//
+
+enum llama_grammar_ast_type {
+    LLAMA_GRAMMAR_AST_LITERAL,     // "abc" - literal string
+    LLAMA_GRAMMAR_AST_CHAR_RANGE,  // [a-z] or [^abc] - character class
+    LLAMA_GRAMMAR_AST_RULE_REF,    // rule-name - reference to another rule
+    LLAMA_GRAMMAR_AST_ANY_CHAR,    // . - any character
+    LLAMA_GRAMMAR_AST_TOKEN,       // <[id]> or !<[id]> - token
+    LLAMA_GRAMMAR_AST_GROUP,       // (...) - parenthesized alternates
+    LLAMA_GRAMMAR_AST_REPETITION,  // S*, S+, S?, S{m,n} - repetition
+};
+
+struct llama_grammar_ast_char_range_entry {
+    uint32_t first;
+    uint32_t last; // same as first for single chars
+};
+
+struct llama_grammar_ast_element;
+
+using llama_grammar_ast_sequence = std::vector<llama_grammar_ast_element>;
+
+struct llama_grammar_ast_alternates {
+    std::vector<llama_grammar_ast_sequence> sequences;
+};
+
+struct llama_grammar_ast_element {
+    llama_grammar_ast_type type;
+
+    // LLAMA_GRAMMAR_AST_LITERAL
+    std::vector<uint32_t> literal_code_points;
+
+    // LLAMA_GRAMMAR_AST_CHAR_RANGE
+    bool                                            char_range_negated = false;
+    std::vector<llama_grammar_ast_char_range_entry> char_ranges;
+
+    // LLAMA_GRAMMAR_AST_RULE_REF
+    std::string rule_ref_name;
+    uint32_t    rule_ref_id = 0;
+
+    // LLAMA_GRAMMAR_AST_TOKEN
+    uint32_t token_id      = 0;
+    bool     token_negated = false;
+
+    // LLAMA_GRAMMAR_AST_GROUP
+    std::unique_ptr<llama_grammar_ast_alternates> group;
+    uint32_t group_rule_id = 0; // pre-allocated during parse
+
+    // LLAMA_GRAMMAR_AST_REPETITION
+    std::unique_ptr<llama_grammar_ast_element> repetition_element;
+    uint64_t repetition_min = 0;
+    uint64_t repetition_max = 0; // UINT64_MAX = unbounded
+    std::vector<uint32_t> repetition_rule_ids; // pre-allocated during parse
+};
+
+struct llama_grammar_ast_rule {
+    std::string                 name;
+    uint32_t                    rule_id;
+    llama_grammar_ast_alternates alternates;
+};
+
+struct llama_grammar_ast {
+    std::vector<llama_grammar_ast_rule> rules;
+};
+
 struct llama_grammar_parser {
     const llama_vocab * vocab;
     std::map<std::string, uint32_t> symbol_ids;
 
     llama_grammar_rules rules;
+
+    llama_grammar_ast ast;
 
     llama_grammar_parser(const struct llama_vocab * vocab = nullptr) : vocab(vocab) {}
 
@@ -98,22 +168,40 @@ struct llama_grammar_parser {
 
     void add_rule(uint32_t rule_id, const llama_grammar_rule & rule);
 
+    // AST-building parse methods
     const char * parse_alternates(
             const char        * src,
             const std::string & rule_name,
-            uint32_t            rule_id,
+            llama_grammar_ast_alternates & alternates,
             bool                is_nested);
 
     const char * parse_sequence(
-            const char         * src,
-            const std::string  & rule_name,
-            llama_grammar_rule & rule,
-            bool               is_nested);
+            const char                  * src,
+            const std::string           & rule_name,
+            llama_grammar_ast_sequence  & seq,
+            bool                          is_nested);
 
     const char * parse_rule(const char * src);
 
     bool parse(const char * src);
     void print(FILE * file);
+
+    // codegen: AST to PDA rules
+    void codegen();
+    void codegen_rule(const llama_grammar_ast_rule & rule);
+    void codegen_alternates(
+            const llama_grammar_ast_alternates & alt,
+            const std::string                  & rule_name,
+            uint32_t                             rule_id);
+    void codegen_sequence(
+            const llama_grammar_ast_sequence & seq,
+            const std::string                & rule_name,
+            llama_grammar_rule               & rule);
+    void codegen_element(
+            const llama_grammar_ast_element & elem,
+            const std::string               & rule_name,
+            llama_grammar_rule              & rule,
+            size_t                          & last_sym_start);
 };
 
 struct llama_grammar_trigger_pattern {
