@@ -110,6 +110,7 @@ struct common_sampler {
 
     struct llama_sampler * grmr;
     struct llama_sampler * chain;
+    struct llama_sampler * rbudget = nullptr; // non-owning pointer into chain
 
     ring_buffer<llama_token> prev;
 
@@ -285,14 +286,16 @@ struct common_sampler * common_sampler_init(const struct llama_model * model, st
     }
 
     // reasoning budget sampler — added first so it can force tokens before other samplers
+    struct llama_sampler * rbudget = nullptr;
     if (params.reasoning_budget_tokens >= 0 && !params.reasoning_budget_forced.empty()) {
-        samplers.push_back(common_reasoning_budget_init(
+        rbudget = common_reasoning_budget_init(
             vocab,
             params.reasoning_budget_start,
             params.reasoning_budget_end,
             params.reasoning_budget_forced,
             params.reasoning_budget_tokens,
-            prefill_tokens));
+            prefill_tokens);
+        samplers.push_back(rbudget);
     }
 
     if (params.has_logit_bias()) {
@@ -381,12 +384,13 @@ struct common_sampler * common_sampler_init(const struct llama_model * model, st
     }
 
     auto * result = new common_sampler {
-        /* .params  = */ params,
-        /* .grmr    = */ grmr,
-        /* .chain   = */ chain,
-        /* .prev    = */ ring_buffer<llama_token>(std::max(32, params.n_prev)),
-        /* .cur     = */ {},
-        /* .cur_p   = */ {},
+        /* .params   = */ params,
+        /* .grmr     = */ grmr,
+        /* .chain    = */ chain,
+        /* .rbudget  = */ rbudget,
+        /* .prev     = */ ring_buffer<llama_token>(std::max(32, params.n_prev)),
+        /* .cur      = */ {},
+        /* .cur_p    = */ {},
     };
 
     return result;
@@ -403,6 +407,20 @@ void common_sampler_free(struct common_sampler * gsmpl) {
     delete gsmpl;
 }
 
+// Returns true when the grammar sampler should be applied/fed.
+// When a reasoning budget sampler exists and is actively reasoning (not IDLE/DONE),
+// grammar is deferred to avoid lazy triggers firing on reasoning content.
+static bool grammar_should_apply(const struct common_sampler * gsmpl) {
+    if (!gsmpl->grmr) {
+        return false;
+    }
+    if (!gsmpl->rbudget) {
+        return true;
+    }
+    const auto state = common_reasoning_budget_get_state(gsmpl->rbudget);
+    return state == REASONING_BUDGET_IDLE || state == REASONING_BUDGET_DONE;
+}
+
 void common_sampler_accept(struct common_sampler * gsmpl, llama_token token, bool accept_grammar) {
     if (!gsmpl) {
         return;
@@ -410,7 +428,7 @@ void common_sampler_accept(struct common_sampler * gsmpl, llama_token token, boo
 
     const auto tm = gsmpl->tm();
 
-    if (gsmpl->grmr && accept_grammar) {
+    if (accept_grammar && grammar_should_apply(gsmpl)) {
         llama_sampler_accept(gsmpl->grmr, token);
     }
 
@@ -428,13 +446,28 @@ void common_sampler_reset(struct common_sampler * gsmpl) {
 }
 
 struct common_sampler * common_sampler_clone(common_sampler * gsmpl) {
+    auto * cloned_chain = llama_sampler_clone(gsmpl->chain);
+
+    struct llama_sampler * cloned_rbudget = nullptr;
+    if (gsmpl->rbudget) {
+        const int n = llama_sampler_chain_n(cloned_chain);
+        for (int i = 0; i < n; i++) {
+            auto * s = llama_sampler_chain_get(cloned_chain, i);
+            if (strcmp(llama_sampler_name(s), "reasoning-budget") == 0) {
+                cloned_rbudget = s;
+                break;
+            }
+        }
+    }
+
     return new common_sampler {
-        /* .params  = */ gsmpl->params,
-        /* .grmr    = */ llama_sampler_clone(gsmpl->grmr),
-        /* .chain   = */ llama_sampler_clone(gsmpl->chain),
-        /* .prev    = */ gsmpl->prev,
-        /* .cur     = */ gsmpl->cur,
-        /* .cur_p   = */ gsmpl->cur_p,
+        /* .params   = */ gsmpl->params,
+        /* .grmr     = */ llama_sampler_clone(gsmpl->grmr),
+        /* .chain    = */ cloned_chain,
+        /* .rbudget  = */ cloned_rbudget,
+        /* .prev     = */ gsmpl->prev,
+        /* .cur      = */ gsmpl->cur,
+        /* .cur_p    = */ gsmpl->cur_p,
     };
 }
 
@@ -524,7 +557,9 @@ llama_token common_sampler_sample(struct common_sampler * gsmpl, struct llama_co
 
     gsmpl->set_logits(ctx, idx);
 
-    if (grammar_first) {
+    const bool apply_grammar = grammar_should_apply(gsmpl);
+
+    if (grammar_first && apply_grammar) {
         llama_sampler_apply(grmr, &cur_p);
     }
 
@@ -532,7 +567,7 @@ llama_token common_sampler_sample(struct common_sampler * gsmpl, struct llama_co
 
     id = cur_p.data[cur_p.selected].id;
 
-    if (grammar_first) {
+    if (grammar_first || !apply_grammar) {
         return id;
     }
 
