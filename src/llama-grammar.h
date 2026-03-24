@@ -192,6 +192,34 @@ struct llama_grammar_parser {
             llama_grammar_ast_alternates & alts,
             const std::string             & rule_name);
 
+    // AST security validation: detect pathological grammar patterns
+    void validate_security();
+
+    bool is_nullable_element(
+            const llama_grammar_ast_element              & elem,
+            const std::map<uint32_t, bool>               & rule_nullable) const;
+    bool is_nullable_sequence(
+            const llama_grammar_ast_sequence             & seq,
+            const std::map<uint32_t, bool>               & rule_nullable) const;
+    bool is_nullable_alternates(
+            const llama_grammar_ast_alternates           & alts,
+            const std::map<uint32_t, bool>               & rule_nullable) const;
+    void check_repetition_safety(
+            const llama_grammar_ast_element              & elem,
+            const std::map<uint32_t, bool>               & rule_nullable,
+            int                                            repetition_depth,
+            std::vector<bool>                            & rules_visited) const;
+    void check_repetition_safety_sequence(
+            const llama_grammar_ast_sequence             & seq,
+            const std::map<uint32_t, bool>               & rule_nullable,
+            int                                            repetition_depth,
+            std::vector<bool>                            & rules_visited) const;
+    void check_repetition_safety_alternates(
+            const llama_grammar_ast_alternates           & alts,
+            const std::map<uint32_t, bool>               & rule_nullable,
+            int                                            repetition_depth,
+            std::vector<bool>                            & rules_visited) const;
+
     // codegen: AST to PDA rules
     void codegen();
     void codegen_rule(const llama_grammar_ast_rule & rule);

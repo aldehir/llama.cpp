@@ -10,7 +10,8 @@
 #include <set>
 #include <stdexcept>
 
-#define MAX_REPETITION_THRESHOLD 2000
+#define MAX_REPETITION_THRESHOLD       2000
+#define MAX_REPETITION_NESTING_DEPTH   4
 //
 // helpers
 //
@@ -953,6 +954,169 @@ void llama_grammar_parser::codegen_element(
     }
 }
 
+// AST security validation — detect pathological grammar patterns that cause
+// exponential state explosion in the PDA (e.g. nested nullable repetitions like (.*)*).
+
+bool llama_grammar_parser::is_nullable_element(
+        const llama_grammar_ast_element & elem,
+        const std::map<uint32_t, bool>  & rule_nullable) const {
+    switch (elem.type) {
+        case LLAMA_GRAMMAR_AST_LITERAL:
+            return elem.literal_code_points.empty();
+        case LLAMA_GRAMMAR_AST_CHAR_RANGE:
+        case LLAMA_GRAMMAR_AST_ANY_CHAR:
+        case LLAMA_GRAMMAR_AST_TOKEN:
+            return false;
+        case LLAMA_GRAMMAR_AST_RULE_REF: {
+            auto it = rule_nullable.find(elem.rule_ref_id);
+            return it != rule_nullable.end() && it->second;
+        }
+        case LLAMA_GRAMMAR_AST_GROUP:
+            return elem.group && is_nullable_alternates(*elem.group, rule_nullable);
+        case LLAMA_GRAMMAR_AST_REPETITION:
+            return elem.repetition_min == 0;
+    }
+    return false;
+}
+
+bool llama_grammar_parser::is_nullable_sequence(
+        const llama_grammar_ast_sequence & seq,
+        const std::map<uint32_t, bool>   & rule_nullable) const {
+    // A sequence is nullable iff ALL elements are nullable
+    for (const auto & elem : seq) {
+        if (!is_nullable_element(elem, rule_nullable)) {
+            return false;
+        }
+    }
+    return true; // empty sequence is nullable
+}
+
+bool llama_grammar_parser::is_nullable_alternates(
+        const llama_grammar_ast_alternates & alts,
+        const std::map<uint32_t, bool>     & rule_nullable) const {
+    // An alternates is nullable iff ANY sequence is nullable
+    for (const auto & seq : alts.sequences) {
+        if (is_nullable_sequence(seq, rule_nullable)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void llama_grammar_parser::check_repetition_safety(
+        const llama_grammar_ast_element & elem,
+        const std::map<uint32_t, bool>  & rule_nullable,
+        int                               repetition_depth,
+        std::vector<bool>               & rules_visited) const {
+    switch (elem.type) {
+        case LLAMA_GRAMMAR_AST_LITERAL:
+        case LLAMA_GRAMMAR_AST_CHAR_RANGE:
+        case LLAMA_GRAMMAR_AST_ANY_CHAR:
+        case LLAMA_GRAMMAR_AST_TOKEN:
+            break;
+        case LLAMA_GRAMMAR_AST_RULE_REF: {
+            // Follow rule references to detect nested repetitions transitively
+            if (elem.rule_ref_id < rules_visited.size() && !rules_visited[elem.rule_ref_id]) {
+                for (const auto & rule : ast.rules) {
+                    if (rule.rule_id == elem.rule_ref_id) {
+                        rules_visited[elem.rule_ref_id] = true;
+                        check_repetition_safety_alternates(
+                            rule.alternates, rule_nullable, repetition_depth, rules_visited);
+                        rules_visited[elem.rule_ref_id] = false;
+                        break;
+                    }
+                }
+            }
+            break;
+        }
+        case LLAMA_GRAMMAR_AST_GROUP:
+            if (elem.group) {
+                check_repetition_safety_alternates(
+                    *elem.group, rule_nullable, repetition_depth, rules_visited);
+            }
+            break;
+        case LLAMA_GRAMMAR_AST_REPETITION: {
+            int new_depth = repetition_depth + 1;
+            if (new_depth > MAX_REPETITION_NESTING_DEPTH) {
+                throw std::runtime_error(
+                    "grammar has repetition nesting depth > " +
+                    std::to_string(MAX_REPETITION_NESTING_DEPTH) +
+                    ", which may cause exponential state explosion");
+            }
+            // Reject repetitions (with unbounded max) over nullable inner elements.
+            // E.g. (.*)*  — inner .* is nullable, outer * creates infinite loop without consuming input.
+            // This is safe to reject: a repetition of a nullable element is semantically
+            // equivalent to just the nullable element (or epsilon for *).
+            if (elem.repetition_max == UINT64_MAX || elem.repetition_max > 1) {
+                if (elem.repetition_element &&
+                    is_nullable_element(*elem.repetition_element, rule_nullable)) {
+                    throw std::runtime_error(
+                        "grammar has a repetition over a nullable element (e.g. (.*)*), "
+                        "which causes exponential state explosion in the pushdown automaton");
+                }
+            }
+            if (elem.repetition_element) {
+                check_repetition_safety(
+                    *elem.repetition_element, rule_nullable, new_depth, rules_visited);
+            }
+            break;
+        }
+    }
+}
+
+void llama_grammar_parser::check_repetition_safety_sequence(
+        const llama_grammar_ast_sequence & seq,
+        const std::map<uint32_t, bool>   & rule_nullable,
+        int                                repetition_depth,
+        std::vector<bool>                & rules_visited) const {
+    for (const auto & elem : seq) {
+        check_repetition_safety(elem, rule_nullable, repetition_depth, rules_visited);
+    }
+}
+
+void llama_grammar_parser::check_repetition_safety_alternates(
+        const llama_grammar_ast_alternates & alts,
+        const std::map<uint32_t, bool>     & rule_nullable,
+        int                                  repetition_depth,
+        std::vector<bool>                  & rules_visited) const {
+    for (const auto & seq : alts.sequences) {
+        check_repetition_safety_sequence(seq, rule_nullable, repetition_depth, rules_visited);
+    }
+}
+
+void llama_grammar_parser::validate_security() {
+    // Step 1: Compute nullability for all rules using fixed-point iteration.
+    // Build a map from rule_id -> nullable.
+    std::map<uint32_t, bool> rule_nullable;
+    for (const auto & rule : ast.rules) {
+        rule_nullable[rule.rule_id] = false;
+    }
+
+    bool changed = true;
+    while (changed) {
+        changed = false;
+        for (const auto & rule : ast.rules) {
+            if (!rule_nullable[rule.rule_id]) {
+                if (is_nullable_alternates(rule.alternates, rule_nullable)) {
+                    rule_nullable[rule.rule_id] = true;
+                    changed = true;
+                }
+            }
+        }
+    }
+
+    // Step 2: Walk the AST checking for dangerous repetition patterns.
+    size_t max_rule_id = symbol_ids.size();
+    std::vector<bool> rules_visited(max_rule_id, false);
+
+    for (const auto & rule : ast.rules) {
+        std::fill(rules_visited.begin(), rules_visited.end(), false);
+        rules_visited[rule.rule_id] = true;
+        check_repetition_safety_alternates(
+            rule.alternates, rule_nullable, 0, rules_visited);
+    }
+}
+
 bool llama_grammar_parser::parse(const char * src) {
     try {
         // Phase 1: Build AST
@@ -963,6 +1127,9 @@ bool llama_grammar_parser::parse(const char * src) {
 
         // Phase 1.5: AST optimization — left factorization
         left_factor();
+
+        // Phase 1.75: AST security validation — detect pathological patterns
+        validate_security();
 
         // Phase 2: Generate PDA rules from AST
         codegen();

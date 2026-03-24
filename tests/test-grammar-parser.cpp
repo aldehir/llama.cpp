@@ -153,6 +153,34 @@ int main()
         root ::= "a"{,10}"
     )""");
 
+    // Security: reject nullable repetitions that cause exponential state explosion
+    verify_failure(R"""(
+        root ::= (.*)*
+    )""");
+
+    verify_failure(R"""(
+        root ::= ([a-z]?)*
+    )""");
+
+    verify_failure(R"""(
+        root ::= ([a-z]*)*
+    )""");
+
+    verify_failure(R"""(
+        root ::= ((.*)*)*
+    )""");
+
+    // Indirect nullable repetition via rule reference
+    verify_failure(R"""(
+        inner ::= .*
+        root  ::= inner*
+    )""");
+
+    // Nullable alternates in repetition: (a | ) has an empty branch
+    verify_failure(R"""(
+        root ::= ("a" | )*
+    )""");
+
     verify_parsing(R"""(
         root  ::= "a"
     )""", {
