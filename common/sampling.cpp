@@ -577,6 +577,8 @@ llama_token common_sampler_sample(struct common_sampler * gsmpl, struct llama_co
         if (is_valid) {
             return id;
         }
+    } else {
+        return id;
     }
 
     // resampling:
