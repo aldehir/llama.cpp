@@ -65,7 +65,7 @@ common_chat_params peg_generator::generate_parser(const common_chat_template &  
         data.grammar      = build_grammar([&](const common_grammar_builder & builder) {
             foreach_function(inputs.tools, [&](const json & tool) {
                 const auto & function = tool.at("function");
-                auto         schema   = function.at("parameters");
+                auto         schema   = function.contains("parameters") ? function.at("parameters") : json::object();
                 builder.resolve_refs(schema);
             });
             parser.build_grammar(builder, data.grammar_lazy);
@@ -222,7 +222,7 @@ common_peg_parser analyze_tools::build_tool_parser_tag_json(parser_build_context
     foreach_function(inputs.tools, [&](const json & tool) {
         const auto & func   = tool.at("function");
         std::string  name   = func.at("name");
-        const auto & schema = func.at("parameters");
+        const auto   schema = func.contains("parameters") ? func.at("parameters") : json::object();
 
         // Build call_id parser based on position (if supported)
         common_peg_parser call_id_section = p.eps();
@@ -285,13 +285,11 @@ common_peg_parser analyze_tools::build_tool_parser_tag_tagged(parser_build_conte
     foreach_function(inputs.tools, [&](const json & tool) {
         const auto & func   = tool.at("function");
         std::string  name   = func.at("name");
-        const auto & params = func.at("parameters");
+        const auto   params = func.contains("parameters") ? func.at("parameters") : json::object();
 
-        if (!params.contains("properties") || !params.at("properties").is_object()) {
-            return;
-        }
-
-        const auto &          properties = params.at("properties");
+        const auto            properties = (params.contains("properties") && params.at("properties").is_object())
+                                               ? params.at("properties")
+                                               : json::object();
         std::set<std::string> required;
         if (params.contains("required") && params.at("required").is_array()) {
             params.at("required").get_to(required);
