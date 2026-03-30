@@ -22,7 +22,7 @@
 
 using json = nlohmann::ordered_json;
 
-static int main_automated_tests(void);
+static int main_automated_tests(const std::string & goto_test = "");
 
 static void run_multiple(const std::string& dir_path, bool stop_on_first_failure, const json& input, bool use_common = false);
 static void run_single(const std::string& contents, json input, bool use_common = false, const std::string & output_path = "");
@@ -36,6 +36,7 @@ Options:
   --stop-on-first-fail     Stop testing on the first failure (default: false).
   --no-common              Use direct Jinja engine instead of common chat templates (default: use common).
   --output <path>          Path to output results (only for single template runs).
+  --goto <test>            Jump to a specific automated test by name substring (skips earlier tests).
 If PATH_TO_TEMPLATE is a file, runs that single template.
 If PATH_TO_TEMPLATE is a directory, runs all .jinja files in that directory.
 If PATH_TO_TEMPLATE is omitted, runs automated tests (default CI mode).
@@ -115,6 +116,7 @@ int main(int argc, char ** argv) {
     std::string tmpl_path;
     std::string json_path;
     std::string output_path;
+    std::string goto_test;
     std::string & json_to_use = DEFAULT_JSON;
     bool stop_on_first_fail = false;
     bool use_common = true;
@@ -136,6 +138,9 @@ int main(int argc, char ** argv) {
             i++;
         } else if (args[i] == "--no-common") {
             use_common = true;
+        } else if (args[i] == "--goto" && i + 1 < args.size()) {
+            goto_test = args[i + 1];
+            i++;
         } else if (tmpl_path.empty()) {
             tmpl_path = args[i];
         } else {
@@ -146,7 +151,7 @@ int main(int argc, char ** argv) {
     }
 
     if (tmpl_path.empty()) {
-        return main_automated_tests();
+        return main_automated_tests(goto_test);
     }
 
     json input_json;
@@ -231,12 +236,14 @@ static std::string format_using_common(
             const std::string & bos_token,
             const std::string & eos_token,
             std::vector<common_chat_msg> & messages,
-            std::vector<common_chat_tool> tools = {}) {
+            std::vector<common_chat_tool> tools = {},
+            bool parallel_tool_calls = false) {
     auto tmpls = common_chat_templates_init(/* model= */ nullptr, template_str, bos_token, eos_token);
     common_chat_templates_inputs inputs;
     inputs.use_jinja = true;
     inputs.messages = messages;
     inputs.tools = std::move(tools);
+    inputs.parallel_tool_calls = parallel_tool_calls;
     inputs.add_generation_prompt = true;
     auto output = common_chat_templates_apply(tmpls.get(), inputs).prompt;
     output = normalize_newlines(output);
@@ -333,7 +340,7 @@ static common_chat_msg simple_msg(const std::string & role, const std::string & 
     return msg;
 }
 
-int main_automated_tests(void) {
+int main_automated_tests(const std::string & goto_test) {
     // jinja::enable_debug(true);
 
     std::vector<llama_chat_message> conversation {
@@ -621,11 +628,16 @@ int main_automated_tests(void) {
     }
 
     // test invalid chat template
+    if (goto_test.empty()) {
     res = llama_chat_apply_template("INVALID TEMPLATE", conversation.data(), conversation.size(), true, formatted_chat.data(), formatted_chat.size());
     assert(res < 0);
+    }
     const auto add_generation_prompt = true;
 
     for (const auto & test_case : test_cases) {
+        if (!goto_test.empty() && test_case.name.find(goto_test) == std::string::npos) {
+            continue;
+        }
         std::cout << "\n\n=== " << test_case.name << " ===\n\n";
         formatted_chat.resize(1024);
         res = llama_chat_apply_template(
@@ -656,6 +668,9 @@ int main_automated_tests(void) {
         if (!test_case.supported_with_jinja) {
             continue;
         }
+        if (!goto_test.empty() && test_case.name.find(goto_test) == std::string::npos) {
+            continue;
+        }
         std::cout << "\n\n=== " << test_case.name << " (jinja) ===\n\n";
         try {
             auto output = format_using_common(
@@ -677,6 +692,93 @@ int main_automated_tests(void) {
             std::cerr << "ERROR: " << e.what() << "\n";
             assert(false);
         }
+    }
+
+    // Test: Qwen3.5 parallel tool calls
+    if (goto_test.empty() || std::string("Qwen3.5 parallel tool calls").find(goto_test) != std::string::npos)
+    {
+        std::cout << "\n\n=== Qwen3.5 parallel tool calls ===\n\n";
+
+        // Read template from file
+        std::ifstream tmpl_file("models/templates/Qwen-Qwen3.5-27B.jinja");
+        assert(tmpl_file.good() && "Could not open Qwen3.5-27B template file");
+        std::string tmpl_str((std::istreambuf_iterator<char>(tmpl_file)),
+                              std::istreambuf_iterator<char>());
+
+        // Build messages: user asks, assistant makes 2 parallel tool calls,
+        // tool responses come back, assistant answers
+        std::vector<common_chat_msg> msgs;
+        msgs.push_back(simple_msg("user", "What's the weather in London and Paris?"));
+
+        {
+            common_chat_msg asst;
+            asst.role = "assistant";
+            common_chat_tool_call tc1;
+            tc1.name = "get_weather";
+            tc1.arguments = "{\"city\": \"London\"}";
+            tc1.id = "call001";
+            common_chat_tool_call tc2;
+            tc2.name = "get_weather";
+            tc2.arguments = "{\"city\": \"Paris\"}";
+            tc2.id = "call002";
+            asst.tool_calls = {tc1, tc2};
+            msgs.push_back(asst);
+        }
+
+        {
+            common_chat_msg tool1;
+            tool1.role = "tool";
+            tool1.content = "Rainy, 12C";
+            tool1.tool_call_id = "call001";
+            tool1.tool_name = "get_weather";
+            msgs.push_back(tool1);
+        }
+        {
+            common_chat_msg tool2;
+            tool2.role = "tool";
+            tool2.content = "Sunny, 22C";
+            tool2.tool_call_id = "call002";
+            tool2.tool_name = "get_weather";
+            msgs.push_back(tool2);
+        }
+
+        msgs.push_back(simple_msg("assistant", "London is rainy at 12C, Paris is sunny at 22C."));
+
+        std::vector<common_chat_tool> tools;
+        {
+            common_chat_tool t;
+            t.name = "get_weather";
+            t.description = "Get the weather for a city";
+            t.parameters = "{\"type\": \"object\", \"properties\": {\"city\": {\"type\": \"string\"}}}";
+            tools.push_back(t);
+        }
+
+        auto output = format_using_common(tmpl_str, "<s>", "</s>", msgs, tools, /* parallel_tool_calls= */ true);
+
+        // Verify key fragments that confirm parallel tool calls work
+        // 1) Two <tool_call> blocks in the assistant turn
+        {
+            size_t first_tc  = output.find("<tool_call>\n<function=get_weather>");
+            assert(first_tc != std::string::npos && "First tool call not found");
+            size_t second_tc = output.find("<tool_call>\n<function=get_weather>", first_tc + 1);
+            assert(second_tc != std::string::npos && "Second (parallel) tool call not found");
+        }
+        // 2) Two <tool_response> blocks
+        {
+            size_t first_tr  = output.find("<tool_response>");
+            assert(first_tr != std::string::npos && "First tool response not found");
+            size_t second_tr = output.find("<tool_response>", first_tr + 1);
+            assert(second_tr != std::string::npos && "Second tool response not found");
+        }
+        // 3) Both city names appear in tool call parameters
+        assert(output.find("London") != std::string::npos);
+        assert(output.find("Paris")  != std::string::npos);
+
+        // 4) Final assistant response present
+        assert(output.find("London is rainy at 12C, Paris is sunny at 22C.") != std::string::npos);
+
+        std::cout << "Output:\n" << output << "\n";
+        std::cout << "OK: Qwen3.5 parallel tool calls test passed.\n";
     }
 
     std::cout << "\nOK: All tests passed successfully.\n";
