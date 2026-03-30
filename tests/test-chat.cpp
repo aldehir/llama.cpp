@@ -1808,6 +1808,89 @@ static void test_template_output_peg_parsers(bool detailed_debug) {
             .run();
     }
     {
+        // Qwen3.5 parallel tool calls parsing
+        // Qwen3.5 always emits <think>\n in the generation prompt, so model output
+        // starts with reasoning content followed by </think> then the actual response.
+        auto tst = peg_tester("models/templates/Qwen-Qwen3.5-27B.jinja", detailed_debug);
+
+        // Single tool call with thinking
+        tst.test(
+               "I need to call the function.\n"
+               "</think>\n\n"
+               "<tool_call>\n"
+               "<function=special_function>\n"
+               "<parameter=arg1>\n"
+               "1\n"
+               "</parameter>\n"
+               "</function>\n"
+               "</tool_call>")
+            .reasoning_format(COMMON_REASONING_FORMAT_AUTO)
+            .enable_thinking(true)
+            .tools({ special_function_tool })
+            .expect_reasoning("I need to call the function.")
+            .expect_tool_calls({
+                { "special_function", R"({"arg1": 1})", {} },
+            })
+            .run();
+
+        // Parallel tool calls (two calls) with thinking
+        tst.test(
+               "Let me check both cities.\n"
+               "</think>\n\n"
+               "<tool_call>\n"
+               "<function=special_function>\n"
+               "<parameter=arg1>\n"
+               "1\n"
+               "</parameter>\n"
+               "</function>\n"
+               "</tool_call>\n"
+               "<tool_call>\n"
+               "<function=special_function_with_opt>\n"
+               "<parameter=arg1>\n"
+               "1\n"
+               "</parameter>\n"
+               "<parameter=arg2>\n"
+               "2\n"
+               "</parameter>\n"
+               "</function>\n"
+               "</tool_call>")
+            .reasoning_format(COMMON_REASONING_FORMAT_AUTO)
+            .enable_thinking(true)
+            .parallel_tool_calls(true)
+            .tools({
+                special_function_tool, special_function_tool_with_optional_param
+            })
+            .expect_reasoning("Let me check both cities.")
+            .expect_tool_calls({
+                { "special_function", R"({"arg1": 1})", {} },
+                { "special_function_with_opt", R"({"arg1": 1, "arg2": 2})", {} },
+            })
+            .run();
+
+        // Parallel tool calls disabled — single tool call only
+        tst.test(
+               "Just one call needed.\n"
+               "</think>\n\n"
+               "<tool_call>\n"
+               "<function=special_function>\n"
+               "<parameter=arg1>\n"
+               "1\n"
+               "</parameter>\n"
+               "</function>\n"
+               "</tool_call>")
+            .reasoning_format(COMMON_REASONING_FORMAT_AUTO)
+            .enable_thinking(true)
+            .parallel_tool_calls(false)
+            .tools({
+                special_function_tool, special_function_tool_with_optional_param
+            })
+            .expect_reasoning("Just one call needed.")
+            .expect_tool_calls({
+                { "special_function", R"({"arg1": 1})", {} },
+            })
+            .run();
+    }
+    {
         auto tst = peg_tester("models/templates/deepseek-ai-DeepSeek-V3.1.jinja", detailed_debug);
         tst.test(
                "<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>get_time<｜tool▁sep｜>{\"city\": "
