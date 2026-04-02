@@ -4,6 +4,7 @@
 #include "log.h"
 #include "download.h"
 #include "hf-cache.h"
+#include "peg-parser.h"
 
 #define JSON_ASSERT GGML_ASSERT
 #include <nlohmann/json.hpp>
@@ -14,7 +15,6 @@
 #include <future>
 #include <map>
 #include <mutex>
-#include <regex>
 #include <unordered_set>
 #include <string>
 #include <thread>
@@ -463,9 +463,22 @@ struct gguf_split_info {
 };
 
 static gguf_split_info get_gguf_split_info(const std::string & path) {
-    static const std::regex re_split("^(.+)-([0-9]{5})-of-([0-9]{5})$", std::regex::icase);
-    static const std::regex re_tag("[-.]([A-Z0-9_]+)$", std::regex::icase);
-    std::smatch m;
+    // PEG parser for split pattern: prefix-XXXXX-of-XXXXX
+    static const auto split_parser = build_peg_parser([](auto & p) {
+        auto split_suffix = p.literal("-") + p.chars("[0-9]", 5, 5)
+                          + p.literal("-of-") + p.chars("[0-9]", 5, 5) + p.end();
+        auto prefix_char  = p.negate(split_suffix) + p.any();
+        auto tagged_suffix = p.literal("-") + p.tag("index", p.chars("[0-9]", 5, 5))
+                           + p.literal("-of-") + p.tag("count", p.chars("[0-9]", 5, 5)) + p.end();
+        return p.tag("prefix", p.one_or_more(prefix_char)) + tagged_suffix;
+    });
+
+    // PEG parser for tag pattern: [-.]TAG at end of string
+    static const auto tag_parser = build_peg_parser([](auto & p) {
+        auto tag_suffix = p.chars("[.-]", 1, 1) + p.chars("[a-zA-Z0-9_]", 1) + p.end();
+        return p.zero_or_more(p.negate(tag_suffix) + p.any())
+             + p.chars("[.-]", 1, 1) + p.tag("tag", p.chars("[a-zA-Z0-9_]", 1)) + p.end();
+    });
 
     std::string prefix = path;
     if (!string_remove_suffix(prefix, ".gguf")) {
@@ -475,17 +488,35 @@ static gguf_split_info get_gguf_split_info(const std::string & path) {
     int index = 1;
     int count = 1;
 
-    if (std::regex_match(prefix, m, re_split)) {
-        index = std::stoi(m[2].str());
-        count = std::stoi(m[3].str());
-        prefix = m[1].str();
+    {
+        common_peg_parse_context ctx(prefix);
+        const auto result = split_parser.parse(ctx);
+        if (result.success()) {
+            ctx.ast.visit(result, [&](const auto & node) {
+                if (node.tag == "prefix") {
+                    prefix = std::string(node.text);
+                } else if (node.tag == "index") {
+                    index = std::stoi(std::string(node.text));
+                } else if (node.tag == "count") {
+                    count = std::stoi(std::string(node.text));
+                }
+            });
+        }
     }
 
     std::string tag;
-    if (std::regex_search(prefix, m, re_tag)) {
-        tag = m[1].str();
-        for (char & c : tag) {
-            c = std::toupper((unsigned char)c);
+    {
+        common_peg_parse_context ctx(prefix);
+        const auto result = tag_parser.parse(ctx);
+        if (result.success()) {
+            ctx.ast.visit(result, [&](const auto & node) {
+                if (node.tag == "tag") {
+                    tag = std::string(node.text);
+                    for (char & c : tag) {
+                        c = std::toupper((unsigned char)c);
+                    }
+                }
+            });
         }
     }
 
@@ -576,6 +607,24 @@ static bool gguf_filename_is_model(const std::string & filepath) {
            filename.find("imatrix") == std::string::npos;
 }
 
+// Case-insensitive search for tag followed by '.' or '-' in path
+static bool icase_find_tag(const std::string & path, const std::string & tag) {
+    std::string path_upper = path;
+    std::string tag_upper  = tag;
+    for (char & c : path_upper) { c = std::toupper((unsigned char)c); }
+    for (char & c : tag_upper)  { c = std::toupper((unsigned char)c); }
+
+    size_t pos = 0;
+    while ((pos = path_upper.find(tag_upper, pos)) != std::string::npos) {
+        size_t after = pos + tag_upper.size();
+        if (after < path_upper.size() && (path_upper[after] == '.' || path_upper[after] == '-')) {
+            return true;
+        }
+        pos++;
+    }
+    return false;
+}
+
 static hf_cache::hf_file find_best_model(const hf_cache::hf_files & files,
                                          const std::string        & tag) {
     std::vector<std::string> tags;
@@ -587,10 +636,8 @@ static hf_cache::hf_file find_best_model(const hf_cache::hf_files & files,
     }
 
     for (const auto & t : tags) {
-        std::regex pattern(t + "[.-]", std::regex::icase);
         for (const auto & f : files) {
-            if (gguf_filename_is_model(f.path) &&
-                std::regex_search(f.path, pattern)) {
+            if (gguf_filename_is_model(f.path) && icase_find_tag(f.path, t)) {
                 return f;
             }
         }
@@ -805,10 +852,12 @@ std::string common_docker_resolve_model(const std::string & docker) {
         // --- helper: digest validation ---
         auto validate_oci_digest = [](const std::string & digest) -> std::string {
             // Expected: algo:hex ; start with sha256 (64 hex chars)
-            // You can extend this map if supporting other algorithms in future.
-            static const std::regex re("^sha256:([a-fA-F0-9]{64})$");
-            std::smatch m;
-            if (!std::regex_match(digest, m, re)) {
+            static const auto digest_parser = build_peg_parser([](auto & p) {
+                return p.literal("sha256:") + p.chars("[a-fA-F0-9]", 64, 64) + p.end();
+            });
+
+            common_peg_parse_context ctx(digest);
+            if (!digest_parser.parse(ctx).success()) {
                 throw std::runtime_error("Invalid OCI digest format received in manifest: " + digest);
             }
             // normalize hex to lowercase
