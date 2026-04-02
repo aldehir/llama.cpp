@@ -8,17 +8,6 @@ struct common_params_model;
 using common_header      = std::pair<std::string, std::string>;
 using common_header_list = std::vector<common_header>;
 
-// Parse GGUF filename into its components:
-//   prefix[-.]tag[-index-of-count].gguf
-struct gguf_split_info {
-    std::string prefix; // tag included
-    std::string tag;
-    int index;
-    int count;
-};
-
-gguf_split_info get_gguf_split_info(const std::string & path);
-
 struct common_remote_params {
     common_header_list headers;
     long timeout  = 0;           // in seconds, 0 means no timeout
