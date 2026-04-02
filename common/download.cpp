@@ -455,14 +455,7 @@ int common_download_file_single(const std::string & url,
     return 304; // Not Modified - fake cached response
 }
 
-struct gguf_split_info {
-    std::string prefix; // tag included
-    std::string tag;
-    int index;
-    int count;
-};
-
-static gguf_split_info get_gguf_split_info(const std::string & path) {
+gguf_split_info get_gguf_split_info(const std::string & path) {
     // prefix-XXXXX-of-XXXXX
     static const auto split_parser = build_peg_parser([](auto & p) {
         auto split = p.literal("-") + p.tag("index", p.chars("[0-9]", 5, 5))
