@@ -189,6 +189,7 @@ struct common_peg_end_parser {};
 
 struct common_peg_literal_parser {
     std::string literal;
+    bool icase = false;
 };
 
 struct common_peg_sequence_parser {
@@ -357,7 +358,7 @@ class common_peg_parser_builder {
 
     // Matches an exact literal string.
     //   S -> "hello"
-    common_peg_parser literal(const std::string & literal) { return add(common_peg_literal_parser{literal}); }
+    common_peg_parser literal(const std::string & literal, bool icase = false) { return add(common_peg_literal_parser{literal, icase}); }
 
     // Matches a sequence of parsers in order, all must succeed.
     //   S -> A B C

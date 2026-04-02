@@ -463,21 +463,40 @@ struct gguf_split_info {
 };
 
 static gguf_split_info get_gguf_split_info(const std::string & path) {
-    // PEG parser for split pattern: prefix-XXXXX-of-XXXXX
-    static const auto split_parser = build_peg_parser([](auto & p) {
-        auto split_suffix = p.literal("-") + p.chars("[0-9]", 5, 5)
-                          + p.literal("-of-") + p.chars("[0-9]", 5, 5) + p.end();
-        auto prefix_char  = p.negate(split_suffix) + p.any();
-        auto tagged_suffix = p.literal("-") + p.tag("index", p.chars("[0-9]", 5, 5))
-                           + p.literal("-of-") + p.tag("count", p.chars("[0-9]", 5, 5)) + p.end();
-        return p.tag("prefix", p.one_or_more(prefix_char)) + tagged_suffix;
-    });
+    // Combined PEG parser for split and tag patterns.
+    // Handles: PREFIX[-.]TAG-INDEX-of-COUNT  (tag + split)
+    //          PREFIX-INDEX-of-COUNT          (split only)
+    //          PREFIX[-.]TAG                  (tag only)
+    // Order matters: try tag+split first, then split-only (before tag-only,
+    // to avoid digits in the split suffix matching as a tag).
+    static const auto parser = build_peg_parser([](auto & p) {
+        auto tag_chars = p.chars("[a-zA-Z0-9_]", 1);
+        auto sep       = p.chars("[.-]", 1, 1);
+        auto split     = p.literal("-") + p.tag("index", p.chars("[0-9]", 5, 5))
+                       + p.literal("-of-") + p.tag("count", p.chars("[0-9]", 5, 5));
 
-    // PEG parser for tag pattern: [-.]TAG at end of string
-    static const auto tag_parser = build_peg_parser([](auto & p) {
-        auto tag_suffix = p.chars("[.-]", 1, 1) + p.chars("[a-zA-Z0-9_]", 1) + p.end();
-        return p.zero_or_more(p.negate(tag_suffix) + p.any())
-             + p.chars("[.-]", 1, 1) + p.tag("tag", p.chars("[a-zA-Z0-9_]", 1)) + p.end();
+        // Lookahead anchors (pattern + end-of-input)
+        // Tags inside negate are safe — they don't propagate to the AST.
+        auto tag_split_end = sep + tag_chars + split + p.end();
+        auto split_end     = split + p.end();
+        auto tag_end       = sep + tag_chars + p.end();
+
+        // Case 1: tag + split  (e.g. model-Q4_K_M-00001-of-00003)
+        auto case1 = p.tag("prefix",
+            p.zero_or_more(p.negate(tag_split_end) + p.any()) + sep + p.tag("tag", tag_chars)
+        ) + split + p.end();
+
+        // Case 2: split only  (e.g. model-00001-of-00003)
+        auto case2 = p.tag("prefix",
+            p.zero_or_more(p.negate(split_end) + p.any())
+        ) + split + p.end();
+
+        // Case 3: tag only  (e.g. model-Q4_K_M)
+        auto case3 = p.tag("prefix",
+            p.zero_or_more(p.negate(tag_end) + p.any()) + sep + p.tag("tag", tag_chars)
+        ) + p.end();
+
+        return case1 | case2 | case3;
     });
 
     std::string prefix = path;
@@ -487,37 +506,25 @@ static gguf_split_info get_gguf_split_info(const std::string & path) {
 
     int index = 1;
     int count = 1;
-
-    {
-        common_peg_parse_context ctx(prefix);
-        const auto result = split_parser.parse(ctx);
-        if (result.success()) {
-            ctx.ast.visit(result, [&](const auto & node) {
-                if (node.tag == "prefix") {
-                    prefix = std::string(node.text);
-                } else if (node.tag == "index") {
-                    index = std::stoi(std::string(node.text));
-                } else if (node.tag == "count") {
-                    count = std::stoi(std::string(node.text));
-                }
-            });
-        }
-    }
-
     std::string tag;
-    {
-        common_peg_parse_context ctx(prefix);
-        const auto result = tag_parser.parse(ctx);
-        if (result.success()) {
-            ctx.ast.visit(result, [&](const auto & node) {
-                if (node.tag == "tag") {
-                    tag = std::string(node.text);
-                    for (char & c : tag) {
-                        c = std::toupper((unsigned char)c);
-                    }
+
+    common_peg_parse_context ctx(prefix);
+    const auto result = parser.parse(ctx);
+    if (result.success()) {
+        ctx.ast.visit(result, [&](const auto & node) {
+            if (node.tag == "prefix") {
+                prefix = std::string(node.text);
+            } else if (node.tag == "tag") {
+                tag = std::string(node.text);
+                for (char & c : tag) {
+                    c = std::toupper((unsigned char)c);
                 }
-            });
-        }
+            } else if (node.tag == "index") {
+                index = std::stoi(std::string(node.text));
+            } else if (node.tag == "count") {
+                count = std::stoi(std::string(node.text));
+            }
+        });
     }
 
     return {std::move(prefix), std::move(tag), index, count};
@@ -607,24 +614,6 @@ static bool gguf_filename_is_model(const std::string & filepath) {
            filename.find("imatrix") == std::string::npos;
 }
 
-// Case-insensitive search for tag followed by '.' or '-' in path
-static bool icase_find_tag(const std::string & path, const std::string & tag) {
-    std::string path_upper = path;
-    std::string tag_upper  = tag;
-    for (char & c : path_upper) { c = std::toupper((unsigned char)c); }
-    for (char & c : tag_upper)  { c = std::toupper((unsigned char)c); }
-
-    size_t pos = 0;
-    while ((pos = path_upper.find(tag_upper, pos)) != std::string::npos) {
-        size_t after = pos + tag_upper.size();
-        if (after < path_upper.size() && (path_upper[after] == '.' || path_upper[after] == '-')) {
-            return true;
-        }
-        pos++;
-    }
-    return false;
-}
-
 static hf_cache::hf_file find_best_model(const hf_cache::hf_files & files,
                                          const std::string        & tag) {
     std::vector<std::string> tags;
@@ -636,9 +625,17 @@ static hf_cache::hf_file find_best_model(const hf_cache::hf_files & files,
     }
 
     for (const auto & t : tags) {
+        // Build a PEG parser that searches for the tag (case-insensitive) followed by '.' or '-'
+        auto pattern = build_peg_parser([&](auto & p) {
+            return p.zero_or_more(p.negate(p.literal(t, true) + p.chars("[.-]", 1, 1)) + p.any())
+                 + p.literal(t, true) + p.chars("[.-]", 1, 1) + p.rest();
+        });
         for (const auto & f : files) {
-            if (gguf_filename_is_model(f.path) && icase_find_tag(f.path, t)) {
-                return f;
+            if (gguf_filename_is_model(f.path)) {
+                common_peg_parse_context ctx(f.path);
+                if (pattern.parse(ctx).success()) {
+                    return f;
+                }
             }
         }
     }
