@@ -1436,6 +1436,101 @@ static void test_all(const std::string & lang, std::function<void(const TestCase
     });
 }
 
+static void test_schema_types() {
+    fprintf(stderr, "#\n# Testing schema_types\n#\n");
+
+    using T = common_schema_type;
+
+    auto test = [](const std::string & name, const std::string & schema_str, std::set<common_schema_type> expected) {
+        fprintf(stderr, "- %s\n", name.c_str());
+        common_schema_info info;
+        auto schema = nlohmann::ordered_json::parse(schema_str);
+        info.resolve_refs(schema);
+        auto result = info.schema_types(schema);
+        if (result != expected) {
+            fprintf(stderr, "#\n# Test '%s' failed.\n#\n", name.c_str());
+            fprintf(stderr, "Schema: %s\n", schema_str.c_str());
+            fprintf(stderr, "Expected %zu type(s), got %zu type(s)\n", expected.size(), result.size());
+            assert(false);
+        }
+    };
+
+    auto all = std::set<T>{T::STRING, T::INTEGER, T::NUMBER, T::BOOLEAN, T::OBJECT, T::ARRAY, T::NULL_TYPE};
+
+    // Explicit single types
+    test("type string",  R"({"type": "string"})",  {T::STRING});
+    test("type integer", R"({"type": "integer"})", {T::INTEGER});
+    test("type number",  R"({"type": "number"})",  {T::NUMBER});
+    test("type boolean", R"({"type": "boolean"})", {T::BOOLEAN});
+    test("type object",  R"({"type": "object"})",  {T::OBJECT});
+    test("type array",   R"({"type": "array"})",   {T::ARRAY});
+    test("type null",    R"({"type": "null"})",    {T::NULL_TYPE});
+
+    // Type array
+    test("type array [string, null]",  R"({"type": ["string", "null"]})",  {T::STRING, T::NULL_TYPE});
+    test("type array [integer, null]", R"({"type": ["integer", "null"]})", {T::INTEGER, T::NULL_TYPE});
+
+    // Keyword inference
+    test("minLength implies string",  R"({"minLength": 1})",               {T::STRING});
+    test("maxLength implies string",  R"({"maxLength": 10})",              {T::STRING});
+    test("pattern implies string",    R"({"pattern": "^[a-z]+$"})",        {T::STRING});
+    test("format date implies string", R"({"format": "date"})",            {T::STRING});
+    test("format uuid implies string", R"({"format": "uuid"})",            {T::STRING});
+    test("minimum implies integer",   R"({"minimum": 0})",                 {T::INTEGER});
+    test("maximum implies integer",   R"({"maximum": 100})",               {T::INTEGER});
+    test("properties implies object", R"({"properties": {"x": {}}})",      {T::OBJECT});
+    test("items implies array",       R"({"items": {"type": "string"}})",  {T::ARRAY});
+    test("prefixItems implies array", R"({"prefixItems": [{"type": "string"}]})", {T::ARRAY});
+
+    // Keyword inference should NOT add types when explicit type is present
+    test("explicit type overrides keyword inference",
+        R"({"type": "integer", "properties": {"x": {}}})", {T::INTEGER});
+
+    // const
+    test("const string",  R"({"const": "hello"})", {T::STRING});
+    test("const integer", R"({"const": 123})",     {T::INTEGER});
+    test("const boolean", R"({"const": true})",    {T::BOOLEAN});
+    test("const null",    R"({"const": null})",    {T::NULL_TYPE});
+
+    // enum
+    test("enum strings",       R"({"enum": ["a", "b"]})",      {T::STRING});
+    test("enum integers",      R"({"enum": [1, 2]})",          {T::INTEGER});
+    test("enum mixed",         R"({"enum": [1, "a", null]})",  {T::INTEGER, T::STRING, T::NULL_TYPE});
+
+    // anyOf / oneOf
+    test("anyOf string+integer", R"({"anyOf": [{"type": "string"}, {"type": "integer"}]})",
+        {T::STRING, T::INTEGER});
+    test("oneOf object+array", R"({"oneOf": [{"type": "object"}, {"type": "array"}]})",
+        {T::OBJECT, T::ARRAY});
+    test("anyOf deduplicates", R"({"anyOf": [{"type": "string"}, {"type": "string"}]})",
+        {T::STRING});
+
+    // allOf - intersection
+    test("allOf string+minLength", R"({"allOf": [{"type": "string"}, {"minLength": 1}]})",
+        {T::STRING});
+    test("allOf contradictory", R"({"allOf": [{"type": "string"}, {"type": "integer"}]})",
+        {});
+    test("allOf with empty schema", R"({"allOf": [{"type": "string"}, {}]})",
+        {T::STRING});
+
+    // $ref
+    test("$ref to string",
+        R"({"$ref": "#/$defs/str", "$defs": {"str": {"type": "string"}}})", {T::STRING});
+    test("$ref to integer",
+        R"({"$ref": "#/$defs/num", "$defs": {"num": {"type": "integer"}}})", {T::INTEGER});
+
+    // Nested combinators
+    test("nested anyOf",
+        R"({"anyOf": [{"anyOf": [{"type": "integer"}, {"type": "string"}]}, {"type": "boolean"}]})",
+        {T::INTEGER, T::STRING, T::BOOLEAN});
+
+    // Empty schema
+    test("empty schema", R"({})", all);
+    test("description only", R"({"description": "foo"})", all);
+
+    fprintf(stderr, "All schema_types tests passed!\n");
+}
+
 static void test_resolves_to_string() {
     fprintf(stderr, "#\n# Testing resolves_to_string\n#\n");
 
@@ -1513,6 +1608,7 @@ int main() {
     fprintf(stderr, "LLAMA_NODE_AVAILABLE = %s\n", getenv("LLAMA_NODE_AVAILABLE") ? "true" : "false");
     fprintf(stderr, "LLAMA_PYTHON_AVAILABLE = %s\n", getenv("LLAMA_PYTHON_AVAILABLE") ? "true" : "false");
 
+    test_schema_types();
     test_resolves_to_string();
 
     test_all("C++", [](const TestCase & tc) {

@@ -4,10 +4,21 @@
 
 #include <functional>
 #include <memory>
+#include <set>
 #include <string>
 
 std::string json_schema_to_grammar(const nlohmann::ordered_json & schema,
                                    bool force_gbnf = false);
+
+enum class common_schema_type {
+    STRING,
+    INTEGER,
+    NUMBER,
+    BOOLEAN,
+    OBJECT,
+    ARRAY,
+    NULL_TYPE,
+};
 
 class common_schema_converter;
 
@@ -25,6 +36,7 @@ class common_schema_info {
     common_schema_info & operator=(common_schema_info &&) noexcept;
 
     void resolve_refs(nlohmann::ordered_json & schema);
+    std::set<common_schema_type> schema_types(const nlohmann::ordered_json & schema);
     bool resolves_to_string(const nlohmann::ordered_json & schema);
 };
 

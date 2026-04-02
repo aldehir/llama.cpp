@@ -1043,116 +1043,166 @@ void common_schema_info::resolve_refs(nlohmann::ordered_json & schema) {
     impl_->resolve_refs(schema, "");
 }
 
-// Determines if a JSON schema can resolve to a string type through any path.
-// Some models emit raw string values rather than JSON-encoded strings for string parameters.
-// If any branch of the schema (via oneOf, anyOf, $ref, etc.) permits a string, this returns
-// true, allowing callers to handle the value as a raw string for simplicity.
-bool common_schema_info::resolves_to_string(const nlohmann::ordered_json & schema) {
+static common_schema_type schema_type_from_string(const std::string & t) {
+    if (t == "string")  return common_schema_type::STRING;
+    if (t == "integer") return common_schema_type::INTEGER;
+    if (t == "number")  return common_schema_type::NUMBER;
+    if (t == "boolean") return common_schema_type::BOOLEAN;
+    if (t == "object")  return common_schema_type::OBJECT;
+    if (t == "array")   return common_schema_type::ARRAY;
+    if (t == "null")    return common_schema_type::NULL_TYPE;
+    return common_schema_type::STRING; // fallback for unknown type strings
+}
+
+static std::set<common_schema_type> all_schema_types() {
+    return {
+        common_schema_type::STRING,
+        common_schema_type::INTEGER,
+        common_schema_type::NUMBER,
+        common_schema_type::BOOLEAN,
+        common_schema_type::OBJECT,
+        common_schema_type::ARRAY,
+        common_schema_type::NULL_TYPE,
+    };
+}
+
+static std::set<common_schema_type> schema_type_from_json_value(const json & v) {
+    if (v.is_number_integer()) return { common_schema_type::INTEGER };
+    if (v.is_number())         return { common_schema_type::NUMBER };
+    if (v.is_string())         return { common_schema_type::STRING };
+    if (v.is_boolean())        return { common_schema_type::BOOLEAN };
+    if (v.is_object())         return { common_schema_type::OBJECT };
+    if (v.is_array())          return { common_schema_type::ARRAY };
+    if (v.is_null())           return { common_schema_type::NULL_TYPE };
+    return {};
+}
+
+// Determines which JSON types a schema can resolve to, traversing through
+// $ref, oneOf, anyOf, allOf, const, enum, and type-implying keywords.
+std::set<common_schema_type> common_schema_info::schema_types(const nlohmann::ordered_json & schema) {
     std::unordered_set<std::string> visited_refs;
 
-    std::function<bool(const json &)> check = [&](const json & s) -> bool {
+    std::function<std::set<common_schema_type>(const json &)> collect = [&](const json & s) -> std::set<common_schema_type> {
         if (!s.is_object()) {
-            return false;
+            return {};
         }
 
         // Handle $ref
         if (s.contains("$ref")) {
             const std::string & ref = s["$ref"];
             if (visited_refs.find(ref) != visited_refs.end()) {
-                // Circular reference, assume not a string to be safe
-                return false;
+                return {}; // circular reference
             }
             visited_refs.insert(ref);
             auto it = impl_->_refs.find(ref);
             if (it != impl_->_refs.end()) {
-                return check(it->second);
+                return collect(it->second);
             }
-            return false;
+            return {};
         }
 
-        // Check type field
-        if (s.contains("type")) {
+        std::set<common_schema_type> result;
+        bool has_type = s.contains("type");
+
+        // Explicit "type" field
+        if (has_type) {
             const json & schema_type = s["type"];
             if (schema_type.is_string()) {
-                if (schema_type == "string") {
-                    return true;
-                }
+                result.insert(schema_type_from_string(schema_type.get<std::string>()));
             } else if (schema_type.is_array()) {
-                // Type can be an array like ["string", "null"]
                 for (const auto & t : schema_type) {
-                    if (t == "string") {
-                        return true;
+                    result.insert(schema_type_from_string(t.get<std::string>()));
+                }
+            }
+        }
+
+        // oneOf / anyOf - union of all alternatives
+        for (const auto & keyword : {"oneOf", "anyOf"}) {
+            if (s.contains(keyword)) {
+                for (const auto & alt : s[keyword]) {
+                    auto alt_types = collect(alt);
+                    result.insert(alt_types.begin(), alt_types.end());
+                }
+            }
+        }
+
+        // allOf - intersection of component types
+        if (s.contains("allOf")) {
+            auto intersection = all_schema_types();
+            for (const auto & component : s["allOf"]) {
+                auto component_types = collect(component);
+                std::set<common_schema_type> narrowed;
+                for (const auto & t : intersection) {
+                    if (component_types.count(t)) {
+                        narrowed.insert(t);
                     }
                 }
+                intersection = std::move(narrowed);
             }
+            result.insert(intersection.begin(), intersection.end());
         }
 
-        // Check oneOf/anyOf - if any alternative can be a string
-        if (s.contains("oneOf")) {
-            for (const auto & alt : s["oneOf"]) {
-                if (check(alt)) {
-                    return true;
-                }
-            }
-        }
-        if (s.contains("anyOf")) {
-            for (const auto & alt : s["anyOf"]) {
-                if (check(alt)) {
-                    return true;
-                }
-            }
-        }
-
-        // Check allOf - all components must be compatible with string type
-        if (s.contains("allOf")) {
-            bool all_string = true;
-            for (const auto & component : s["allOf"]) {
-                if (!check(component)) {
-                    all_string = false;
-                    break;
-                }
-            }
-            if (all_string) {
-                return true;
-            }
-        }
-
-        // Check const - if the constant value is a string
+        // const - infer type from JSON value
         if (s.contains("const")) {
-            if (s["const"].is_string()) {
-                return true;
-            }
+            auto const_types = schema_type_from_json_value(s["const"]);
+            result.insert(const_types.begin(), const_types.end());
         }
 
-        // Check enum - if any enum value is a string
+        // enum - union of all value types
         if (s.contains("enum")) {
             for (const auto & val : s["enum"]) {
-                if (val.is_string()) {
-                    return true;
+                auto val_types = schema_type_from_json_value(val);
+                result.insert(val_types.begin(), val_types.end());
+            }
+        }
+
+        // Keyword inference (only when no explicit type is set)
+        if (!has_type) {
+            if (s.contains("pattern") || s.contains("minLength") || s.contains("maxLength")) {
+                result.insert(common_schema_type::STRING);
+            }
+
+            if (s.contains("format")) {
+                const std::string & fmt = s["format"];
+                if (fmt == "date" || fmt == "time" || fmt == "date-time" ||
+                    fmt == "uri" || fmt == "email" || fmt == "hostname" ||
+                    fmt == "ipv4" || fmt == "ipv6" || fmt == "uuid" ||
+                    fmt.find("uuid") == 0) {
+                    result.insert(common_schema_type::STRING);
                 }
             }
-        }
 
-        // String-specific keywords imply string type
-        if (s.contains("pattern") || s.contains("minLength") || s.contains("maxLength")) {
-            return true;
-        }
+            if (s.contains("minimum") || s.contains("maximum") ||
+                s.contains("exclusiveMinimum") || s.contains("exclusiveMaximum")) {
+                result.insert(common_schema_type::INTEGER);
+            }
 
-        // Check format - many formats imply string
-        if (s.contains("format")) {
-            const std::string & fmt = s["format"];
-            if (fmt == "date" || fmt == "time" || fmt == "date-time" ||
-                fmt == "uri" || fmt == "email" || fmt == "hostname" ||
-                fmt == "ipv4" || fmt == "ipv6" || fmt == "uuid" ||
-                fmt.find("uuid") == 0) {
-                return true;
+            if (s.contains("properties") || s.contains("additionalProperties") || s.contains("required")) {
+                result.insert(common_schema_type::OBJECT);
+            }
+
+            if (s.contains("items") || s.contains("prefixItems") ||
+                s.contains("minItems") || s.contains("maxItems")) {
+                result.insert(common_schema_type::ARRAY);
             }
         }
 
-        return false;
+        // Empty schema with no type information matches any value
+        if (result.empty() && !has_type &&
+            !s.contains("oneOf") && !s.contains("anyOf") && !s.contains("allOf") &&
+            !s.contains("const") && !s.contains("enum")) {
+            return all_schema_types();
+        }
+
+        return result;
     };
 
-    return check(schema);
+    return collect(schema);
+}
+
+bool common_schema_info::resolves_to_string(const nlohmann::ordered_json & schema) {
+    auto types = schema_types(schema);
+    return types.count(common_schema_type::STRING) > 0;
 }
 
 std::string json_schema_to_grammar(const json & schema, bool force_gbnf) {
