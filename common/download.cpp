@@ -604,38 +604,31 @@ static bool gguf_filename_is_model(const std::string & filepath) {
            filename.find("imatrix") == std::string::npos;
 }
 
-// Case-insensitive search for tag followed by '.' or '-' in path
-static bool icase_find_tag(const std::string & path, const std::string & tag) {
-    std::string path_upper = path;
-    std::string tag_upper  = tag;
-    for (char & c : path_upper) { c = std::toupper((unsigned char)c); }
-    for (char & c : tag_upper)  { c = std::toupper((unsigned char)c); }
-
-    size_t pos = 0;
-    while ((pos = path_upper.find(tag_upper, pos)) != std::string::npos) {
-        size_t after = pos + tag_upper.size();
-        if (after < path_upper.size() && (path_upper[after] == '.' || path_upper[after] == '-')) {
-            return true;
-        }
-        pos++;
-    }
-    return false;
-}
-
 static hf_cache::hf_file find_best_model(const hf_cache::hf_files & files,
                                          const std::string        & tag) {
     std::vector<std::string> tags;
 
     if (!tag.empty()) {
-        tags.push_back(tag);
+        std::string t = tag;
+        for (char & c : t) { c = std::toupper((unsigned char)c); }
+        tags.push_back(t);
     } else {
         tags = {"Q4_K_M", "Q4_0"};
     }
 
     for (const auto & t : tags) {
+        auto pattern = build_peg_parser([&](auto & p) {
+            auto match = p.literal(t) + p.chars("[.-]", 1, 1);
+            return p.zero_or_more(p.negate(match) + p.any()) + match;
+        });
         for (const auto & f : files) {
-            if (gguf_filename_is_model(f.path) && icase_find_tag(f.path, t)) {
-                return f;
+            if (gguf_filename_is_model(f.path)) {
+                std::string path_upper = f.path;
+                for (char & c : path_upper) { c = std::toupper((unsigned char)c); }
+                common_peg_parse_context ctx(path_upper);
+                if (pattern.parse(ctx).success()) {
+                    return f;
+                }
             }
         }
     }
