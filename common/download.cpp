@@ -616,19 +616,22 @@ static hf_cache::hf_file find_best_model(const hf_cache::hf_files & files,
         tags = {"Q4_K_M", "Q4_0"};
     }
 
-    for (const auto & t : tags) {
-        auto pattern = build_peg_parser([&](auto & p) {
-            auto match = p.literal(t) + p.chars("[.-]", 1, 1);
-            return p.zero_or_more(p.negate(match) + p.any()) + match;
-        });
-        for (const auto & f : files) {
-            if (gguf_filename_is_model(f.path)) {
-                std::string path_upper = f.path;
-                for (char & c : path_upper) { c = std::toupper((unsigned char)c); }
-                common_peg_parse_context ctx(path_upper);
-                if (pattern.parse(ctx).success()) {
-                    return f;
-                }
+    auto pattern = build_peg_parser([&](auto & p) {
+        auto tag_choice = p.choice();
+        for (const auto & t : tags) {
+            tag_choice |= p.literal(t);
+        }
+        auto match = tag_choice + p.chars("[.-]", 1, 1);
+        return p.zero_or_more(p.negate(match) + p.any()) + match;
+    });
+
+    for (const auto & f : files) {
+        if (gguf_filename_is_model(f.path)) {
+            std::string path_upper = f.path;
+            for (char & c : path_upper) { c = std::toupper((unsigned char)c); }
+            common_peg_parse_context ctx(path_upper);
+            if (pattern.parse(ctx).success()) {
+                return f;
             }
         }
     }

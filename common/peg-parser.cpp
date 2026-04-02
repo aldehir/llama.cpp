@@ -354,9 +354,7 @@ struct parser_executor {
                 }
                 return common_peg_parse_result(COMMON_PEG_PARSE_RESULT_NEED_MORE_INPUT, start_pos, pos);
             }
-            if (p.icase
-                    ? std::tolower((unsigned char)ctx.input[pos]) != std::tolower((unsigned char)p.literal[i])
-                    : ctx.input[pos] != p.literal[i]) {
+            if (ctx.input[pos] != p.literal[i]) {
                 return common_peg_parse_result(COMMON_PEG_PARSE_RESULT_FAIL, start_pos);
             }
             ++pos;
@@ -981,7 +979,7 @@ std::string common_peg_arena::dump_impl(common_peg_parser_id                    
         } else if constexpr (std::is_same_v<T, common_peg_end_parser>) {
             return "End";
         } else if constexpr (std::is_same_v<T, common_peg_literal_parser>) {
-            return std::string("Literal(") + p.literal + (p.icase ? ", icase" : "") + ")";
+            return "Literal(" + p.literal + ")";
         } else if constexpr (std::is_same_v<T, common_peg_sequence_parser>) {
             std::vector<std::string> parts;
             for (const auto & child : p.children) {
@@ -1571,9 +1569,6 @@ void common_peg_arena::build_grammar(const common_grammar_builder & builder, boo
                           std::is_same_v<T, common_peg_end_parser>) {
                 return "";
             } else if constexpr (std::is_same_v<T, common_peg_literal_parser>) {
-                if (p.icase) {
-                    throw std::runtime_error("case-insensitive literal is unsupported in GBNF grammar generation");
-                }
                 return gbnf_format_literal(p.literal);
             } else if constexpr (std::is_same_v<T, common_peg_sequence_parser>) {
                 std::string s;
@@ -1758,11 +1753,7 @@ static nlohmann::json serialize_parser_variant(const common_peg_parser_variant &
         } else if constexpr (std::is_same_v<T, common_peg_end_parser>) {
             return json{{"type", "end"}};
         } else if constexpr (std::is_same_v<T, common_peg_literal_parser>) {
-            auto j = json{{"type", "literal"}, {"literal", p.literal}};
-            if (p.icase) {
-                j["icase"] = true;
-            }
-            return j;
+            return json{{"type", "literal"}, {"literal", p.literal}};
         } else if constexpr (std::is_same_v<T, common_peg_sequence_parser>) {
             return json{{"type", "sequence"}, {"children", p.children}};
         } else if constexpr (std::is_same_v<T, common_peg_choice_parser>) {
@@ -1860,8 +1851,7 @@ static common_peg_parser_variant deserialize_parser_variant(const nlohmann::json
         if (!j.contains("literal") || !j["literal"].is_string()) {
             throw std::runtime_error("literal parser missing or invalid 'literal' field");
         }
-        bool icase = j.contains("icase") && j["icase"].get<bool>();
-        return common_peg_literal_parser{j["literal"], icase};
+        return common_peg_literal_parser{j["literal"]};
     }
     if (type == "sequence") {
         if (!j.contains("children") || !j["children"].is_array()) {
