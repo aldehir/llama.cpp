@@ -1099,10 +1099,11 @@ static common_chat_params common_chat_params_init_gemma4(const common_chat_templ
         data.prompt += "<|turn>model\n";
     }
 
-    data.format            = COMMON_CHAT_FORMAT_PEG_GEMMA4;
-    data.supports_thinking  = true;
-    data.thinking_start_tag = "<|channel>thought";
-    data.thinking_end_tag   = "<channel|>";
+    data.format             = COMMON_CHAT_FORMAT_PEG_GEMMA4;
+    data.supports_thinking = true;
+    data.generation_prompt = "";
+    //data.thinking_start_tag = "<|channel>thought";
+    //data.thinking_end_tag   = "<channel|>";
 
     data.preserved_tokens = {
         "<|channel>",
@@ -1121,9 +1122,9 @@ static common_chat_params common_chat_params_init_gemma4(const common_chat_templ
         auto start = p.rule("start", p.prefix(inputs.generation_prompt, "<|channel>"));
 
         if (extract_reasoning) {
-            p.rule("thought", p.literal("<|channel>thought") + p.space() + p.reasoning(p.until("<channel|>")) + p.literal("<channel|>"));
+            p.rule("thought", p.literal("<|channel>thought\n") + p.reasoning(p.until("<channel|>")) + p.literal("<channel|>"));
         } else {
-            p.rule("thought", p.content(p.literal("<|channel>thought") + p.space() + p.until("<channel|>") + p.literal("<channel|>")));
+            p.rule("thought", p.content(p.literal("<|channel>thought\n") + p.until("<channel|>") + p.literal("<channel|>")));
         }
 
         auto consume_empty_channels = p.gbnf(p.zero_or_more(p.literal("<|channel>") + p.negate(p.literal("thought"))), "");
@@ -1194,7 +1195,7 @@ static common_chat_params common_chat_params_init_gemma4(const common_chat_templ
             auto scan_to_toolcall = p.rule("scan-to-toolcall", p.until("<|tool_call>"));
             auto content = p.rule("content", p.content(p.until_one_of({"<|channel>", "<channel|>", "<|tool_call>"})));
             auto message = p.rule("message", thought + content);
-            return start + p.zero_or_more(message) + scan_to_toolcall + tool_call;
+            return start + p.zero_or_more(message) + scan_to_toolcall + tool_call + p.end();
         }
 
         // Gemma 4 may emit an extra <|channel>thought\n<channel|> at the end of the content. It may
