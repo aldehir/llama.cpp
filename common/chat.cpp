@@ -68,6 +68,52 @@ static bool has_content_or_tool_calls(const common_chat_msg & msg) {
     return !msg.content.empty() || !msg.tool_calls.empty();
 }
 
+// Scan a rendered prompt for the message-start delimiters in `delims` and
+// return one common_chat_message_split per occurrence (in order). Each entry
+// in `delims` pairs a role ("system", "user", "assistant") with the literal
+// string the template emits to mark the start of a message of that role.
+//
+// Implemented with a small dedicated PEG parser:
+//   split = until_one_of(all_delims) (choice(tag(role, delim)...) until_one_of(all_delims))* end
+static std::vector<common_chat_message_split> split_message_by_role(
+    const std::string &                                           prompt,
+    const std::vector<std::pair<std::string, std::string>> &      delims) {
+    if (delims.empty() || prompt.empty()) {
+        return {};
+    }
+
+    auto parser = build_peg_parser([&](common_peg_parser_builder & p) {
+        std::vector<std::string>        all_delims;
+        std::vector<common_peg_parser>  tagged_delims;
+        all_delims.reserve(delims.size());
+        tagged_delims.reserve(delims.size());
+        for (const auto & rd : delims) {
+            all_delims.push_back(rd.second);
+            tagged_delims.push_back(p.tag(rd.first, p.literal(rd.second)));
+        }
+
+        return p.sequence({
+            p.until_one_of(all_delims),
+            p.zero_or_more(p.choice(tagged_delims) + p.until_one_of(all_delims)),
+            p.end(),
+        });
+    });
+
+    common_peg_parse_context ctx(prompt);
+    const auto result = parser.parse(ctx);
+    if (!result.success()) {
+        return {};
+    }
+
+    std::vector<common_chat_message_split> splits;
+    ctx.ast.visit(result, [&](const common_peg_ast_node & node) {
+        if (!node.tag.empty()) {
+            splits.push_back({ node.tag, node.start });
+        }
+    });
+    return splits;
+}
+
 json common_chat_msg::to_json_oaicompat(bool concat_typed_text) const {
     if (!content.empty() && !content_parts.empty()) {
         throw std::runtime_error("Cannot specify both content and content_parts");
