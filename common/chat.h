@@ -15,7 +15,6 @@
 #include <functional>
 #include <map>
 #include <string>
-#include <utility>
 #include <vector>
 
 using chat_template_caps = jinja::caps;
@@ -209,6 +208,13 @@ struct common_chat_templates_inputs {
     bool                                  force_pure_content = false;
 };
 
+// marks the byte offset in a rendered prompt where a message begins, along
+// with the role of that message ("system", "user", "assistant")
+struct common_chat_message_split {
+    std::string role;
+    std::size_t pos = 0;
+};
+
 struct common_chat_params {
     common_chat_format                  format = COMMON_CHAT_FORMAT_CONTENT_ONLY;
     std::string                         prompt;
@@ -222,10 +228,9 @@ struct common_chat_params {
     std::vector<std::string>            preserved_tokens;
     std::vector<std::string>            additional_stops;
     std::string                         parser;
-    // positions in `prompt` where a message starts, paired with the role
-    // ("system", "user", "assistant"); populated by template handlers when
-    // building params so parsers can locate message boundaries.
-    std::vector<std::pair<std::string, std::size_t>> message_splits;
+    // positions in `prompt` where each message starts; populated by template
+    // handlers when building params so parsers can locate message boundaries.
+    std::vector<common_chat_message_split> message_splits;
 };
 
 // per-message parsing syntax
