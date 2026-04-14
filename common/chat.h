@@ -208,8 +208,9 @@ struct common_chat_templates_inputs {
     bool                                  force_pure_content = false;
 };
 
-// marks where a message begins in a rendered prompt: `pos` is the byte
-// offset of the role delimiter, `len` is the delimiter's byte length, and
+// marks where a message lives in a rendered prompt: `pos` is the byte
+// offset of the role delimiter, `len` is the byte length of the message
+// (delimiter + content, up to but not including the next message), and
 // `role` is the message role ("system", "user", "assistant", ...).
 struct common_chat_message_split {
     std::string role;

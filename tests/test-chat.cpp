@@ -3437,7 +3437,8 @@ static void test_split_prompt_by_role() {
     assert_equals<size_t>(0, split_prompt_by_role("hello", {}).size());
     assert_equals<size_t>(0, split_prompt_by_role("", { { "user", "<|user|>" } }).size());
 
-    // Multi-role conversation, no leading/trailing content
+    // Multi-role conversation, no leading/trailing content. Each `len` covers
+    // the delimiter and the message content up to the next delimiter.
     {
         const std::string prompt = "<|user|>Hi<|assistant|>Hello<|user|>Bye";
         const auto splits = split_prompt_by_role(prompt, {
@@ -3448,15 +3449,18 @@ static void test_split_prompt_by_role() {
 
         assert_equals<std::string>("user", splits[0].role);
         assert_equals<size_t>(0, splits[0].pos);
-        assert_equals<size_t>(8, splits[0].len);
+        assert_equals<size_t>(10, splits[0].len);
+        assert_equals<std::string>("<|user|>Hi", prompt.substr(splits[0].pos, splits[0].len));
 
         assert_equals<std::string>("assistant", splits[1].role);
         assert_equals<size_t>(10, splits[1].pos);
-        assert_equals<size_t>(13, splits[1].len);
+        assert_equals<size_t>(18, splits[1].len);
+        assert_equals<std::string>("<|assistant|>Hello", prompt.substr(splits[1].pos, splits[1].len));
 
         assert_equals<std::string>("user", splits[2].role);
         assert_equals<size_t>(28, splits[2].pos);
-        assert_equals<size_t>(8, splits[2].len);
+        assert_equals<size_t>(11, splits[2].len);
+        assert_equals<std::string>("<|user|>Bye", prompt.substr(splits[2].pos, splits[2].len));
     }
 
     // Leading content before the first delim and trailing content after the last
@@ -3470,11 +3474,13 @@ static void test_split_prompt_by_role() {
 
         assert_equals<std::string>("system", splits[0].role);
         assert_equals<size_t>(8, splits[0].pos);
-        assert_equals<size_t>(7, splits[0].len);
+        assert_equals<size_t>(17, splits[0].len);
+        assert_equals<std::string>("<|sys|>system msg", prompt.substr(splits[0].pos, splits[0].len));
 
         assert_equals<std::string>("user", splits[1].role);
         assert_equals<size_t>(25, splits[1].pos);
-        assert_equals<size_t>(7, splits[1].len);
+        assert_equals<size_t>(24, splits[1].len);
+        assert_equals<std::string>("<|usr|>user msg trailing", prompt.substr(splits[1].pos, splits[1].len));
     }
 
     // Multiple distinct delims that map to the same role

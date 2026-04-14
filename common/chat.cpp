@@ -74,7 +74,11 @@ static bool has_content_or_tool_calls(const common_chat_msg & msg) {
 // string the template emits to mark the start of a message of that role.
 //
 // Implemented with a small dedicated PEG parser:
-//   split = until_one_of(all_delims) (choice(tag(role, delim)...) until_one_of(all_delims))* end
+//   split = until_one_of(all_delims) (choice(tag(role, delim until_one_of(all_delims))...))* end
+//
+// The tag wraps both the literal delimiter and the trailing until_one_of so
+// each AST node spans the entire message (delim + content) and `node.end`
+// gives the byte just before the next message starts.
 std::vector<common_chat_message_split> split_prompt_by_role(
     const std::string &                                           prompt,
     const std::vector<std::pair<std::string, std::string>> &      delims) {
@@ -84,17 +88,19 @@ std::vector<common_chat_message_split> split_prompt_by_role(
 
     auto parser = build_peg_parser([&](common_peg_parser_builder & p) {
         std::vector<std::string>        all_delims;
-        std::vector<common_peg_parser>  tagged_delims;
+        std::vector<common_peg_parser>  tagged_messages;
         all_delims.reserve(delims.size());
-        tagged_delims.reserve(delims.size());
+        tagged_messages.reserve(delims.size());
         for (const auto & rd : delims) {
             all_delims.push_back(rd.second);
-            tagged_delims.push_back(p.tag(rd.first, p.literal(rd.second)));
+        }
+        for (const auto & rd : delims) {
+            tagged_messages.push_back(p.tag(rd.first, p.literal(rd.second) + p.until_one_of(all_delims)));
         }
 
         return p.sequence({
             p.until_one_of(all_delims),
-            p.zero_or_more(p.choice(tagged_delims) + p.until_one_of(all_delims)),
+            p.zero_or_more(p.choice(tagged_messages)),
             p.end(),
         });
     });
