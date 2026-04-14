@@ -108,17 +108,9 @@ static std::vector<common_chat_message_split> split_prompt_by_role(
     std::vector<common_chat_message_split> splits;
     ctx.ast.visit(result, [&](const common_peg_ast_node & node) {
         if (!node.tag.empty()) {
-            splits.push_back({ node.tag, node.start, 0 });
+            splits.push_back({ node.tag, node.start, node.end - node.start });
         }
     });
-
-    // Each message extends from its delim position up to the next split's
-    // position (or to the end of the prompt for the last one).
-    for (std::size_t i = 0; i < splits.size(); ++i) {
-        const std::size_t end = (i + 1 < splits.size()) ? splits[i + 1].pos : prompt.size();
-        splits[i].len = end - splits[i].pos;
-    }
-
     return splits;
 }
 
