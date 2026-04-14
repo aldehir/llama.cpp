@@ -3429,6 +3429,69 @@ static void test_developer_role_to_system_workaround() {
     }
 }
 
+static void test_split_prompt_by_role() {
+    LOG_DBG("%s\n", __func__);
+
+    // Empty inputs
+    assert_equals<size_t>(0, split_prompt_by_role("", {}).size());
+    assert_equals<size_t>(0, split_prompt_by_role("hello", {}).size());
+    assert_equals<size_t>(0, split_prompt_by_role("", { { "user", "<|user|>" } }).size());
+
+    // Multi-role conversation, no leading/trailing content
+    {
+        const std::string prompt = "<|user|>Hi<|assistant|>Hello<|user|>Bye";
+        const auto splits = split_prompt_by_role(prompt, {
+            { "user",      "<|user|>"      },
+            { "assistant", "<|assistant|>" },
+        });
+        assert_equals<size_t>(3, splits.size());
+
+        assert_equals<std::string>("user", splits[0].role);
+        assert_equals<size_t>(0, splits[0].pos);
+        assert_equals<size_t>(8, splits[0].len);
+
+        assert_equals<std::string>("assistant", splits[1].role);
+        assert_equals<size_t>(10, splits[1].pos);
+        assert_equals<size_t>(13, splits[1].len);
+
+        assert_equals<std::string>("user", splits[2].role);
+        assert_equals<size_t>(28, splits[2].pos);
+        assert_equals<size_t>(8, splits[2].len);
+    }
+
+    // Leading content before the first delim and trailing content after the last
+    {
+        const std::string prompt = "preamble<|sys|>system msg<|usr|>user msg trailing";
+        const auto splits = split_prompt_by_role(prompt, {
+            { "system", "<|sys|>" },
+            { "user",   "<|usr|>" },
+        });
+        assert_equals<size_t>(2, splits.size());
+
+        assert_equals<std::string>("system", splits[0].role);
+        assert_equals<size_t>(8, splits[0].pos);
+        assert_equals<size_t>(7, splits[0].len);
+
+        assert_equals<std::string>("user", splits[1].role);
+        assert_equals<size_t>(25, splits[1].pos);
+        assert_equals<size_t>(7, splits[1].len);
+    }
+
+    // Multiple distinct delims that map to the same role
+    {
+        const std::string prompt = "<|start|>system A<|start|>developer B<|start|>user C";
+        const auto splits = split_prompt_by_role(prompt, {
+            { "system", "<|start|>system"    },
+            { "system", "<|start|>developer" },
+            { "user",   "<|start|>user"      },
+        });
+        assert_equals<size_t>(3, splits.size());
+        assert_equals<std::string>("system", splits[0].role);
+        assert_equals<std::string>("system", splits[1].role);
+        assert_equals<std::string>("user",   splits[2].role);
+    }
+}
+
 static void test_msg_diffs_compute() {
     LOG_DBG("%s\n", __func__);
     {
@@ -3567,6 +3630,7 @@ int main(int argc, char ** argv) {
 #endif
     {
         test_msg_diffs_compute();
+        test_split_prompt_by_role();
         test_msgs_oaicompat_json_conversion();
         test_tools_oaicompat_json_conversion();
         test_developer_role_to_system_workaround();

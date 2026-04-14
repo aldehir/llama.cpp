@@ -75,7 +75,7 @@ static bool has_content_or_tool_calls(const common_chat_msg & msg) {
 //
 // Implemented with a small dedicated PEG parser:
 //   split = until_one_of(all_delims) (choice(tag(role, delim)...) until_one_of(all_delims))* end
-static std::vector<common_chat_message_split> split_prompt_by_role(
+std::vector<common_chat_message_split> split_prompt_by_role(
     const std::string &                                           prompt,
     const std::vector<std::pair<std::string, std::string>> &      delims) {
     if (delims.empty() || prompt.empty()) {

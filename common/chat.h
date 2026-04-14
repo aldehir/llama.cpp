@@ -217,6 +217,14 @@ struct common_chat_message_split {
     std::size_t len = 0;
 };
 
+// Scan `prompt` for the role delimiters in `delims` and return one
+// common_chat_message_split per occurrence, in order. Each entry in `delims`
+// pairs a role with the literal string the template emits to start a
+// message of that role.
+std::vector<common_chat_message_split> split_prompt_by_role(
+    const std::string &                                      prompt,
+    const std::vector<std::pair<std::string, std::string>> & delims);
+
 struct common_chat_params {
     common_chat_format                  format = COMMON_CHAT_FORMAT_CONTENT_ONLY;
     std::string                         prompt;
