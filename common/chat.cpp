@@ -75,7 +75,7 @@ static bool has_content_or_tool_calls(const common_chat_msg & msg) {
 //
 // Implemented with a small dedicated PEG parser:
 //   split = until_one_of(all_delims) (choice(tag(role, delim)...) until_one_of(all_delims))* end
-static std::vector<common_chat_message_split> split_message_by_role(
+static std::vector<common_chat_message_split> split_prompt_by_role(
     const std::string &                                           prompt,
     const std::vector<std::pair<std::string, std::string>> &      delims) {
     if (delims.empty() || prompt.empty()) {
@@ -1007,6 +1007,14 @@ static common_chat_params common_chat_params_init_gpt_oss(const common_chat_temp
     data.prompt            = prompt;
     data.format            = COMMON_CHAT_FORMAT_PEG_NATIVE;
     data.supports_thinking = true;
+
+    data.message_splits = split_prompt_by_role(prompt, {
+        { "assistant", "<|start|>assistant" },
+        { "user",      "<|start|>user"      },
+        { "system",    "<|start|>developer" },
+        { "system",    "<|start|>system"    },
+        { "tool",      "<|start|>functions" },
+    });
 
     // These special tokens are required to parse properly, so we include them
     // even if parse_tool_calls is false.
