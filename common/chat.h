@@ -208,11 +208,12 @@ struct common_chat_templates_inputs {
     bool                                  force_pure_content = false;
 };
 
-// marks the byte offset in a rendered prompt where a message begins, along
+// marks the byte range in a rendered prompt covering a single message, along
 // with the role of that message ("system", "user", "assistant")
 struct common_chat_message_split {
     std::string role;
     std::size_t pos = 0;
+    std::size_t len = 0;
 };
 
 struct common_chat_params {
