@@ -11,6 +11,7 @@
 #include "chat.h"
 #include "common.h"
 #include "ggml.h"
+#include "llama.h"
 #include "log.h"
 
 #include <algorithm>
@@ -3498,6 +3499,109 @@ static void test_split_prompt_by_role() {
     }
 }
 
+static void test_message_splits_to_token_positions() {
+    LOG_DBG("%s\n", __func__);
+
+    // empty splits → empty positions (no vocab needed, early return)
+    {
+        std::vector<common_chat_message_split> splits;
+        const auto positions = message_splits_to_token_positions(nullptr, "anything", splits);
+        assert_equals<size_t>(0, positions.size());
+    }
+
+    // preamble fallback: splits[0].pos > 0 → empty (bail before touching vocab)
+    {
+        std::vector<common_chat_message_split> splits = {
+            { "user", 5, 10 },
+        };
+        const auto positions = message_splits_to_token_positions(nullptr, "xxxxx<|user|>hi", splits);
+        assert_equals<size_t>(0, positions.size());
+    }
+
+    // non-contiguous splits: bail without touching vocab
+    {
+        std::vector<common_chat_message_split> splits = {
+            { "user",      0, 5 },
+            { "assistant", 6, 5 }, // gap between pos+len (5) and next pos (6)
+        };
+        const auto positions = message_splits_to_token_positions(nullptr, "aaaaabbbbbb", splits);
+        assert_equals<size_t>(0, positions.size());
+    }
+
+    // full coverage test with a real vocab: exercises the special-token
+    // invariant — the concatenation of per-slice tokenizations must equal
+    // the one-shot tokenization of the full prompt.
+    const std::string vocab_path = "models/ggml-vocab-qwen2.gguf";
+    if (!std::ifstream(vocab_path).good()) {
+        LOG_WRN("%s: %s not found, skipping tokenizer-based checks\n", __func__, vocab_path.c_str());
+        return;
+    }
+
+    llama_backend_init();
+
+    auto mparams       = llama_model_default_params();
+    mparams.vocab_only = true;
+    llama_model * model = llama_model_load_from_file(vocab_path.c_str(), mparams);
+    if (!model) {
+        LOG_WRN("%s: failed to load vocab '%s', skipping tokenizer-based checks\n", __func__, vocab_path.c_str());
+        llama_backend_free();
+        return;
+    }
+
+    const llama_vocab * vocab = llama_model_get_vocab(model);
+
+    // qwen2 uses `<|im_start|>` / `<|im_end|>` as special tokens, so
+    // `<|im_start|>system` etc. tokenize atomically with parse_special=true.
+    const std::string prompt =
+        "<|im_start|>system\nYou are helpful.<|im_end|>\n"
+        "<|im_start|>user\nHello, how are you?<|im_end|>\n"
+        "<|im_start|>assistant\nI'm doing well, thanks for asking.<|im_end|>\n";
+
+    const auto splits = split_prompt_by_role(prompt, {
+        { "system",    "<|im_start|>system"    },
+        { "user",      "<|im_start|>user"      },
+        { "assistant", "<|im_start|>assistant" },
+    });
+    assert_equals<size_t>(3, splits.size());
+    assert_equals<size_t>(0, splits[0].pos);
+
+    const auto positions = message_splits_to_token_positions(vocab, prompt, splits);
+    assert_equals<size_t>(3, positions.size());
+
+    // one-shot tokenization of the full prompt
+    const auto full_tokens = common_tokenize(vocab, prompt, /*add_special=*/true, /*parse_special=*/true);
+
+    // per-slice tokenizations
+    std::vector<llama_token> concat;
+    concat.reserve(full_tokens.size());
+    for (size_t i = 0; i < splits.size(); ++i) {
+        const std::string slice       = prompt.substr(splits[i].pos, splits[i].len);
+        const bool        add_special = (i == 0);
+        const auto        toks        = common_tokenize(vocab, slice, add_special, /*parse_special=*/true);
+        concat.insert(concat.end(), toks.begin(), toks.end());
+
+        // positions[i] must match the cumulative token count through split i
+        assert_equals<int>((int) concat.size(), positions[i]);
+    }
+
+    // Special-token invariant: the concatenation of per-slice tokenizations
+    // equals the one-shot tokenization. If this ever fails, the caller will
+    // see a mismatch between prompt.tokens (one-shot) and the positions vector.
+    if (concat.size() != full_tokens.size()) {
+        LOG_ERR("concat.size()=%zu vs full_tokens.size()=%zu\n", concat.size(), full_tokens.size());
+        assert(false);
+    }
+    for (size_t i = 0; i < concat.size(); ++i) {
+        if (concat[i] != full_tokens[i]) {
+            LOG_ERR("mismatch at token %zu: concat=%d full=%d\n", i, concat[i], full_tokens[i]);
+            assert(false);
+        }
+    }
+
+    llama_model_free(model);
+    llama_backend_free();
+}
+
 static void test_msg_diffs_compute() {
     LOG_DBG("%s\n", __func__);
     {
@@ -3637,6 +3741,7 @@ int main(int argc, char ** argv) {
     {
         test_msg_diffs_compute();
         test_split_prompt_by_role();
+        test_message_splits_to_token_positions();
         test_msgs_oaicompat_json_conversion();
         test_tools_oaicompat_json_conversion();
         test_developer_role_to_system_workaround();

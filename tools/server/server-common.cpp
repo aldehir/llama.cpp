@@ -1083,6 +1083,22 @@ json oaicompat_chat_params_parse(
 
     llama_params["chat_format"] = static_cast<int>(chat_params.format);
     llama_params["prompt"]      = chat_params.prompt;
+    // propagate message byte-offset splits from the template handler, so the
+    // prompt-processing path can capture context checkpoints at message
+    // boundaries instead of arbitrary chunk offsets. templates that don't
+    // populate message_splits simply omit this field, and the server falls
+    // back to the legacy `checkpoint_every_nt` heuristic.
+    if (!chat_params.message_splits.empty()) {
+        json splits = json::array();
+        for (const auto & s : chat_params.message_splits) {
+            splits.push_back({
+                {"role", s.role},
+                {"pos",  s.pos},
+                {"len",  s.len},
+            });
+        }
+        llama_params["message_splits"] = std::move(splits);
+    }
     if (!chat_params.grammar.empty()) {
         llama_params["grammar"]      = chat_params.grammar;
         llama_params["grammar_type"] = std::string("tool_calls");

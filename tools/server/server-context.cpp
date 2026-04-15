@@ -32,6 +32,32 @@ using json = nlohmann::ordered_json;
 
 constexpr int HTTP_POLLING_SECONDS = 1;
 
+// Parse the JSON array of message splits emitted by
+// `oaicompat_chat_params_parse` (objects with `role`, `pos`, `len`) into
+// the struct form consumed by `message_splits_to_token_positions`.
+// Returns an empty vector on malformed input — the caller falls back to
+// the legacy checkpoint heuristic in that case.
+static std::vector<common_chat_message_split> parse_message_splits_json(const json & splits) {
+    std::vector<common_chat_message_split> out;
+    if (!splits.is_array()) {
+        return out;
+    }
+    out.reserve(splits.size());
+    for (const auto & s : splits) {
+        if (!s.is_object() || !s.contains("pos") || !s.contains("len")) {
+            return {};
+        }
+        common_chat_message_split entry;
+        if (s.contains("role") && s.at("role").is_string()) {
+            entry.role = s.at("role").get<std::string>();
+        }
+        entry.pos = s.at("pos").get<size_t>();
+        entry.len = s.at("len").get<size_t>();
+        out.push_back(std::move(entry));
+    }
+    return out;
+}
+
 // state diagram: https://github.com/ggml-org/llama.cpp/pull/9283
 enum slot_state {
     SLOT_STATE_IDLE,
@@ -2557,6 +2583,25 @@ private:
                                     break;
                                 }
                             }
+
+                            // force a sub-batch boundary at the end of each message when
+                            // message-boundary checkpoint positions are available. the
+                            // capture block below only fires when a previous llama_decode()
+                            // finished exactly at a boundary, so we must stop pushing
+                            // tokens into the batch as soon as n_tokens() lands on one.
+                            if (!should_break && !slot.task->checkpoint_token_positions.empty()) {
+                                const int n_now = slot.prompt.n_tokens();
+                                for (int p : slot.task->checkpoint_token_positions) {
+                                    if (p == n_now) {
+                                        should_break = true;
+                                        break;
+                                    }
+                                    if (p > n_now) {
+                                        break;
+                                    }
+                                }
+                            }
+
                             if (should_break) {
                                 break;
                             }
@@ -2584,6 +2629,27 @@ private:
                         if (slot.task->n_tokens() < slot.prompt.n_tokens() + n_ubatch) {
                             // near the end of the prompt
                             do_checkpoint = do_checkpoint && true;
+                        } else if (!slot.task->checkpoint_token_positions.empty()) {
+                            // message-boundary checkpoint mode: only capture when
+                            // the previous decode landed exactly on a boundary.
+                            // Edit A above guarantees the inner push loop breaks
+                            // on a boundary, so the equality check here is exact.
+                            const int n_decoded = slot.prompt.n_tokens() - n_tokens_cur;
+                            bool on_boundary = false;
+                            for (int p : slot.task->checkpoint_token_positions) {
+                                if (p == n_decoded) {
+                                    on_boundary = true;
+                                    break;
+                                }
+                                if (p > n_decoded) {
+                                    break;
+                                }
+                            }
+                            do_checkpoint = do_checkpoint && on_boundary;
+
+                            if (do_checkpoint) {
+                                SLT_INF(slot, "creating message-boundary checkpoint at token position %d\n", n_decoded);
+                            }
                         } else {
                             // only do non-end checkpoints if the "checkpoint every n tokens" option is set
                             do_checkpoint = do_checkpoint && params_base.checkpoint_every_nt > 0;
@@ -3074,12 +3140,30 @@ std::unique_ptr<server_res_generator> server_routes::handle_completions_impl(
 
         // tasks.reserve(inputs.size()); // TODO: this is inaccurate due to child tasks
 
+        // Compute message-boundary checkpoint positions from the chat
+        // template's message_splits, if any. This only applies to the
+        // single-prompt chat path: the rendered prompt is a string and
+        // there is exactly one tokenized input to attach the positions to.
+        std::vector<int> checkpoint_token_positions;
+        if (inputs.size() == 1 && prompt.is_string() && data.contains("message_splits")) {
+            const auto splits = parse_message_splits_json(data.at("message_splits"));
+            if (!splits.empty()) {
+                checkpoint_token_positions = message_splits_to_token_positions(
+                        ctx_server.vocab,
+                        prompt.get_ref<const std::string &>(),
+                        splits);
+            }
+        }
+
         for (size_t i = 0; i < inputs.size(); i++) {
             server_task task = server_task(type);
 
             task.id = rd.get_new_id();
 
             task.tokens = std::move(inputs[i]);
+            if (i == 0) {
+                task.checkpoint_token_positions = std::move(checkpoint_token_positions);
+            }
             task.params = server_task::params_from_json_cmpl(
                     ctx_server.vocab,
                     params,

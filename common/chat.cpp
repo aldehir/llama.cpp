@@ -120,6 +120,53 @@ std::vector<common_chat_message_split> split_prompt_by_role(
     return splits;
 }
 
+std::vector<int> message_splits_to_token_positions(
+        const llama_vocab *                            vocab,
+        const std::string &                            prompt,
+        const std::vector<common_chat_message_split> & splits) {
+    if (splits.empty()) {
+        return {};
+    }
+
+    // preamble before the first split → bail; see header comment
+    if (splits[0].pos != 0) {
+        return {};
+    }
+
+    // validate contiguity and bounds up-front. doing this in a separate
+    // pass means we avoid any tokenizer calls on malformed inputs (which
+    // also lets callers/tests exercise the early-return paths without a
+    // real vocab).
+    {
+        size_t expected_pos = 0;
+        for (const auto & s : splits) {
+            if (s.pos != expected_pos || s.pos + s.len > prompt.size()) {
+                return {};
+            }
+            expected_pos = s.pos + s.len;
+        }
+    }
+
+    std::vector<int> positions;
+    positions.reserve(splits.size());
+
+    int running = 0;
+    for (size_t i = 0; i < splits.size(); ++i) {
+        const auto &      s     = splits[i];
+        const std::string slice = prompt.substr(s.pos, s.len);
+        // only the first slice gets add_special=true, mirroring the
+        // mixed-array pattern in tokenize_mixed and the one-shot
+        // tokenization the server would otherwise do.
+        const bool add_special = (i == 0);
+        const auto toks        = common_tokenize(vocab, slice, add_special, /*parse_special=*/true);
+
+        running += (int) toks.size();
+        positions.push_back(running);
+    }
+
+    return positions;
+}
+
 json common_chat_msg::to_json_oaicompat(bool concat_typed_text) const {
     if (!content.empty() && !content_parts.empty()) {
         throw std::runtime_error("Cannot specify both content and content_parts");

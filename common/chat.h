@@ -226,6 +226,28 @@ std::vector<common_chat_message_split> split_prompt_by_role(
     const std::string &                                      prompt,
     const std::vector<std::pair<std::string, std::string>> & delims);
 
+// Map message byte-offset splits (as produced by split_prompt_by_role)
+// to cumulative token-count positions in the tokenized prompt, so callers
+// can place boundary-aligned events (e.g. context checkpoints) at the end
+// of each message.
+//
+// Returns a vector of token positions, one per split, where each entry is
+// the number of tokens in the prefix through the end of that message
+// (i.e. the token index at which the next message begins). Returns an
+// empty vector when the splits are unsuitable for per-slice tokenization:
+// empty input, non-contiguous splits, a preamble before splits[0], or a
+// split that extends past the end of the prompt.
+//
+// Assumes every role delimiter passed to split_prompt_by_role is a special
+// token in the vocab, so with parse_special=true the concatenation of
+// per-slice tokenizations byte-for-byte equals the one-shot tokenization.
+// Mirrors the mixed-array pattern in tokenize_mixed: only the first slice
+// gets add_special=true.
+std::vector<int> message_splits_to_token_positions(
+    const struct llama_vocab *                     vocab,
+    const std::string &                            prompt,
+    const std::vector<common_chat_message_split> & splits);
+
 struct common_chat_params {
     common_chat_format                  format = COMMON_CHAT_FORMAT_CONTENT_ONLY;
     std::string                         prompt;

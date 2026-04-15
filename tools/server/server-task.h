@@ -145,6 +145,14 @@ struct server_task {
     task_params   params;
     server_tokens tokens;
 
+    // token positions at which context checkpoints should be captured.
+    // populated from common_chat_params::message_splits for chat templates
+    // that emit them, so checkpoints land at message boundaries. empty =>
+    // fall back to the legacy `checkpoint_every_nt` heuristic. positions are
+    // cumulative token counts (i.e. the token index one past the last token
+    // of the corresponding message), sorted ascending.
+    std::vector<int> checkpoint_token_positions;
+
     // only used by CLI, this allow tokenizing CLI inputs on server side
     // we need this because mtmd_context and vocab are not accessible outside of server_context
     bool                    cli = false;
