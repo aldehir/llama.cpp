@@ -2626,14 +2626,17 @@ private:
                         slot.init_sampler();
                         SLT_INF(slot, "prompt processing done, n_tokens = %d, batch.n_tokens = %d\n", slot.prompt.n_tokens(), batch.n_tokens);
                     } else {
-                        if (slot.task->n_tokens() < slot.prompt.n_tokens() + n_ubatch) {
-                            // near the end of the prompt
-                            do_checkpoint = do_checkpoint && true;
-                        } else if (!slot.task->checkpoint_token_positions.empty()) {
+                        if (!slot.task->checkpoint_token_positions.empty()) {
                             // message-boundary checkpoint mode: only capture when
-                            // the previous decode landed exactly on a boundary.
-                            // Edit A above guarantees the inner push loop breaks
-                            // on a boundary, so the equality check here is exact.
+                            // the previous decode landed exactly on a message
+                            // boundary. Edit A in the push loop guarantees batches
+                            // break on boundaries, so the equality check is exact.
+                            // Unlike the legacy path we do NOT unconditionally
+                            // capture near the end of the prompt — if the last
+                            // boundary sits in the final sub-batch, the existing
+                            // checkpoint_offsets breakout splits the tail so that
+                            // a later round still lands here with n_decoded equal
+                            // to that boundary.
                             const int n_decoded = slot.prompt.n_tokens() - n_tokens_cur;
                             bool on_boundary = false;
                             for (int p : slot.task->checkpoint_token_positions) {
@@ -2650,6 +2653,9 @@ private:
                             if (do_checkpoint) {
                                 SLT_INF(slot, "creating message-boundary checkpoint at token position %d\n", n_decoded);
                             }
+                        } else if (slot.task->n_tokens() < slot.prompt.n_tokens() + n_ubatch) {
+                            // near the end of the prompt
+                            do_checkpoint = do_checkpoint && true;
                         } else {
                             // only do non-end checkpoints if the "checkpoint every n tokens" option is set
                             do_checkpoint = do_checkpoint && params_base.checkpoint_every_nt > 0;
