@@ -149,6 +149,16 @@ common_chat_msg task_result_state::update_chat_msg(
         bool is_partial,
         std::vector<common_chat_msg_diff> & diffs,
         bool filter_tool_calls) {
+    if (!seeded) {
+        // When continue_final_message/prefill_assistant is active, the parser
+        // prepends generation_prompt to every input. Seed chat_msg with the
+        // parsed view of the prefill so the first computed diff excludes the
+        // prefill content the client already has.
+        seeded = true;
+        if (!chat_parser_params.generation_prompt.empty()) {
+            chat_msg = common_chat_parse("", /*is_partial=*/true, chat_parser_params);
+        }
+    }
     generated_text += text_added;
     auto msg_prv_copy = chat_msg;
     //SRV_DBG("Parsing chat message: %s\n", generated_text.c_str());
