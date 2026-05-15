@@ -81,6 +81,10 @@ struct task_params {
     std::string        oaicompat_model;
     std::string        oaicompat_cmpl_id;
 
+    // when true, the assistant prefill is included in the first streaming delta;
+    // when false, the prefill is excluded (the client already has it)
+    bool echo = false;
+
     // per-request parameters for chat parsing
     common_chat_parser_params chat_parser_params;
 
@@ -101,6 +105,7 @@ struct task_result_state {
     std::vector<std::string> generated_tool_call_ids;
     std::unordered_set<size_t> sent_tool_call_names;
     bool seeded = false;
+    bool echo   = false;
 
     // for OpenAI Responses and Anthropic streaming API:
     // track output item / content block state across chunks
@@ -248,7 +253,9 @@ struct server_task {
     // the task will be moved into queue, then onto slots
     // however, the state must be kept by caller (e.g., HTTP thread)
     task_result_state create_state() const {
-        return task_result_state(params.chat_parser_params);
+        task_result_state state(params.chat_parser_params);
+        state.echo = params.echo;
+        return state;
     }
 
     bool is_parent() const {

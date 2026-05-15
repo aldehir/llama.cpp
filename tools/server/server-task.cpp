@@ -151,11 +151,11 @@ common_chat_msg task_result_state::update_chat_msg(
         bool filter_tool_calls) {
     if (!seeded) {
         // When continue_final_message/prefill_assistant is active, the parser
-        // prepends generation_prompt to every input. Seed chat_msg with the
-        // parsed view of the prefill so the first computed diff excludes the
-        // prefill content the client already has.
+        // prepends generation_prompt to every input. Unless echo is requested,
+        // seed chat_msg with the parsed view of the prefill so the first
+        // computed diff excludes the prefill content the client already has.
         seeded = true;
-        if (!chat_parser_params.generation_prompt.empty()) {
+        if (!echo && !chat_parser_params.generation_prompt.empty()) {
             chat_msg = common_chat_parse("", /*is_partial=*/true, chat_parser_params);
         }
     }
@@ -260,6 +260,7 @@ task_params server_task::params_from_json_cmpl(
     params.stream           = json_value(data,       "stream",             false);
     auto stream_opt         = json_value(data,       "stream_options",     json::object());
     params.include_usage    = json_value(stream_opt, "include_usage",      false);
+    params.echo             = json_value(data,       "echo",               false);
     params.cache_prompt     = json_value(data,       "cache_prompt",       defaults.cache_prompt);
     params.return_tokens    = json_value(data,       "return_tokens",      false);
     params.return_progress  = json_value(data,       "return_progress",    false);
