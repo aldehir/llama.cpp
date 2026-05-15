@@ -116,7 +116,19 @@ struct task_result_state {
         : chat_parser_params(chat_parser_params)
         , oai_resp_id("resp_" + random_string())
         , oai_resp_reasoning_id("rs_" + random_string())
-        , oai_resp_message_id("msg_" + random_string()) {}
+        , oai_resp_message_id("msg_" + random_string()) {
+        // When continue_final_message/prefill_assistant is active, the parser
+        // prepends generation_prompt to every input. Seed chat_msg with the
+        // parsed view of the prefill so the first computed diff excludes the
+        // prefill content the client already has.
+        if (!this->chat_parser_params.generation_prompt.empty()) {
+            try {
+                chat_msg = common_chat_parse("", /*is_partial=*/true, this->chat_parser_params);
+            } catch (const std::exception &) {
+                // fall back to un-seeded behavior on seed parse failure
+            }
+        }
+    }
 
     // parse partial tool calls and update the internal state
     common_chat_msg update_chat_msg(
