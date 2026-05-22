@@ -1874,6 +1874,28 @@ static void test_template_output_peg_parsers(bool detailed_debug) {
             })
             .run();
 
+        // Test spacing
+        tst.test(
+               "<tool_call>\n"
+               "<function=edit>\n"
+               "<parameter=oldText>\n"
+               "    print(\"Hello, wold!\")\n"
+               "</parameter>\n"
+               "<parameter=newText>\n"
+               "    print(\"Hello, world!\")\n"
+               "</parameter>\n"
+               "</function>\n"
+               "</tool_call>")
+            .enable_thinking(false)
+            .reasoning_format(COMMON_REASONING_FORMAT_AUTO)
+            .tools({
+                python_tool
+        })
+            .expect_tool_calls({
+                { "python", "{\"oldText\": \"    print(\\\"Hello, wold!\\\")\\n\", \"newText\": \"    print(\\\"Hello, world!\\\")\\n\"}", {} },
+            })
+            .run();
+
         tst.test(
                "I need to output the invoice details in JSON\n"
                "</think>\n\n"
