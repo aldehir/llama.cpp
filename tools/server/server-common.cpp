@@ -316,6 +316,26 @@ size_t server_tokens::size_up_to_pos(llama_pos max_pos) const {
     return idx;
 }
 
+int32_t server_tokens::last_role_boundary(const std::string & role) const {
+    int32_t boundary = -1;
+    for (const auto & it : map_idx_to_role) {
+        if (it.second == role) {
+            boundary = (int32_t) it.first;
+        }
+    }
+    return boundary;
+}
+
+int32_t server_tokens::next_role_boundary(const std::string & role, int32_t after) const {
+    // map_idx_to_role is ordered ascending by token index
+    for (const auto & it : map_idx_to_role) {
+        if (it.second == role && (int32_t) it.first > after) {
+            return (int32_t) it.first;
+        }
+    }
+    return -1;
+}
+
 std::string server_tokens::str() const {
     std::ostringstream oss;
     oss << "tokens: ";
