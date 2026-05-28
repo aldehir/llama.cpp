@@ -149,6 +149,13 @@ private: // disallow accessing these members directly, risking out-of-sync
     // pos  0   1   2   3   4   5      5      5      7      7      7
     // map_idx_to_media will contain: {5, img0}, {8, img1}
 
+    // map a token index to a message role (only populated for message boundaries
+    // of interest, e.g. the start of a user message). populated when the prompt
+    // is tokenized in segments split at message boundaries. an entry at idx N
+    // means the message at that role begins at token N. entries are never
+    // recorded at idx 0 (no prior content to checkpoint before).
+    std::map<size_t, std::string> map_idx_to_msg_role;
+
 public:
     server_tokens() = default;
     ~server_tokens() = default;
@@ -188,6 +195,13 @@ public:
     // appends server tokens, updates the media map. copies media chunks.
     void push_back(server_tokens & tokens);
 
+    // mark the next token to be appended as the start of a message with the given role.
+    // no-op if the current token count is zero.
+    void mark_msg_start(const std::string & role);
+
+    // map of token index -> role for recorded message starts (see map_idx_to_msg_role).
+    const std::map<size_t, std::string> & get_msg_starts() const { return map_idx_to_msg_role; }
+
     // for compatibility with context shift and prompt truncation
     void insert(const llama_tokens & inp_tokens);
 
@@ -205,6 +219,7 @@ public:
 
     void clear() {
         map_idx_to_media.clear();
+        map_idx_to_msg_role.clear();
         tokens.clear();
     }
 
@@ -257,8 +272,12 @@ llama_tokens tokenize_mixed(const llama_vocab * vocab, const json & json_prompt,
 // if validate_utf8(text) == text.size(), then the whole text is valid utf8
 size_t validate_utf8(const std::string& text);
 
-// process mtmd prompt, return the server_tokens containing both text tokens and media chunks
-server_tokens process_mtmd_prompt(mtmd_context * mctx, std::string prompt, std::vector<raw_buffer> files);
+// process mtmd prompt, return the server_tokens containing both text tokens and media chunks.
+// when `message_spans` contains user-role spans, the prompt is tokenized in segments split at
+// each user message boundary, and the resulting server_tokens records the start of each user
+// message in get_msg_starts().
+server_tokens process_mtmd_prompt(mtmd_context * mctx, std::string prompt, std::vector<raw_buffer> files,
+                                  const std::vector<common_chat_msg_span> & message_spans = {});
 
 /**
  * break the input "prompt" object into multiple prompt if needed, then tokenize them
@@ -278,7 +297,8 @@ std::vector<server_tokens> tokenize_input_prompts(
                                         mtmd_context * mctx,
                                         const json & json_prompt,
                                         bool add_special,
-                                        bool parse_special);
+                                        bool parse_special,
+                                        const std::vector<common_chat_msg_span> & message_spans = {});
 
 //
 // OAI utils

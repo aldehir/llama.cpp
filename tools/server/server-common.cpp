@@ -373,10 +373,25 @@ void server_tokens::push_back(const mtmd_input_chunk * chunk) {
     }
 }
 
+void server_tokens::mark_msg_start(const std::string & role) {
+    const size_t idx = tokens.size();
+    if (idx == 0) {
+        return; // no prior content to checkpoint before
+    }
+    map_idx_to_msg_role[idx] = role;
+}
+
 void server_tokens::push_back(server_tokens & tokens) {
     size_t start_idx = size();
     for (size_t i = 0; i < tokens.size(); i++) {
         push_back(tokens[i]);
+    }
+    for (const auto & it : tokens.map_idx_to_msg_role) {
+        const size_t shifted = start_idx + it.first;
+        if (shifted == 0) {
+            continue;
+        }
+        map_idx_to_msg_role[shifted] = it.second;
     }
     if (tokens.has_mtmd) {
         // Assert if we are copying MTMD chunks to a server_tokens that does not have mtmd.
@@ -443,6 +458,14 @@ void server_tokens::keep_first(size_t n) {
             } else {
                 ++it;
             }
+        }
+    }
+    // remove message-start markers past the truncation point
+    for (auto it = map_idx_to_msg_role.begin(); it != map_idx_to_msg_role.end(); ) {
+        if (it->first >= n) {
+            it = map_idx_to_msg_role.erase(it);
+        } else {
+            ++it;
         }
     }
     tokens.resize(n);
@@ -564,8 +587,9 @@ int32_t server_tokens::process_chunk(
 
 server_tokens server_tokens::clone() const {
     server_tokens res;
-    res.has_mtmd = has_mtmd;
-    res.tokens   = tokens;
+    res.has_mtmd            = has_mtmd;
+    res.tokens              = tokens;
+    res.map_idx_to_msg_role = map_idx_to_msg_role;
     for (auto it = map_idx_to_media.begin(); it != map_idx_to_media.end(); ++it) {
         size_t idx = it->first;
         const mtmd::input_chunk_ptr & chunk = it->second;
@@ -713,7 +737,8 @@ static std::string fnv_hash(const uint8_t * data, size_t len) {
     return std::to_string(hash);
 }
 
-server_tokens process_mtmd_prompt(mtmd_context * mctx, std::string prompt, std::vector<raw_buffer> files) {
+server_tokens process_mtmd_prompt(mtmd_context * mctx, std::string prompt, std::vector<raw_buffer> files,
+                                  const std::vector<common_chat_msg_span> & message_spans) {
     mtmd::bitmaps bitmaps;
     for (auto & file : files) {
         mtmd::bitmap bmp(mtmd_helper_bitmap_init_from_buf(mctx, file.data(), file.size()));
@@ -725,25 +750,79 @@ server_tokens process_mtmd_prompt(mtmd_context * mctx, std::string prompt, std::
         bmp.set_id(hash.c_str());
         bitmaps.entries.push_back(std::move(bmp));
     }
-    // process prompt
-    std::vector<server_tokens> inputs;
-    // multimodal
-    mtmd_input_text inp_txt = {
-        prompt.c_str(),
-        /* add_special */   true,
-        /* parse_special */ true,
-    };
-    mtmd::input_chunks chunks(mtmd_input_chunks_init());
-    auto bitmaps_c_ptr = bitmaps.c_ptr();
-    int32_t tokenized = mtmd_tokenize(mctx,
-                                      chunks.ptr.get(),
-                                      &inp_txt,
-                                      bitmaps_c_ptr.data(),
-                                      bitmaps_c_ptr.size());
-    if (tokenized != 0) {
-        throw std::runtime_error("Failed to tokenize prompt");
+
+    // collect user-message byte boundaries (>0, deduped, sorted)
+    std::vector<size_t> user_starts;
+    for (const auto & s : message_spans) {
+        if (s.role == "user" && s.pos > 0 && s.pos <= prompt.size()) {
+            user_starts.push_back(s.pos);
+        }
     }
-    auto result = server_tokens(chunks, true);
+    std::sort(user_starts.begin(), user_starts.end());
+    user_starts.erase(std::unique(user_starts.begin(), user_starts.end()), user_starts.end());
+
+    auto tokenize_segment = [&](server_tokens & out, const std::string & seg, size_t bitmap_offset,
+                                size_t n_seg_media, bool add_special) {
+        std::vector<const mtmd_bitmap *> seg_bitmaps_c;
+        seg_bitmaps_c.reserve(n_seg_media);
+        for (size_t b = bitmap_offset; b < bitmap_offset + n_seg_media; ++b) {
+            seg_bitmaps_c.push_back(bitmaps.entries[b].ptr.get());
+        }
+        mtmd_input_text inp_txt = {
+            seg.c_str(),
+            /* add_special */   add_special,
+            /* parse_special */ true,
+        };
+        mtmd::input_chunks chunks(mtmd_input_chunks_init());
+        int32_t tokenized = mtmd_tokenize(mctx, chunks.ptr.get(), &inp_txt,
+                                          seg_bitmaps_c.data(), seg_bitmaps_c.size());
+        if (tokenized != 0) {
+            throw std::runtime_error("Failed to tokenize prompt");
+        }
+        for (size_t i = 0; i < chunks.size(); ++i) {
+            out.push_back(chunks[i]);
+        }
+    };
+
+    if (user_starts.empty()) {
+        // fast path: single tokenization pass, no message-start markers to record
+        server_tokens result;
+        result.has_mtmd = true;
+        const size_t n_total_media = bitmaps.entries.size();
+        tokenize_segment(result, prompt, 0, n_total_media, /*add_special*/ true);
+        return result;
+    }
+
+    // split path: tokenize one segment at a time and record user-message starts
+    server_tokens result;
+    result.has_mtmd = true;
+
+    const std::string marker = get_media_marker();
+    size_t seg_start      = 0;
+    size_t bitmap_offset  = 0;
+    bool   add_special    = true;
+
+    for (size_t i = 0; i <= user_starts.size(); ++i) {
+        const size_t seg_end = (i < user_starts.size()) ? user_starts[i] : prompt.size();
+        const std::string seg = prompt.substr(seg_start, seg_end - seg_start);
+
+        size_t n_seg_media = 0;
+        for (size_t p = 0; (p = seg.find(marker, p)) != std::string::npos; p += marker.size()) {
+            n_seg_media++;
+        }
+        GGML_ASSERT(bitmap_offset + n_seg_media <= bitmaps.entries.size());
+
+        tokenize_segment(result, seg, bitmap_offset, n_seg_media, add_special);
+
+        bitmap_offset += n_seg_media;
+        seg_start      = seg_end;
+        add_special    = false;
+
+        if (i < user_starts.size()) {
+            result.mark_msg_start("user");
+        }
+    }
+
     return result;
 }
 
@@ -756,12 +835,47 @@ server_tokens process_mtmd_prompt(mtmd_context * mctx, std::string prompt, std::
  * - "prompt": [12, 34, "string", 56, 78]
  * - "prompt": { "prompt_string": "string", "multimodal_data": [ "base64" ] }
  */
-static server_tokens tokenize_input_subprompt(const llama_vocab * vocab, mtmd_context * mctx, const json & json_prompt, bool add_special, bool parse_special) {
+static server_tokens tokenize_input_subprompt(const llama_vocab * vocab, mtmd_context * mctx, const json & json_prompt,
+                                              bool add_special, bool parse_special,
+                                              const std::vector<common_chat_msg_span> & message_spans = {}) {
     constexpr char JSON_STRING_PROMPT_KEY[] = "prompt_string";
     constexpr char JSON_MTMD_DATA_KEY[] = "multimodal_data";
     const bool has_mtmd = mctx != nullptr;
     if (json_prompt.is_string() || json_is_array_of_mixed_numbers_strings(json_prompt)) {
         // string or mixed
+        // message-span splitting is only meaningful for a single string prompt
+        if (json_prompt.is_string() && !message_spans.empty()) {
+            const std::string & prompt = json_prompt.get_ref<const std::string &>();
+            std::vector<size_t> user_starts;
+            for (const auto & s : message_spans) {
+                if (s.role == "user" && s.pos > 0 && s.pos <= prompt.size()) {
+                    user_starts.push_back(s.pos);
+                }
+            }
+            std::sort(user_starts.begin(), user_starts.end());
+            user_starts.erase(std::unique(user_starts.begin(), user_starts.end()), user_starts.end());
+
+            if (!user_starts.empty()) {
+                server_tokens result;
+                size_t seg_start = 0;
+                bool   first     = true;
+                for (size_t i = 0; i <= user_starts.size(); ++i) {
+                    const size_t seg_end = (i < user_starts.size()) ? user_starts[i] : prompt.size();
+                    const std::string seg = prompt.substr(seg_start, seg_end - seg_start);
+                    const bool seg_add_special = first && add_special;
+                    llama_tokens toks = common_tokenize(vocab, seg, seg_add_special, parse_special);
+                    for (llama_token t : toks) {
+                        result.push_back(t);
+                    }
+                    seg_start = seg_end;
+                    first     = false;
+                    if (i < user_starts.size()) {
+                        result.mark_msg_start("user");
+                    }
+                }
+                return result;
+            }
+        }
         llama_tokens tmp = tokenize_mixed(vocab, json_prompt, add_special, parse_special);
         return server_tokens(tmp, false);
     } else if (json_is_array_of_numbers(json_prompt)) {
@@ -779,7 +893,7 @@ static server_tokens tokenize_input_subprompt(const llama_vocab * vocab, mtmd_co
             for (const auto & entry : json_prompt.at(JSON_MTMD_DATA_KEY)) {
                 files.push_back(base64_decode(entry));
             }
-            return process_mtmd_prompt(mctx, json_prompt.at(JSON_STRING_PROMPT_KEY), files);
+            return process_mtmd_prompt(mctx, json_prompt.at(JSON_STRING_PROMPT_KEY), files, message_spans);
         } else {
             // Not multimodal, but contains a subobject.
             llama_tokens tmp = tokenize_mixed(vocab, json_prompt.at(JSON_STRING_PROMPT_KEY), add_special, parse_special);
@@ -790,15 +904,18 @@ static server_tokens tokenize_input_subprompt(const llama_vocab * vocab, mtmd_co
    }
 }
 
-std::vector<server_tokens> tokenize_input_prompts(const llama_vocab * vocab, mtmd_context * mctx, const json & json_prompt, bool add_special, bool parse_special) {
+std::vector<server_tokens> tokenize_input_prompts(const llama_vocab * vocab, mtmd_context * mctx, const json & json_prompt,
+                                                  bool add_special, bool parse_special,
+                                                  const std::vector<common_chat_msg_span> & message_spans) {
     std::vector<server_tokens> result;
     if (json_prompt.is_array() && !json_is_array_and_contains_numbers(json_prompt)) {
+        // a batch of independent prompts; message spans don't span across them
         result.reserve(json_prompt.size());
         for (const auto & p : json_prompt) {
-            result.push_back(tokenize_input_subprompt(vocab, mctx, p,add_special, parse_special));
+            result.push_back(tokenize_input_subprompt(vocab, mctx, p, add_special, parse_special, {}));
         }
     } else {
-        result.push_back(tokenize_input_subprompt(vocab, mctx, json_prompt, add_special, parse_special));
+        result.push_back(tokenize_input_subprompt(vocab, mctx, json_prompt, add_special, parse_special, message_spans));
     }
     if (result.empty()) {
         throw std::runtime_error("\"prompt\" must not be empty");
