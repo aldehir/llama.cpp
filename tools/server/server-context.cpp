@@ -2920,8 +2920,28 @@ private:
                         has_mtmd = true;
                     }
 
-                    const int32_t n_before_user = slot.task->params.n_before_user;
-                    const bool n_before_user_known = n_before_user > 0;
+                    // token indices where user messages begin, recorded during tokenization.
+                    // checkpoints are created before each user message so previous turns can be reused.
+                    const auto & role_map = input_tokens.get_role_map();
+
+                    int32_t last_user_boundary = -1;
+                    for (const auto & it : role_map) {
+                        if (it.second == "user") {
+                            last_user_boundary = (int32_t) it.first;
+                        }
+                    }
+                    const bool user_boundaries_known = last_user_boundary >= 0;
+
+                    // the next user-message boundary strictly after the current batch start, if any
+                    // (role_map is ordered ascending by token index)
+                    const int32_t n_tokens_batch_start = slot.prompt.n_tokens();
+                    int32_t next_user_boundary = -1;
+                    for (const auto & it : role_map) {
+                        if (it.second == "user" && (int32_t) it.first > n_tokens_batch_start) {
+                            next_user_boundary = (int32_t) it.first;
+                            break;
+                        }
+                    }
 
                     // add prompt tokens for processing in the current batch
                     while (slot.prompt.n_tokens() < slot.task->n_tokens() && batch.n_tokens < n_batch) {
@@ -2951,10 +2971,10 @@ private:
 
                         slot.n_prompt_tokens_processed++;
 
-                        // stop the prompt batch exactly before the latest user input, so a checkpoint
+                        // stop the prompt batch exactly before the next user message, so a checkpoint
                         // can be created after the previous messages
-                        if (n_before_user_known &&
-                            slot.prompt.n_tokens() == n_before_user) {
+                        if (next_user_boundary >= 0 &&
+                            (int32_t) slot.prompt.n_tokens() == next_user_boundary) {
                             break;
                         }
 
@@ -3000,7 +3020,7 @@ private:
                         slot.init_sampler();
                     } else {
                         // skip ordinary mid-prompt checkpoints
-                        if (!n_before_user_known && !near_prompt_end) {
+                        if (!user_boundaries_known && !near_prompt_end) {
                             do_checkpoint = false;
                         }
                     }
@@ -3013,16 +3033,16 @@ private:
                     const int32_t n_tokens_start = slot.prompt.n_tokens() - n_tokens_cur;
 
                     {
+                        const auto it = role_map.find((size_t) n_tokens_start);
                         const bool is_on_user =
-                            n_before_user_known &&
-                            n_tokens_start == n_before_user;
+                            it != role_map.end() && it->second == "user";
 
                         const bool is_after_user =
-                            n_before_user_known &&
-                            n_tokens_start > n_before_user;
+                            user_boundaries_known &&
+                            n_tokens_start > last_user_boundary;
 
                         const bool is_allowed =
-                            !n_before_user_known ||
+                            !user_boundaries_known ||
                             is_on_user ||
                             (is_after_user && near_prompt_end);
 
@@ -3558,54 +3578,6 @@ void server_context::on_sleeping_changed(std::function<void(bool)> callback) {
     impl->queue_tasks.on_sleeping_state(std::move(callback));
 }
 
-// compute the number of tokens before the last user message in the prompt
-static int32_t prompt_get_n_before_user(
-        const json & message_spans,
-        const std::string & prompt,
-        const std::vector<raw_buffer> & files,
-        const llama_vocab * vocab,
-        mtmd_context * mctx) {
-    int32_t result = -1;
-    int32_t byte_pos = -1;
-
-    for (const auto & span : message_spans) {
-        const std::string role = json_value(span, "role", std::string());
-
-        if (role == "user") {
-            byte_pos = json_value(span, "pos", -1);
-        }
-    }
-
-    if (byte_pos >= 0) {
-        GGML_ASSERT((size_t) byte_pos <= prompt.size());
-
-        const std::string prefix = prompt.substr(0, (size_t) byte_pos);
-
-        const std::string marker = get_media_marker();
-        size_t n_prefix_media = 0;
-        for (size_t pos = 0; (pos = prefix.find(marker, pos)) != std::string::npos; pos += marker.size()) {
-            n_prefix_media++;
-        }
-
-        GGML_ASSERT(n_prefix_media <= files.size());
-
-        if (mctx != nullptr && n_prefix_media > 0) {
-            // TODO: this makes a copy - avoid it
-            std::vector<raw_buffer> prefix_files(files.begin(), files.begin() + n_prefix_media);
-
-            result = (int32_t) process_mtmd_prompt(mctx, prefix, prefix_files).size();
-        } else {
-            result = (int32_t) tokenize_input_prompts(vocab, nullptr, prefix, true, true)[0].size();
-        }
-
-        SRV_TRC("message_spans: last user message: byte_pos=%d, media=%zu, n_before_user=%d\n",
-                byte_pos, n_prefix_media, result);
-    }
-
-    return result;
-}
-
-
 //
 // server_routes
 //
@@ -3632,7 +3604,25 @@ std::unique_ptr<server_res_generator> server_routes::handle_completions_impl(
         // process prompt
         std::vector<server_tokens> inputs;
 
-        if (res_type != TASK_RESPONSE_TYPE_NONE && ctx_server.mctx != nullptr) {
+        // message spans (byte offsets into the rendered chat prompt) are used to record the token
+        // index at the start of each message, so checkpoints can be created before user messages
+        std::vector<common_chat_msg_span> message_spans;
+        if (prompt.is_string()) {
+            const auto & message_spans_json = json_value(data, "message_spans", json::array());
+            for (const auto & span : message_spans_json) {
+                message_spans.push_back({
+                    json_value(span, "role", std::string()),
+                    (size_t) json_value(span, "pos", 0),
+                    (size_t) json_value(span, "len", 0),
+                });
+            }
+        }
+
+        if (!message_spans.empty()) {
+            // OAI compatible chat path: tokenize the rendered prompt while recording message boundaries
+            inputs.push_back(tokenize_input_prompt_with_spans(
+                    ctx_server.vocab, ctx_server.mctx, prompt.get<std::string>(), files, message_spans, true, true));
+        } else if (res_type != TASK_RESPONSE_TYPE_NONE && ctx_server.mctx != nullptr) {
             // This is the case used by OAI compatible chat path with MTMD. TODO It can be moved to the path below.
             inputs.push_back(process_mtmd_prompt(ctx_server.mctx, prompt.get<std::string>(), files));
         } else {
@@ -3654,17 +3644,6 @@ std::unique_ptr<server_res_generator> server_routes::handle_completions_impl(
                     meta->slot_n_ctx,
                     meta->logit_bias_eog,
                     data);
-
-            const auto message_spans = json_value(data, "message_spans", json::array());
-            if (prompt.is_string() && message_spans.is_array()) {
-                task.params.n_before_user =
-                    prompt_get_n_before_user(
-                        message_spans,
-                        prompt.get<std::string>(),
-                        files,
-                        ctx_server.vocab,
-                        ctx_server.mctx);
-            }
 
             task.id_slot = json_value(data, "id_slot", -1);
 

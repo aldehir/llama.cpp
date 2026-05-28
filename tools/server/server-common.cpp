@@ -9,6 +9,7 @@
 
 #include "server-common.h"
 
+#include <algorithm>
 #include <random>
 #include <sstream>
 #include <fstream>
@@ -374,18 +375,20 @@ void server_tokens::push_back(const mtmd_input_chunk * chunk) {
 }
 
 void server_tokens::push_back(server_tokens & tokens) {
-    size_t start_idx = size();
-    for (size_t i = 0; i < tokens.size(); i++) {
-        push_back(tokens[i]);
-    }
     if (tokens.has_mtmd) {
         // Assert if we are copying MTMD chunks to a server_tokens that does not have mtmd.
         // We could also just check, but this will prevent silently dropping MTMD data.
         GGML_ASSERT(has_mtmd);
-        for (auto it = tokens.map_idx_to_media.begin(); it != tokens.map_idx_to_media.end(); ) {
-            auto * chunk = tokens.map_idx_to_media[it->first].get();
-            mtmd::input_chunk_ptr new_chunk(mtmd_input_chunk_copy(chunk));
-            map_idx_to_media[start_idx + it->first] = std::move(new_chunk);
+    }
+    for (size_t i = 0; i < tokens.size(); ) {
+        const auto media_it = tokens.map_idx_to_media.find(i);
+        if (media_it != tokens.map_idx_to_media.end()) {
+            // media chunk: copying it also appends the LLAMA_TOKEN_NULL placeholders and the chunk
+            push_back(media_it->second.get());
+            i += mtmd_input_chunk_get_n_tokens(media_it->second.get());
+        } else {
+            push_back(tokens[i]);
+            i++;
         }
     }
 }
@@ -566,6 +569,7 @@ server_tokens server_tokens::clone() const {
     server_tokens res;
     res.has_mtmd = has_mtmd;
     res.tokens   = tokens;
+    res.map_idx_to_role = map_idx_to_role;
     for (auto it = map_idx_to_media.begin(); it != map_idx_to_media.end(); ++it) {
         size_t idx = it->first;
         const mtmd::input_chunk_ptr & chunk = it->second;
@@ -713,9 +717,9 @@ static std::string fnv_hash(const uint8_t * data, size_t len) {
     return std::to_string(hash);
 }
 
-server_tokens process_mtmd_prompt(mtmd_context * mctx, std::string prompt, std::vector<raw_buffer> files) {
+static server_tokens process_mtmd_prompt_impl(mtmd_context * mctx, const std::string & prompt, const std::vector<raw_buffer> & files, bool add_special) {
     mtmd::bitmaps bitmaps;
-    for (auto & file : files) {
+    for (const auto & file : files) {
         mtmd::bitmap bmp(mtmd_helper_bitmap_init_from_buf(mctx, file.data(), file.size()));
         if (!bmp.ptr) {
             throw std::runtime_error("Failed to load image or audio file");
@@ -730,7 +734,7 @@ server_tokens process_mtmd_prompt(mtmd_context * mctx, std::string prompt, std::
     // multimodal
     mtmd_input_text inp_txt = {
         prompt.c_str(),
-        /* add_special */   true,
+        /* add_special */   add_special,
         /* parse_special */ true,
     };
     mtmd::input_chunks chunks(mtmd_input_chunks_init());
@@ -744,6 +748,78 @@ server_tokens process_mtmd_prompt(mtmd_context * mctx, std::string prompt, std::
         throw std::runtime_error("Failed to tokenize prompt");
     }
     auto result = server_tokens(chunks, true);
+    return result;
+}
+
+server_tokens process_mtmd_prompt(mtmd_context * mctx, std::string prompt, std::vector<raw_buffer> files) {
+    return process_mtmd_prompt_impl(mctx, prompt, files, /* add_special */ true);
+}
+
+server_tokens tokenize_input_prompt_with_spans(
+        const llama_vocab * vocab,
+        mtmd_context * mctx,
+        const std::string & prompt,
+        const std::vector<raw_buffer> & files,
+        const std::vector<common_chat_msg_span> & spans,
+        bool add_special,
+        bool parse_special) {
+    const bool has_mtmd = mctx != nullptr;
+
+    // keep only valid spans, sorted by byte offset
+    std::vector<common_chat_msg_span> ordered;
+    ordered.reserve(spans.size());
+    for (const auto & s : spans) {
+        if (s.pos <= prompt.size()) {
+            ordered.push_back(s);
+        }
+    }
+    std::sort(ordered.begin(), ordered.end(),
+              [](const common_chat_msg_span & a, const common_chat_msg_span & b) { return a.pos < b.pos; });
+
+    server_tokens result;
+    result.has_mtmd = has_mtmd;
+
+    const std::string marker = get_media_marker();
+    size_t file_off = 0;     // number of media files already consumed by previous segments
+    bool   first    = true;  // add_special (e.g. BOS) is applied only to the very first segment
+
+    // tokenize the prompt slice [begin, end) and append it to `result`.
+    // the boundaries are message-span byte offsets, which begin at special-token delimiters,
+    // so tokenizing the slices separately yields the same tokens as tokenizing the whole prompt.
+    auto append_segment = [&](size_t begin, size_t end) {
+        const std::string segment = prompt.substr(begin, end - begin);
+        if (has_mtmd) {
+            // the media files are ordered, so hand each segment the files for the markers it contains
+            size_t n_markers = 0;
+            for (size_t p = 0; (p = segment.find(marker, p)) != std::string::npos; p += marker.size()) {
+                n_markers++;
+            }
+            GGML_ASSERT(file_off + n_markers <= files.size());
+            std::vector<raw_buffer> segment_files(files.begin() + file_off, files.begin() + file_off + n_markers);
+            file_off += n_markers;
+            server_tokens segment_tokens = process_mtmd_prompt_impl(mctx, segment, segment_files, first && add_special);
+            result.push_back(segment_tokens);
+        } else {
+            llama_tokens segment_tokens = common_tokenize(vocab, segment, first && add_special, parse_special);
+            for (llama_token tok : segment_tokens) {
+                result.push_back(tok);
+            }
+        }
+        first = false;
+    };
+
+    size_t prev = 0;
+    for (const auto & span : ordered) {
+        if (span.pos < prev) {
+            continue;
+        }
+        append_segment(prev, span.pos);
+        // the running token count is exactly where this message begins
+        result.set_role_marker(result.size(), span.role);
+        prev = span.pos;
+    }
+    append_segment(prev, prompt.size());
+
     return result;
 }
 

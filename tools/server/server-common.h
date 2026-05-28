@@ -136,6 +136,11 @@ private: // disallow accessing these members directly, risking out-of-sync
     // note: the order need to be in-sync with tokens
     std::map<size_t, mtmd::input_chunk_ptr> map_idx_to_media;
 
+    // map a **start** index in tokens to the role of the message that begins there
+    // populated when a rendered chat prompt is tokenized with message spans
+    // used to create context checkpoints before user messages
+    std::map<size_t, std::string> map_idx_to_role;
+
     // list of tokens
     //   if the token is LLAMA_TOKEN_NULL, it indicates that this position is occupied by media chunk
     //   otherwise, it is a normal text token
@@ -180,6 +185,10 @@ public:
 
     const mtmd::input_chunk_ptr & find_chunk(size_t idx) const;
 
+    // token index -> role of the message starting at that index (see map_idx_to_role)
+    const std::map<size_t, std::string> & get_role_map() const { return map_idx_to_role; }
+    void set_role_marker(size_t idx, const std::string & role) { map_idx_to_role[idx] = role; }
+
     void push_back(llama_token tok);
 
     // will create a copy of the chunk if it contains non-text data
@@ -205,6 +214,7 @@ public:
 
     void clear() {
         map_idx_to_media.clear();
+        map_idx_to_role.clear();
         tokens.clear();
     }
 
@@ -277,6 +287,18 @@ std::vector<server_tokens> tokenize_input_prompts(
                                         const llama_vocab * vocab,
                                         mtmd_context * mctx,
                                         const json & json_prompt,
+                                        bool add_special,
+                                        bool parse_special);
+
+// tokenize a rendered chat prompt (a single string, optionally with media markers),
+// recording the token index at the start of each message span so that checkpoints can be
+// created before user messages. the message spans are byte offsets into `prompt`.
+server_tokens tokenize_input_prompt_with_spans(
+                                        const llama_vocab * vocab,
+                                        mtmd_context * mctx,
+                                        const std::string & prompt,
+                                        const std::vector<raw_buffer> & files,
+                                        const std::vector<common_chat_msg_span> & spans,
                                         bool add_special,
                                         bool parse_special);
 
