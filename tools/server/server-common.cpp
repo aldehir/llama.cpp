@@ -9,7 +9,6 @@
 
 #include "server-common.h"
 
-#include <algorithm>
 #include <random>
 #include <sstream>
 #include <fstream>
@@ -375,14 +374,12 @@ void server_tokens::push_back(const mtmd_input_chunk * chunk) {
 }
 
 void server_tokens::push_back(server_tokens & tokens) {
-    if (tokens.has_mtmd) {
-        // Assert if we are copying MTMD chunks to a server_tokens that does not have mtmd.
-        // We could also just check, but this will prevent silently dropping MTMD data.
-        GGML_ASSERT(has_mtmd);
-    }
     for (size_t i = 0; i < tokens.size(); ) {
         const auto media_it = tokens.map_idx_to_media.find(i);
         if (media_it != tokens.map_idx_to_media.end()) {
+            // Assert if we are copying MTMD chunks to a server_tokens that does not have mtmd.
+            // We could also just check, but this will prevent silently dropping MTMD data.
+            GGML_ASSERT(has_mtmd);
             // media chunk: copying it also appends the LLAMA_TOKEN_NULL placeholders and the chunk
             push_back(media_it->second.get());
             i += mtmd_input_chunk_get_n_tokens(media_it->second.get());
@@ -765,17 +762,6 @@ server_tokens tokenize_input_prompt_with_spans(
         bool parse_special) {
     const bool has_mtmd = mctx != nullptr;
 
-    // keep only valid spans, sorted by byte offset
-    std::vector<common_chat_msg_span> ordered;
-    ordered.reserve(spans.size());
-    for (const auto & s : spans) {
-        if (s.pos <= prompt.size()) {
-            ordered.push_back(s);
-        }
-    }
-    std::sort(ordered.begin(), ordered.end(),
-              [](const common_chat_msg_span & a, const common_chat_msg_span & b) { return a.pos < b.pos; });
-
     server_tokens result;
     result.has_mtmd = has_mtmd;
 
@@ -808,9 +794,10 @@ server_tokens tokenize_input_prompt_with_spans(
         first = false;
     };
 
+    // spans are byte offsets into `prompt`, already ordered by message position
     size_t prev = 0;
-    for (const auto & span : ordered) {
-        if (span.pos < prev) {
+    for (const auto & span : spans) {
+        if (span.pos < prev || span.pos > prompt.size()) {
             continue;
         }
         append_segment(prev, span.pos);
