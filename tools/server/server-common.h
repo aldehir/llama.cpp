@@ -290,13 +290,18 @@ server_tokens process_mtmd_prompt(mtmd_context * mctx, std::string prompt, std::
  * - "prompt": ["string1", [12, 34, 56]]
  * - "prompt": [[12, 34, 56], [78, 90, 12]]
  * - "prompt": [[12, 34, "string", 56, 78], [12, 34, 56], { "prompt_string": "string", "multimodal_data": [ "base64" ]}]
+ *
+ * `files` (decoded media) and `spans` (message byte offsets) apply only to a single
+ * string prompt, as used by the OAI-compatible chat path; they must be empty otherwise.
  */
 std::vector<server_tokens> tokenize_input_prompts(
                                         const llama_vocab * vocab,
                                         mtmd_context * mctx,
                                         const json & json_prompt,
                                         bool add_special,
-                                        bool parse_special);
+                                        bool parse_special,
+                                        const std::vector<raw_buffer> & files = {},
+                                        const std::vector<common_chat_msg_span> & spans = {});
 
 // tokenize a rendered chat prompt (a single string, optionally with media markers),
 // recording the token index at the start of each message span so that checkpoints can be

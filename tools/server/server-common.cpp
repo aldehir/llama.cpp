@@ -780,7 +780,10 @@ server_tokens tokenize_input_prompt_with_spans(
         const std::vector<common_chat_msg_span> & spans,
         bool add_special,
         bool parse_special) {
-    const bool has_mtmd = mctx != nullptr;
+    // only treat the prompt as multimodal when media files are actually attached. a text-only
+    // prompt on a multimodal model is tokenized as plain text, so it can still benefit from
+    // prefix caching and speculative decoding (mirrors the pre-merge tokenize_input_prompts path).
+    const bool has_mtmd = mctx != nullptr && !files.empty();
 
     server_tokens result;
     result.has_mtmd = has_mtmd;
@@ -839,12 +842,18 @@ server_tokens tokenize_input_prompt_with_spans(
  * - "prompt": [12, 34, "string", 56, 78]
  * - "prompt": { "prompt_string": "string", "multimodal_data": [ "base64" ] }
  */
-static server_tokens tokenize_input_subprompt(const llama_vocab * vocab, mtmd_context * mctx, const json & json_prompt, bool add_special, bool parse_special) {
+static server_tokens tokenize_input_subprompt(const llama_vocab * vocab, mtmd_context * mctx, const json & json_prompt, bool add_special, bool parse_special,
+                                              const std::vector<raw_buffer> & files = {}, const std::vector<common_chat_msg_span> & spans = {}) {
     constexpr char JSON_STRING_PROMPT_KEY[] = "prompt_string";
     constexpr char JSON_MTMD_DATA_KEY[] = "multimodal_data";
     const bool has_mtmd = mctx != nullptr;
-    if (json_prompt.is_string() || json_is_array_of_mixed_numbers_strings(json_prompt)) {
-        // string or mixed
+    if (json_prompt.is_string()) {
+        // a plain string prompt, as produced by the OAI-compatible chat path. tokenize via the
+        // span-aware path so any attached media files and message-span role markers are recorded.
+        // with no files and no spans this reduces to plain text tokenization.
+        return tokenize_input_prompt_with_spans(vocab, mctx, json_prompt.get<std::string>(), files, spans, add_special, parse_special);
+    } else if (json_is_array_of_mixed_numbers_strings(json_prompt)) {
+        // mixed array of tokens and strings (never carries files/spans)
         llama_tokens tmp = tokenize_mixed(vocab, json_prompt, add_special, parse_special);
         return server_tokens(tmp, false);
     } else if (json_is_array_of_numbers(json_prompt)) {
@@ -873,15 +882,19 @@ static server_tokens tokenize_input_subprompt(const llama_vocab * vocab, mtmd_co
    }
 }
 
-std::vector<server_tokens> tokenize_input_prompts(const llama_vocab * vocab, mtmd_context * mctx, const json & json_prompt, bool add_special, bool parse_special) {
+std::vector<server_tokens> tokenize_input_prompts(const llama_vocab * vocab, mtmd_context * mctx, const json & json_prompt, bool add_special, bool parse_special,
+                                                  const std::vector<raw_buffer> & files, const std::vector<common_chat_msg_span> & spans) {
     std::vector<server_tokens> result;
     if (json_prompt.is_array() && !json_is_array_and_contains_numbers(json_prompt)) {
+        // batched prompts produce one task each; media files and message spans only make
+        // sense for a single string prompt, so they must not be supplied here.
+        GGML_ASSERT(files.empty() && spans.empty());
         result.reserve(json_prompt.size());
         for (const auto & p : json_prompt) {
-            result.push_back(tokenize_input_subprompt(vocab, mctx, p,add_special, parse_special));
+            result.push_back(tokenize_input_subprompt(vocab, mctx, p, add_special, parse_special));
         }
     } else {
-        result.push_back(tokenize_input_subprompt(vocab, mctx, json_prompt, add_special, parse_special));
+        result.push_back(tokenize_input_subprompt(vocab, mctx, json_prompt, add_special, parse_special, files, spans));
     }
     if (result.empty()) {
         throw std::runtime_error("\"prompt\" must not be empty");

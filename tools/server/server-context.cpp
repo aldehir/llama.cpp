@@ -3606,17 +3606,10 @@ std::unique_ptr<server_res_generator> server_routes::handle_completions_impl(
             }
         }
 
-        if (!message_spans.empty()) {
-            // OAI compatible chat path: tokenize the rendered prompt while recording message boundaries
-            inputs.push_back(tokenize_input_prompt_with_spans(
-                    ctx_server.vocab, ctx_server.mctx, prompt.get<std::string>(), files, message_spans, true, true));
-        } else if (res_type != TASK_RESPONSE_TYPE_NONE && ctx_server.mctx != nullptr) {
-            // This is the case used by OAI compatible chat path with MTMD. TODO It can be moved to the path below.
-            inputs.push_back(process_mtmd_prompt(ctx_server.mctx, prompt.get<std::string>(), files));
-        } else {
-            // Everything else, including multimodal completions.
-            inputs = tokenize_input_prompts(ctx_server.vocab, ctx_server.mctx, prompt, true, true);
-        }
+        // a string prompt (the OAI-compatible chat path) is tokenized while recording message
+        // boundaries and attaching any media files; array / token / multimodal-object prompts are
+        // handled as before. media is only treated as multimodal when files are actually attached.
+        inputs = tokenize_input_prompts(ctx_server.vocab, ctx_server.mctx, prompt, true, true, files, message_spans);
 
         // tasks.reserve(inputs.size()); // TODO: this is inaccurate due to child tasks
 
