@@ -735,7 +735,7 @@ static std::string fnv_hash(const uint8_t * data, size_t len) {
     return std::to_string(hash);
 }
 
-static server_tokens process_mtmd_prompt_impl(mtmd_context * mctx, const std::string & prompt, const std::vector<raw_buffer> & files, bool add_special) {
+server_tokens process_mtmd_prompt(mtmd_context * mctx, std::string prompt, std::vector<raw_buffer> files, bool add_special) {
     mtmd::bitmaps bitmaps;
     for (const auto & file : files) {
         mtmd::bitmap bmp(mtmd_helper_bitmap_init_from_buf(mctx, file.data(), file.size()));
@@ -769,9 +769,6 @@ static server_tokens process_mtmd_prompt_impl(mtmd_context * mctx, const std::st
     return result;
 }
 
-server_tokens process_mtmd_prompt(mtmd_context * mctx, std::string prompt, std::vector<raw_buffer> files) {
-    return process_mtmd_prompt_impl(mctx, prompt, files, /* add_special */ true);
-}
 
 server_tokens tokenize_spans(
         const llama_vocab * vocab,
@@ -804,7 +801,7 @@ server_tokens tokenize_spans(
             GGML_ASSERT(file_off + n_markers <= files.size());
             std::vector<raw_buffer> segment_files(files.begin() + file_off, files.begin() + file_off + n_markers);
             file_off += n_markers;
-            server_tokens segment_tokens = process_mtmd_prompt_impl(mctx, segment, segment_files, first && add_special);
+            server_tokens segment_tokens = process_mtmd_prompt(mctx, segment, segment_files, first && add_special);
             result.push_back(segment_tokens);
         } else {
             llama_tokens segment_tokens = common_tokenize(vocab, segment, first && add_special, parse_special);
