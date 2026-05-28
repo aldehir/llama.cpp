@@ -189,14 +189,6 @@ public:
     const std::map<size_t, std::string> & get_role_map() const { return map_idx_to_role; }
     void set_role_marker(size_t idx, const std::string & role) { map_idx_to_role[idx] = role; }
 
-    // the largest token index that begins a message with the given role, or -1 if none.
-    // used to create context checkpoints before user messages.
-    int32_t last_role_boundary(const std::string & role) const;
-
-    // the smallest token index strictly greater than `after` that begins a message
-    // with the given role, or -1 if none.
-    int32_t next_role_boundary(const std::string & role, int32_t after) const;
-
     void push_back(llama_token tok);
 
     // will create a copy of the chunk if it contains non-text data

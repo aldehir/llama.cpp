@@ -2924,12 +2924,22 @@ private:
                     // checkpoints are created before each user message so previous turns can be reused.
                     const auto & role_map = input_tokens.get_role_map();
 
-                    const int32_t last_user_boundary = input_tokens.last_role_boundary("user");
-                    const bool user_boundaries_known = last_user_boundary >= 0;
-
-                    // the next user-message boundary strictly after the current batch start, if any
+                    // single pass over the (ascending) role map to find the last user-message
+                    // boundary and the next one strictly after the current batch start
                     const int32_t n_tokens_batch_start = slot.prompt.n_tokens();
-                    const int32_t next_user_boundary = input_tokens.next_role_boundary("user", n_tokens_batch_start);
+                    int32_t last_user_boundary = -1;
+                    int32_t next_user_boundary = -1;
+                    for (const auto & it : role_map) {
+                        if (it.second != "user") {
+                            continue;
+                        }
+                        const int32_t idx = (int32_t) it.first;
+                        last_user_boundary = idx; // map is ordered, so this ends at the largest
+                        if (next_user_boundary < 0 && idx > n_tokens_batch_start) {
+                            next_user_boundary = idx;
+                        }
+                    }
+                    const bool user_boundaries_known = last_user_boundary >= 0;
 
                     // add prompt tokens for processing in the current batch
                     while (slot.prompt.n_tokens() < slot.task->n_tokens() && batch.n_tokens < n_batch) {
