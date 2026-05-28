@@ -327,7 +327,6 @@ int32_t server_tokens::last_role_boundary(const std::string & role) const {
 }
 
 int32_t server_tokens::next_role_boundary(const std::string & role, int32_t after) const {
-    // map_idx_to_role is ordered ascending by token index
     for (const auto & it : map_idx_to_role) {
         if (it.second == role && (int32_t) it.first > after) {
             return (int32_t) it.first;
@@ -400,9 +399,15 @@ void server_tokens::push_back(server_tokens & tokens) {
     for (size_t i = 0; i < tokens.size(); ) {
         const auto media_it = tokens.map_idx_to_media.find(i);
         if (media_it != tokens.map_idx_to_media.end()) {
-            // media chunk: copying it also appends the LLAMA_TOKEN_NULL placeholders and the chunk
-            push_back(media_it->second.get());
-            i += mtmd_input_chunk_get_n_tokens(media_it->second.get());
+            const auto * chunk = media_it->second.get();
+            const size_t n_tokens = mtmd_input_chunk_get_n_tokens(chunk);
+            const size_t start_idx = this->tokens.size();
+            for (size_t j = 0; j < n_tokens; ++j) {
+                this->tokens.emplace_back(LLAMA_TOKEN_NULL);
+            }
+            mtmd::input_chunk_ptr new_chunk(mtmd_input_chunk_copy(chunk));
+            map_idx_to_media[start_idx] = std::move(new_chunk);
+            i += n_tokens;
         } else {
             push_back(tokens[i]);
             i++;
@@ -780,9 +785,6 @@ server_tokens tokenize_spans(
         bool parse_special,
         const std::vector<raw_buffer> & files,
         const std::vector<common_chat_msg_span> & spans) {
-    // only treat the prompt as multimodal when media files are actually attached. a text-only
-    // prompt on a multimodal model is tokenized as plain text, so it can still benefit from
-    // prefix caching and speculative decoding (mirrors the pre-merge tokenize_input_prompts path).
     const bool has_mtmd = mctx != nullptr && !files.empty();
 
     server_tokens result;
