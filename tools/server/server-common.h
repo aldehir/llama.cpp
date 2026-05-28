@@ -306,7 +306,7 @@ std::vector<server_tokens> tokenize_input_prompts(
 // tokenize a rendered chat prompt (a single string, optionally with media markers),
 // recording the token index at the start of each message span so that checkpoints can be
 // created before user messages. the message spans are byte offsets into `prompt`.
-server_tokens tokenize_input_prompt_with_spans(
+server_tokens tokenize_spans(
                                         const llama_vocab * vocab,
                                         mtmd_context * mctx,
                                         const std::string & prompt,

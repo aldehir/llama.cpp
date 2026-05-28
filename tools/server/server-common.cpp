@@ -394,12 +394,12 @@ void server_tokens::push_back(const mtmd_input_chunk * chunk) {
 }
 
 void server_tokens::push_back(server_tokens & tokens) {
+    // Assert if we are copying MTMD chunks to a server_tokens that does not have mtmd.
+    // We could also just check, but this will prevent silently dropping MTMD data.
+    GGML_ASSERT(has_mtmd || tokens.map_idx_to_media.empty());
     for (size_t i = 0; i < tokens.size(); ) {
         const auto media_it = tokens.map_idx_to_media.find(i);
         if (media_it != tokens.map_idx_to_media.end()) {
-            // Assert if we are copying MTMD chunks to a server_tokens that does not have mtmd.
-            // We could also just check, but this will prevent silently dropping MTMD data.
-            GGML_ASSERT(has_mtmd);
             // media chunk: copying it also appends the LLAMA_TOKEN_NULL placeholders and the chunk
             push_back(media_it->second.get());
             i += mtmd_input_chunk_get_n_tokens(media_it->second.get());
@@ -772,7 +772,7 @@ server_tokens process_mtmd_prompt(mtmd_context * mctx, std::string prompt, std::
     return process_mtmd_prompt_impl(mctx, prompt, files, /* add_special */ true);
 }
 
-server_tokens tokenize_input_prompt_with_spans(
+server_tokens tokenize_spans(
         const llama_vocab * vocab,
         mtmd_context * mctx,
         const std::string & prompt,
@@ -851,7 +851,7 @@ static server_tokens tokenize_input_subprompt(const llama_vocab * vocab, mtmd_co
         // a plain string prompt, as produced by the OAI-compatible chat path. tokenize via the
         // span-aware path so any attached media files and message-span role markers are recorded.
         // with no files and no spans this reduces to plain text tokenization.
-        return tokenize_input_prompt_with_spans(vocab, mctx, json_prompt.get<std::string>(), files, spans, add_special, parse_special);
+        return tokenize_spans(vocab, mctx, json_prompt.get<std::string>(), files, spans, add_special, parse_special);
     } else if (json_is_array_of_mixed_numbers_strings(json_prompt)) {
         // mixed array of tokens and strings (never carries files/spans)
         llama_tokens tmp = tokenize_mixed(vocab, json_prompt, add_special, parse_special);
