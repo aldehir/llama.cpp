@@ -393,21 +393,17 @@ void server_tokens::push_back(const mtmd_input_chunk * chunk) {
 }
 
 void server_tokens::push_back(server_tokens & tokens) {
-    // Assert if we are copying MTMD chunks to a server_tokens that does not have mtmd.
-    // We could also just check, but this will prevent silently dropping MTMD data.
-    GGML_ASSERT(has_mtmd || tokens.map_idx_to_media.empty());
+    if (tokens.has_mtmd) {
+        // Assert if we are copying MTMD chunks to a server_tokens that does not have mtmd.
+        // We could also just check, but this will prevent silently dropping MTMD data.
+        GGML_ASSERT(has_mtmd);
+    }
     for (size_t i = 0; i < tokens.size(); ) {
         const auto media_it = tokens.map_idx_to_media.find(i);
         if (media_it != tokens.map_idx_to_media.end()) {
-            const auto * chunk = media_it->second.get();
-            const size_t n_tokens = mtmd_input_chunk_get_n_tokens(chunk);
-            const size_t start_idx = this->tokens.size();
-            for (size_t j = 0; j < n_tokens; ++j) {
-                this->tokens.emplace_back(LLAMA_TOKEN_NULL);
-            }
-            mtmd::input_chunk_ptr new_chunk(mtmd_input_chunk_copy(chunk));
-            map_idx_to_media[start_idx] = std::move(new_chunk);
-            i += n_tokens;
+            // media chunk: copying it also appends the LLAMA_TOKEN_NULL placeholders and the chunk
+            push_back(media_it->second.get());
+            i += mtmd_input_chunk_get_n_tokens(media_it->second.get());
         } else {
             push_back(tokens[i]);
             i++;
