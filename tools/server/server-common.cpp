@@ -776,10 +776,10 @@ server_tokens tokenize_spans(
         const llama_vocab * vocab,
         mtmd_context * mctx,
         const std::string & prompt,
-        const std::vector<raw_buffer> & files,
-        const std::vector<common_chat_msg_span> & spans,
         bool add_special,
-        bool parse_special) {
+        bool parse_special,
+        const std::vector<raw_buffer> & files,
+        const std::vector<common_chat_msg_span> & spans) {
     // only treat the prompt as multimodal when media files are actually attached. a text-only
     // prompt on a multimodal model is tokenized as plain text, so it can still benefit from
     // prefix caching and speculative decoding (mirrors the pre-merge tokenize_input_prompts path).
@@ -851,7 +851,7 @@ static server_tokens tokenize_input_subprompt(const llama_vocab * vocab, mtmd_co
         // a plain string prompt, as produced by the OAI-compatible chat path. tokenize via the
         // span-aware path so any attached media files and message-span role markers are recorded.
         // with no files and no spans this reduces to plain text tokenization.
-        return tokenize_spans(vocab, mctx, json_prompt.get<std::string>(), files, spans, add_special, parse_special);
+        return tokenize_spans(vocab, mctx, json_prompt.get<std::string>(), add_special, parse_special, files, spans);
     } else if (json_is_array_of_mixed_numbers_strings(json_prompt)) {
         // mixed array of tokens and strings (never carries files/spans)
         llama_tokens tmp = tokenize_mixed(vocab, json_prompt, add_special, parse_special);

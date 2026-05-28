@@ -310,10 +310,10 @@ server_tokens tokenize_spans(
                                         const llama_vocab * vocab,
                                         mtmd_context * mctx,
                                         const std::string & prompt,
-                                        const std::vector<raw_buffer> & files,
-                                        const std::vector<common_chat_msg_span> & spans,
                                         bool add_special,
-                                        bool parse_special);
+                                        bool parse_special,
+                                        const std::vector<raw_buffer> & files,
+                                        const std::vector<common_chat_msg_span> & spans);
 
 //
 // OAI utils
