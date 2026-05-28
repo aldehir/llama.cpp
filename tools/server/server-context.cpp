@@ -2920,8 +2920,26 @@ private:
                         has_mtmd = true;
                     }
 
-                    const int32_t n_before_user = slot.task->params.n_before_user;
-                    const bool n_before_user_known = n_before_user > 0;
+                    // token start indices of every user message in the prompt. a context checkpoint
+                    // is created immediately before each user message so the prefix up to that
+                    // message can be reused on the next turn. these are mapped from the chat
+                    // template's message spans to token positions at tokenization time.
+                    const std::vector<size_t> user_starts = slot.task->tokens.get_user_msg_starts();
+                    const bool user_starts_known = !user_starts.empty();
+
+                    // the token index at which the current batch begins for this slot
+                    const int32_t batch_start = slot.prompt.n_tokens();
+
+                    // the next user-message boundary strictly after the batch start. the prompt
+                    // batch is stopped here so a checkpoint can be created before the user message.
+                    // only relevant when we actually intend to checkpoint.
+                    int32_t next_user_start = -1;
+                    if (do_checkpoint && user_starts_known) {
+                        const auto it = std::upper_bound(user_starts.begin(), user_starts.end(), (size_t) batch_start);
+                        if (it != user_starts.end()) {
+                            next_user_start = (int32_t) *it;
+                        }
+                    }
 
                     // add prompt tokens for processing in the current batch
                     while (slot.prompt.n_tokens() < slot.task->n_tokens() && batch.n_tokens < n_batch) {
@@ -2951,10 +2969,10 @@ private:
 
                         slot.n_prompt_tokens_processed++;
 
-                        // stop the prompt batch exactly before the latest user input, so a checkpoint
+                        // stop the prompt batch exactly before the next user message, so a checkpoint
                         // can be created after the previous messages
-                        if (n_before_user_known &&
-                            slot.prompt.n_tokens() == n_before_user) {
+                        if (next_user_start >= 0 &&
+                            slot.prompt.n_tokens() == next_user_start) {
                             break;
                         }
 
@@ -3000,7 +3018,7 @@ private:
                         slot.init_sampler();
                     } else {
                         // skip ordinary mid-prompt checkpoints
-                        if (!n_before_user_known && !near_prompt_end) {
+                        if (!user_starts_known && !near_prompt_end) {
                             do_checkpoint = false;
                         }
                     }
@@ -3014,15 +3032,15 @@ private:
 
                     {
                         const bool is_on_user =
-                            n_before_user_known &&
-                            n_tokens_start == n_before_user;
+                            user_starts_known &&
+                            std::binary_search(user_starts.begin(), user_starts.end(), (size_t) n_tokens_start);
 
                         const bool is_after_user =
-                            n_before_user_known &&
-                            n_tokens_start > n_before_user;
+                            user_starts_known &&
+                            (size_t) n_tokens_start > user_starts.back();
 
                         const bool is_allowed =
-                            !n_before_user_known ||
+                            !user_starts_known ||
                             is_on_user ||
                             (is_after_user && near_prompt_end);
 
@@ -3558,54 +3576,6 @@ void server_context::on_sleeping_changed(std::function<void(bool)> callback) {
     impl->queue_tasks.on_sleeping_state(std::move(callback));
 }
 
-// compute the number of tokens before the last user message in the prompt
-static int32_t prompt_get_n_before_user(
-        const json & message_spans,
-        const std::string & prompt,
-        const std::vector<raw_buffer> & files,
-        const llama_vocab * vocab,
-        mtmd_context * mctx) {
-    int32_t result = -1;
-    int32_t byte_pos = -1;
-
-    for (const auto & span : message_spans) {
-        const std::string role = json_value(span, "role", std::string());
-
-        if (role == "user") {
-            byte_pos = json_value(span, "pos", -1);
-        }
-    }
-
-    if (byte_pos >= 0) {
-        GGML_ASSERT((size_t) byte_pos <= prompt.size());
-
-        const std::string prefix = prompt.substr(0, (size_t) byte_pos);
-
-        const std::string marker = get_media_marker();
-        size_t n_prefix_media = 0;
-        for (size_t pos = 0; (pos = prefix.find(marker, pos)) != std::string::npos; pos += marker.size()) {
-            n_prefix_media++;
-        }
-
-        GGML_ASSERT(n_prefix_media <= files.size());
-
-        if (mctx != nullptr && n_prefix_media > 0) {
-            // TODO: this makes a copy - avoid it
-            std::vector<raw_buffer> prefix_files(files.begin(), files.begin() + n_prefix_media);
-
-            result = (int32_t) process_mtmd_prompt(mctx, prefix, prefix_files).size();
-        } else {
-            result = (int32_t) tokenize_input_prompts(vocab, nullptr, prefix, true, true)[0].size();
-        }
-
-        SRV_TRC("message_spans: last user message: byte_pos=%d, media=%zu, n_before_user=%d\n",
-                byte_pos, n_prefix_media, result);
-    }
-
-    return result;
-}
-
-
 //
 // server_routes
 //
@@ -3655,15 +3625,17 @@ std::unique_ptr<server_res_generator> server_routes::handle_completions_impl(
                     meta->logit_bias_eog,
                     data);
 
+            // map the chat template's message spans to token positions and attach them to the
+            // prompt tokens, so context checkpoints can be placed before each user message
             const auto message_spans = json_value(data, "message_spans", json::array());
-            if (prompt.is_string() && message_spans.is_array()) {
-                task.params.n_before_user =
-                    prompt_get_n_before_user(
+            if (prompt.is_string() && message_spans.is_array() && !message_spans.empty()) {
+                task.tokens.set_msg_roles(
+                    tokenize_msg_role_boundaries(
+                        ctx_server.vocab,
+                        ctx_server.mctx,
                         message_spans,
                         prompt.get<std::string>(),
-                        files,
-                        ctx_server.vocab,
-                        ctx_server.mctx);
+                        files));
             }
 
             task.id_slot = json_value(data, "id_slot", -1);

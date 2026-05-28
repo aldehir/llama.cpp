@@ -136,6 +136,12 @@ private: // disallow accessing these members directly, risking out-of-sync
     // note: the order need to be in-sync with tokens
     std::map<size_t, mtmd::input_chunk_ptr> map_idx_to_media;
 
+    // map a **start** index in tokens to the role of the chat message that begins there
+    // (e.g. "user", "assistant", "system"). populated from the chat template's message spans
+    // and kept in-sync with tokens, mirroring map_idx_to_media. used to place context
+    // checkpoints immediately before user messages.
+    std::map<size_t, std::string> map_idx_to_role;
+
     // list of tokens
     //   if the token is LLAMA_TOKEN_NULL, it indicates that this position is occupied by media chunk
     //   otherwise, it is a normal text token
@@ -205,6 +211,7 @@ public:
 
     void clear() {
         map_idx_to_media.clear();
+        map_idx_to_role.clear();
         tokens.clear();
     }
 
@@ -227,6 +234,12 @@ public:
                 size_t & n_tokens_out) const;
 
     server_tokens clone() const;
+
+    // attach chat-message role boundaries (token start index -> role); replaces any existing map
+    void set_msg_roles(std::map<size_t, std::string> roles);
+
+    // token start indices of every "user" message, sorted ascending (index 0 is excluded)
+    std::vector<size_t> get_user_msg_starts() const;
 };
 
 
@@ -258,7 +271,7 @@ llama_tokens tokenize_mixed(const llama_vocab * vocab, const json & json_prompt,
 size_t validate_utf8(const std::string& text);
 
 // process mtmd prompt, return the server_tokens containing both text tokens and media chunks
-server_tokens process_mtmd_prompt(mtmd_context * mctx, std::string prompt, std::vector<raw_buffer> files);
+server_tokens process_mtmd_prompt(mtmd_context * mctx, std::string prompt, std::vector<raw_buffer> files, bool add_special = true);
 
 /**
  * break the input "prompt" object into multiple prompt if needed, then tokenize them
@@ -279,6 +292,20 @@ std::vector<server_tokens> tokenize_input_prompts(
                                         const json & json_prompt,
                                         bool add_special,
                                         bool parse_special);
+
+/**
+ * Compute a sparse map from token start index -> chat message role, using the byte-offset
+ * message spans produced by the chat template (each span gives the byte position where a
+ * message begins in `prompt`). The prompt is tokenized in span-delimited segments so the byte
+ * offsets are translated to token positions in a single pass, instead of re-tokenizing prefixes.
+ * The result is intended to be attached to the corresponding server_tokens via set_msg_roles().
+ */
+std::map<size_t, std::string> tokenize_msg_role_boundaries(
+                                        const llama_vocab * vocab,
+                                        mtmd_context * mctx,
+                                        const json & message_spans,
+                                        const std::string & prompt,
+                                        const std::vector<raw_buffer> & files);
 
 //
 // OAI utils

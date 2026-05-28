@@ -388,6 +388,9 @@ void server_tokens::push_back(server_tokens & tokens) {
             map_idx_to_media[start_idx + it->first] = std::move(new_chunk);
         }
     }
+    for (const auto & it : tokens.map_idx_to_role) {
+        map_idx_to_role[start_idx + it.first] = it.second;
+    }
 }
 
 void server_tokens::insert(const llama_tokens & inp_tokens) {
@@ -443,6 +446,14 @@ void server_tokens::keep_first(size_t n) {
             } else {
                 ++it;
             }
+        }
+    }
+    // remove role boundaries that fall outside the kept range
+    for (auto it = map_idx_to_role.begin(); it != map_idx_to_role.end(); ) {
+        if (it->first >= n) {
+            it = map_idx_to_role.erase(it);
+        } else {
+            ++it;
         }
     }
     tokens.resize(n);
@@ -570,6 +581,23 @@ server_tokens server_tokens::clone() const {
         size_t idx = it->first;
         const mtmd::input_chunk_ptr & chunk = it->second;
         res.map_idx_to_media[idx] = mtmd::input_chunk_ptr(mtmd_input_chunk_copy(chunk.get()));
+    }
+    res.map_idx_to_role = map_idx_to_role;
+    return res;
+}
+
+void server_tokens::set_msg_roles(std::map<size_t, std::string> roles) {
+    map_idx_to_role = std::move(roles);
+}
+
+std::vector<size_t> server_tokens::get_user_msg_starts() const {
+    std::vector<size_t> res;
+    // map keys are iterated in ascending order, so the result is sorted
+    for (const auto & it : map_idx_to_role) {
+        // index 0 cannot be checkpointed before (there is nothing preceding it)
+        if (it.first > 0 && it.second == "user") {
+            res.push_back(it.first);
+        }
     }
     return res;
 }
@@ -713,7 +741,7 @@ static std::string fnv_hash(const uint8_t * data, size_t len) {
     return std::to_string(hash);
 }
 
-server_tokens process_mtmd_prompt(mtmd_context * mctx, std::string prompt, std::vector<raw_buffer> files) {
+server_tokens process_mtmd_prompt(mtmd_context * mctx, std::string prompt, std::vector<raw_buffer> files, bool add_special) {
     mtmd::bitmaps bitmaps;
     for (auto & file : files) {
         mtmd::bitmap bmp(mtmd_helper_bitmap_init_from_buf(mctx, file.data(), file.size()));
@@ -730,7 +758,7 @@ server_tokens process_mtmd_prompt(mtmd_context * mctx, std::string prompt, std::
     // multimodal
     mtmd_input_text inp_txt = {
         prompt.c_str(),
-        /* add_special */   true,
+        /* add_special */   add_special,
         /* parse_special */ true,
     };
     mtmd::input_chunks chunks(mtmd_input_chunks_init());
@@ -804,6 +832,89 @@ std::vector<server_tokens> tokenize_input_prompts(const llama_vocab * vocab, mtm
         throw std::runtime_error("\"prompt\" must not be empty");
     }
     return result;
+}
+
+std::map<size_t, std::string> tokenize_msg_role_boundaries(
+        const llama_vocab * vocab,
+        mtmd_context * mctx,
+        const json & message_spans,
+        const std::string & prompt,
+        const std::vector<raw_buffer> & files) {
+    // failures here only affect checkpoint placement, so never let them break the request
+    try {
+        // collect (byte position, role) for each message span
+        std::vector<std::pair<size_t, std::string>> spans;
+        spans.reserve(message_spans.size());
+        for (const auto & span : message_spans) {
+            const std::string role = json_value(span, "role", std::string());
+            const int64_t     pos  = json_value(span, "pos",  (int64_t) -1);
+            if (role.empty() || pos < 0 || (size_t) pos > prompt.size()) {
+                continue;
+            }
+            spans.emplace_back((size_t) pos, role);
+        }
+        if (spans.empty()) {
+            return {};
+        }
+
+        // spans are produced in prompt order, but sort defensively
+        std::sort(spans.begin(), spans.end(),
+                  [](const auto & a, const auto & b) { return a.first < b.first; });
+
+        const std::string marker = get_media_marker();
+
+        // count media markers within prompt[lo, hi)
+        auto count_markers = [&](size_t lo, size_t hi) {
+            size_t n = 0;
+            for (size_t p = prompt.find(marker, lo);
+                 p != std::string::npos && p + marker.size() <= hi;
+                 p = prompt.find(marker, p + marker.size())) {
+                n++;
+            }
+            return n;
+        };
+
+        // number of tokens produced by prompt[lo, hi). only the first segment adds the BOS/special
+        // tokens, so the per-segment counts sum to the full prompt's token count: boundaries fall on
+        // special role delimiters, which do not merge with neighboring text during tokenization.
+        size_t file_off = 0;
+        bool   first    = true;
+        auto count_tokens = [&](size_t lo, size_t hi) -> size_t {
+            const std::string segment = prompt.substr(lo, hi - lo);
+            const bool add_special = first;
+            first = false;
+            if (mctx != nullptr) {
+                const size_t n_media = count_markers(lo, hi);
+                if (file_off + n_media > files.size()) {
+                    throw std::runtime_error("media marker / file count mismatch");
+                }
+                std::vector<raw_buffer> seg_files(files.begin() + file_off,
+                                                  files.begin() + file_off + n_media);
+                file_off += n_media;
+                return process_mtmd_prompt(mctx, segment, seg_files, add_special).size();
+            }
+            return common_tokenize(vocab, segment, add_special, true).size();
+        };
+
+        std::map<size_t, std::string> result;
+
+        // untagged prefix before the first message delimiter (carries the BOS)
+        size_t acc = count_tokens(0, spans[0].first);
+
+        for (size_t i = 0; i < spans.size(); i++) {
+            // the message starting at byte spans[i].first begins at token index `acc`
+            result[acc] = spans[i].second;
+
+            const size_t lo = spans[i].first;
+            const size_t hi = (i + 1 < spans.size()) ? spans[i + 1].first : prompt.size();
+            acc += count_tokens(lo, hi);
+        }
+
+        return result;
+    } catch (const std::exception & e) {
+        SRV_WRN("failed to compute message role boundaries, checkpoints before user messages disabled: %s\n", e.what());
+        return {};
+    }
 }
 
 //
