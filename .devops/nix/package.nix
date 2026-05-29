@@ -3,6 +3,7 @@
   glibc,
   config,
   stdenv,
+  stdenvNoCC,
   runCommand,
   cmake,
   ninja,
@@ -19,6 +20,8 @@
   openssl,
   shaderc,
   spirv-headers,
+  nodejs,
+  importNpmLock,
   useBlas ?
     builtins.all (x: !x) [
       useCuda
@@ -130,7 +133,47 @@ effectiveStdenv.mkDerivation (finalAttrs: {
     src = lib.cleanSource ../../.;
   };
 
-  postPatch = ''
+  # Builds the Web UI locally, taking care not to require updating any sha256
+  # hash. npm dependencies are provided by importNpmLock from the committed
+  # package-lock.json, so this works in Nix's offline build sandbox.
+  webui = stdenvNoCC.mkDerivation {
+    pname = "llama-cpp-webui";
+    version = llamaVersion;
+    src = lib.cleanSource ../../tools/ui;
+
+    nativeBuildInputs = [
+      nodejs
+      importNpmLock.linkNodeModulesHook
+    ];
+
+    # no sha256 required when using buildNodeModules
+    npmDeps = importNpmLock.buildNodeModules {
+      npmRoot = ../../tools/ui;
+      inherit nodejs;
+    };
+
+    buildPhase = ''
+      runHook preBuild
+      npm run build
+      runHook postBuild
+    '';
+
+    installPhase = ''
+      runHook preInstall
+      mkdir -p $out
+      cp -r dist/. $out/
+      runHook postInstall
+    '';
+  };
+
+  # Copy the prebuilt Web UI assets into tools/ui/dist of the unpacked source.
+  # scripts/ui-assets.cmake treats tools/ui/dist as the highest-priority asset
+  # source (copy_src_dist) and short-circuits before npm / Hugging Face, so no
+  # network access is needed at CMake time.
+  postPatch = lib.optionalString useWebUi ''
+    mkdir -p tools/ui/dist
+    cp -r ${finalAttrs.webui}/. tools/ui/dist/
+    chmod -R u+w tools/ui/dist
   '';
 
   # With PR#6015 https://github.com/ggml-org/llama.cpp/pull/6015,
