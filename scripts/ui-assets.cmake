@@ -1,9 +1,13 @@
 # Provision UI assets and generate ui.cpp/ui.h.
 #
 # Asset provisioning priority:
-#   1. Pre-built assets in SRC_DIST_DIR (manually built by user)
-#   2. If BUILD_UI=ON: npm build
-#   3. If above did not produce assets and HF_ENABLED=ON: HF Bucket download
+#   1. Pre-built assets in SRC_DIST_DIR (manually placed in tools/ui/dist)
+#   2. Prebuilt assets from the HF Bucket matching the build version
+#      (when HF_ENABLED=ON)
+#   3. If no versioned candidate is found, fall back based on BUILD_UI:
+#        - BUILD_UI=OFF (default): pull 'latest' from the HF Bucket
+#        - BUILD_UI=ON: build locally via 'npm run build'
+#          (run 'npm install' beforehand)
 
 cmake_minimum_required(VERSION 3.16)
 
@@ -127,18 +131,9 @@ function(npm_build out_var)
     endif()
 
     if(NOT EXISTS "${UI_SOURCE_DIR}/node_modules")
-        message(STATUS "UI: running npm install (first time)")
-        execute_process(
-            COMMAND ${NPM_EXECUTABLE} install
-            WORKING_DIRECTORY "${UI_SOURCE_DIR}"
-            RESULT_VARIABLE rc
-            ERROR_VARIABLE  err
-        )
-        if(NOT rc EQUAL 0)
-            message(STATUS "UI: npm install failed (${rc})")
-            message(STATUS "  stderr: ${err}")
-            return()
-        endif()
+        message(STATUS "UI: node_modules not found in ${UI_SOURCE_DIR}; "
+                       "run 'npm install' there before building with LLAMA_BUILD_UI=ON")
+        return()
     endif()
 
     file(MAKE_DIRECTORY "${DIST_DIR}")
@@ -164,6 +159,8 @@ function(npm_build out_var)
     endif()
 
     message(STATUS "UI: npm build succeeded")
+    # .ui-stamp records the HF ref of the last download; clear it so a later HF
+    # run does not mistake these freshly built assets for a stamped download.
     file(REMOVE "${STAMP_FILE}")
     set(${out_var} TRUE PARENT_SCOPE)
 endfunction()
@@ -185,71 +182,60 @@ function(resolve_version out_var)
     set(${out_var} "" PARENT_SCOPE)
 endfunction()
 
-function(hf_download version out_var out_resolved)
-    set(${out_var}      FALSE PARENT_SCOPE)
-    set(${out_resolved} ""    PARENT_SCOPE)
+function(hf_download ref out_var)
+    set(${out_var} FALSE PARENT_SCOPE)
 
     file(MAKE_DIRECTORY "${DIST_DIR}")
 
-    set(candidates "")
-    if(NOT "${version}" STREQUAL "")
-        list(APPEND candidates "${version}")
+    set(base "https://huggingface.co/buckets/ggml-org/${HF_BUCKET}/resolve/${ref}")
+
+    message(STATUS "UI: downloading from ${ref}: ${base}")
+
+    set(ok TRUE)
+    foreach(asset ${ASSETS})
+        file(DOWNLOAD "${base}/${asset}?download=true" "${DIST_DIR}/${asset}"
+            STATUS status TIMEOUT 60
+        )
+        list(GET status 0 rc)
+        if(NOT rc EQUAL 0)
+            list(GET status 1 errmsg)
+            message(STATUS "UI: download ${asset} from ${ref} failed: ${errmsg}")
+            set(ok FALSE)
+            break()
+        endif()
+        message(STATUS "UI: downloaded ${asset}")
+    endforeach()
+
+    if(NOT ok)
+        return()
     endif()
-    list(APPEND candidates "latest")
 
-    foreach(resolved ${candidates})
-        set(base "https://huggingface.co/buckets/ggml-org/${HF_BUCKET}/resolve/${resolved}")
-
-        message(STATUS "UI: downloading from ${resolved}: ${base}")
-
-        set(ok TRUE)
+    # Best-effort checksum verification
+    file(DOWNLOAD "${base}/checksums.txt?download=true" "${DIST_DIR}/checksums.txt"
+        STATUS cs_status TIMEOUT 30
+    )
+    list(GET cs_status 0 cs_rc)
+    if(cs_rc EQUAL 0)
+        message(STATUS "UI: verifying checksums")
+        file(STRINGS "${DIST_DIR}/checksums.txt" cs_lines)
         foreach(asset ${ASSETS})
-            file(DOWNLOAD "${base}/${asset}?download=true" "${DIST_DIR}/${asset}"
-                STATUS status TIMEOUT 60
-            )
-            list(GET status 0 rc)
-            if(NOT rc EQUAL 0)
-                list(GET status 1 errmsg)
-                message(STATUS "UI: download ${asset} from ${resolved} failed: ${errmsg}")
+            file(SHA256 "${DIST_DIR}/${asset}" h)
+            string(TOLOWER "${h}" h)
+            string(REGEX MATCH "${h}[ \t]+${asset}" m "${cs_lines}")
+            if(NOT m)
+                message(WARNING "UI: checksum verification failed for ${asset}")
                 set(ok FALSE)
                 break()
             endif()
-            message(STATUS "UI: downloaded ${asset}")
         endforeach()
-
-        if(NOT ok)
-            continue()
-        endif()
-
-        # Best-effort checksum verification
-        file(DOWNLOAD "${base}/checksums.txt?download=true" "${DIST_DIR}/checksums.txt"
-            STATUS cs_status TIMEOUT 30
-        )
-        list(GET cs_status 0 cs_rc)
-        if(cs_rc EQUAL 0)
-            message(STATUS "UI: verifying checksums")
-            file(STRINGS "${DIST_DIR}/checksums.txt" cs_lines)
-            foreach(asset ${ASSETS})
-                file(SHA256 "${DIST_DIR}/${asset}" h)
-                string(TOLOWER "${h}" h)
-                string(REGEX MATCH "${h}[ \t]+${asset}" m "${cs_lines}")
-                if(NOT m)
-                    message(WARNING "UI: checksum verification failed for ${asset}")
-                    set(ok FALSE)
-                    break()
-                endif()
-            endforeach()
-            if(ok)
-                message(STATUS "UI: all checksums verified")
-            endif()
-        endif()
-
         if(ok)
-            set(${out_var}      TRUE         PARENT_SCOPE)
-            set(${out_resolved} "${resolved}" PARENT_SCOPE)
-            return()
+            message(STATUS "UI: all checksums verified")
         endif()
-    endforeach()
+    endif()
+
+    if(ok)
+        set(${out_var} TRUE PARENT_SCOPE)
+    endif()
 endfunction()
 
 function(emit_files)
@@ -281,44 +267,60 @@ if(SRC_OK)
 endif()
 
 # ---------------------------------------------------------------------------
-# 2. Priority 2: npm build (if BUILD_UI=ON)
+# 2. Priority 2: prebuilt assets from HF matching the build version.
+#    Always attempted when HF_ENABLED=ON, regardless of BUILD_UI - a versioned
+#    prebuilt is the "suitable candidate" for this exact build.
 # ---------------------------------------------------------------------------
 set(provisioned FALSE)
 
-if(BUILD_UI)
-    npm_build(NPM_OK)
-    if(NPM_OK)
-        set(provisioned TRUE)
+if(HF_ENABLED)
+    resolve_version(VERSION)
+    if(NOT "${VERSION}" STREQUAL "")
+        set(stamp_ok FALSE)
+        if(EXISTS "${STAMP_FILE}")
+            file(READ "${STAMP_FILE}" stamped)
+            string(STRIP "${stamped}" stamped)
+            if("${stamped}" STREQUAL "${VERSION}")
+                set(stamp_ok TRUE)
+            endif()
+        endif()
+
+        assets_present(have_assets)
+        if(stamp_ok AND have_assets)
+            message(STATUS "UI: HF stamp '${stamped}' matches version, skipping HF fetch")
+            set(provisioned TRUE)
+        else()
+            hf_download("${VERSION}" HF_OK)
+            if(HF_OK)
+                file(WRITE "${STAMP_FILE}" "${VERSION}")
+                message(STATUS "UI: HF download succeeded, stamp updated (${VERSION})")
+                set(provisioned TRUE)
+            else()
+                message(STATUS "UI: no prebuilt assets for version '${VERSION}'")
+            endif()
+        endif()
     endif()
 endif()
 
 # ---------------------------------------------------------------------------
-# 3. Priority 3: HF Bucket download (if npm did not produce assets and HF_ENABLED=ON)
+# 3. Priority 3: no versioned candidate - fall back based on BUILD_UI.
+#      BUILD_UI=ON  -> build locally via npm (no HF latest fallback)
+#      BUILD_UI=OFF -> pull 'latest' from the HF Bucket (if HF_ENABLED=ON)
 # ---------------------------------------------------------------------------
-if(NOT provisioned AND HF_ENABLED)
-    resolve_version(VERSION)
-
-    set(stamp_ok FALSE)
-    if(EXISTS "${STAMP_FILE}" AND NOT "${VERSION}" STREQUAL "")
-        file(READ "${STAMP_FILE}" stamped)
-        string(STRIP "${stamped}" stamped)
-        if("${stamped}" STREQUAL "${VERSION}")
-            set(stamp_ok TRUE)
+if(NOT provisioned)
+    if(BUILD_UI)
+        npm_build(NPM_OK)
+        if(NPM_OK)
+            set(provisioned TRUE)
         endif()
-    endif()
-
-    assets_present(have_assets)
-    if(stamp_ok AND have_assets)
-        message(STATUS "UI: HF stamp '${stamped}' matches version, skipping HF fetch")
-        set(provisioned TRUE)
-    else()
-        hf_download("${VERSION}" HF_OK HF_RESOLVED)
+    elseif(HF_ENABLED)
+        hf_download("latest" HF_OK)
         if(HF_OK)
-            file(WRITE "${STAMP_FILE}" "${HF_RESOLVED}")
-            message(STATUS "UI: HF download succeeded, stamp updated (${HF_RESOLVED})")
+            file(WRITE "${STAMP_FILE}" "latest")
+            message(STATUS "UI: HF download succeeded, stamp updated (latest)")
             set(provisioned TRUE)
         else()
-            message(STATUS "UI: HF download failed")
+            message(STATUS "UI: HF download (latest) failed")
         endif()
     endif()
 endif()
