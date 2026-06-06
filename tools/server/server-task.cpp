@@ -1393,6 +1393,13 @@ json server_task_result_cmpl_final::to_json_anthropic_stream() {
 //
 void server_task_result_cmpl_partial::update(task_result_state & state) {
     is_updated = true;
+    if (is_begin) {
+        // begin marker only signals the HTTP handler to send headers (to_json() returns nullptr);
+        // it has no content and must not advance the parser state, otherwise the template prefix
+        // (e.g. a leading "<think>") gets stripped from the first content delta when reasoning_format = none
+        // ref: https://github.com/ggml-org/llama.cpp/issues/23320
+        return;
+    }
     state.update_chat_msg(content, true, oaicompat_msg_diffs);
 
     // Copy current state for use in to_json_*() (reflects state BEFORE this chunk)
