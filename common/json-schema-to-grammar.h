@@ -32,6 +32,8 @@ class common_schema_info {
 // dialects constrain a model's native (non-JSON) value syntax to a schema.
 enum common_grammar_dialect {
     COMMON_GRAMMAR_DIALECT_JSON = 0,
+    // Gemma4 dict syntax: {key: <|"|>value<|"|>, n: 42}
+    COMMON_GRAMMAR_DIALECT_GEMMA4 = 1,
 };
 
 struct common_grammar_builder {

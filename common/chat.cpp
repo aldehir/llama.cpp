@@ -1292,22 +1292,25 @@ static common_chat_params common_chat_params_init_gemma4(const common_chat_templ
             p.rule("gemma4-number", p.json_number());
             p.rule("gemma4-dict-key", p.rule("gemma4-dict-key-name", p.chars("[^:}]", 1, -1)) + p.literal(":"));
             p.rule("gemma4-dict-kv", p.ref("gemma4-dict-key") + p.space() + p.ref("gemma4-value"));
+            // Members and elements tolerate whitespace before separators so the
+            // parser stays a superset of the schema-constrained grammar, whose
+            // value rules allow trailing whitespace.
             p.rule("gemma4-dict", [&]() {
                 auto ws = p.space();
                 auto member = p.ref("gemma4-dict-kv");
-                auto members = p.sequence({member, p.zero_or_more(p.sequence({p.literal(","), ws, member}))});
+                auto members = p.sequence({member, ws, p.zero_or_more(p.sequence({p.literal(","), ws, member, ws}))});
                 return p.sequence({
                     p.literal("{"), ws,
-                    p.choice({p.literal("}"), p.sequence({members, ws, p.literal("}")})})
+                    p.choice({p.literal("}"), p.sequence({members, p.literal("}")})})
                 });
             });
             p.rule("gemma4-array", [&]() {
                 auto ws = p.space();
                 auto value = p.ref("gemma4-value");
-                auto elements = p.sequence({value, p.zero_or_more(p.sequence({p.literal(","), ws, value}))});
+                auto elements = p.sequence({value, ws, p.zero_or_more(p.sequence({p.literal(","), ws, value, ws}))});
                 return p.sequence({
                     p.literal("["), ws,
-                    p.choice({p.literal("]"), p.sequence({elements, ws, p.literal("]")})})
+                    p.choice({p.literal("]"), p.sequence({elements, p.literal("]")})})
                 });
             });
             p.rule("gemma4-value", [&]() {
@@ -1322,12 +1325,13 @@ static common_chat_params common_chat_params_init_gemma4(const common_chat_templ
             foreach_function(inputs.tools, [&](const json & tool) {
                 const auto & function = tool.at("function");
                 std::string  name     = function.at("name");
-                // TODO @aldehir : need to extend json-schema-to-grammar to produce more than JSON rules
-                // const auto & params   = function.at("parameters");
+                const auto & params   = function.at("parameters");
 
                 tool_choice |= p.rule("tool-" + name, p.tool(p.sequence({
                     p.tool_open(p.tool_name(p.literal(name)) + p.peek(p.literal("{"))),
-                    p.tool_args(p.ref("gemma4-dict")),
+                    p.tool_args(p.schema(p.ref("gemma4-dict"), "tool-" + name + "-args", params,
+                                         /* raw = */ false, COMMON_GRAMMAR_DIALECT_GEMMA4)),
+                    p.space(),
                 })));
             });
 

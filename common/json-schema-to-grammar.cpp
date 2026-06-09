@@ -1,5 +1,6 @@
 #include "json-schema-to-grammar.h"
 #include "common.h"
+#include "peg-parser.h" // gbnf_excluding_pattern
 
 #include <nlohmann/json.hpp>
 
@@ -364,8 +365,73 @@ static const common_grammar_dialect_def & common_grammar_dialect_json() {
     return def;
 }
 
+// Gemma4 dict syntax: unquoted keys, <|"|> delimited strings without escapes,
+// JSON-like numbers, booleans, null, arrays. Rules must stay a subset of the
+// gemma4 PEG parser rules in common_chat_params_init_gemma4().
+static const std::string GEMMA4_STRING_DELIM = "<|\"|>";
+
+static const std::unordered_map<std::string, BuiltinRule> & gemma4_primitive_rules() {
+    static const std::unordered_map<std::string, BuiltinRule> rules = [] {
+        const std::string delim = format_literal(GEMMA4_STRING_DELIM);
+        return std::unordered_map<std::string, BuiltinRule> {
+            {"boolean",       PRIMITIVE_RULES.at("boolean")},
+            {"decimal-part",  PRIMITIVE_RULES.at("decimal-part")},
+            {"integral-part", PRIMITIVE_RULES.at("integral-part")},
+            {"number",        PRIMITIVE_RULES.at("number")},
+            {"integer",       PRIMITIVE_RULES.at("integer")},
+            {"null",          PRIMITIVE_RULES.at("null")},
+            {"gemma4-string", {delim + " " + gbnf_excluding_pattern({GEMMA4_STRING_DELIM}) + " " + delim + " space", {}}},
+            {"gemma4-key",    {"[^:}]+", {}}},
+            {"gemma4-value",  {"gemma4-object | gemma4-array | gemma4-string | number | boolean | null",
+                               {"gemma4-object", "gemma4-array", "gemma4-string", "number", "boolean", "null"}}},
+            {"gemma4-object", {"\"{\" space ( gemma4-key \":\" space gemma4-value (\",\" space gemma4-key \":\" space gemma4-value)* )? \"}\" space",
+                               {"gemma4-key", "gemma4-value"}}},
+            {"gemma4-array",  {"\"[\" space ( gemma4-value (\",\" space gemma4-value)* )? \"]\" space",
+                               {"gemma4-value"}}},
+        };
+    }();
+    return rules;
+}
+
+static const common_grammar_dialect_def & common_grammar_dialect_gemma4() {
+    static const std::unordered_map<std::string, BuiltinRule> string_format_rules = {};
+    static const common_grammar_dialect_def def = {
+        /* .prefix                      = */ "gemma4-",
+        /* .primitive_rules             = */ &gemma4_primitive_rules(),
+        /* .string_format_rules         = */ &string_format_rules,
+        /* .key_rule                    = */ "gemma4-key",
+        /* .obj_open                    = */ "\"{\" space",
+        /* .obj_sep                     = */ "\",\" space",
+        /* .obj_close                   = */ "\"}\" space",
+        /* .arr_open                    = */ "\"[\" space",
+        /* .arr_sep                     = */ "\",\" space",
+        /* .arr_close                   = */ "\"]\" space",
+        /* .supports_string_constraints = */ false,
+        /* .supports_not_strings        = */ false,
+        /* .format_key                  = */ [](const std::string & prop_name) {
+            return format_literal(prop_name + ":") + " space ";
+        },
+        /* .format_const                = */ [](const json & value) -> std::string {
+            if (value.is_string()) {
+                std::string s = value.get<std::string>();
+                if (s.find(GEMMA4_STRING_DELIM) != std::string::npos) {
+                    return "";
+                }
+                return format_literal(GEMMA4_STRING_DELIM + s + GEMMA4_STRING_DELIM);
+            }
+            if (value.is_primitive()) {
+                return format_literal(value.dump());
+            }
+            return ""; // object/array constants not supported
+        },
+    };
+    return def;
+}
+
 static const common_grammar_dialect_def & common_grammar_dialect_get(common_grammar_dialect dialect) {
     switch (dialect) {
+        case COMMON_GRAMMAR_DIALECT_GEMMA4:
+            return common_grammar_dialect_gemma4();
         case COMMON_GRAMMAR_DIALECT_JSON:
         default:
             return common_grammar_dialect_json();
