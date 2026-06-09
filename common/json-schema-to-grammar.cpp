@@ -309,12 +309,66 @@ static std::string format_literal(const std::string & literal) {
 
 std::string gbnf_format_literal(const std::string & literal) { return format_literal(literal); }
 
+// Output syntax for schema-derived rules. The schema walking logic in
+// common_schema_converter is syntax-agnostic; everything specific to the
+// emitted value syntax (JSON, gemma4 dicts, ...) lives here.
+struct common_grammar_dialect_def {
+    std::string prefix; // prepended to dialect-specific primitive rule names
+
+    const std::unordered_map<std::string, BuiltinRule> * primitive_rules;
+    const std::unordered_map<std::string, BuiltinRule> * string_format_rules;
+
+    std::string key_rule; // primitive rule for unconstrained object keys
+
+    std::string obj_open;  // "{" space
+    std::string obj_sep;   // "," space
+    std::string obj_close; // "}" space
+    std::string arr_open;  // "[" space
+    std::string arr_sep;   // "," space
+    std::string arr_close; // "]" space
+
+    // pattern, minLength/maxLength, uuid and <format>-string rules
+    bool supports_string_constraints;
+    // additionalProperties key exclusion (_not_strings)
+    bool supports_not_strings;
+
+    // key (incl. separator) fragment of a property kv rule
+    std::string (*format_key)(const std::string & prop_name);
+    // literal for a const/enum value, empty if unsupported by the dialect
+    std::string (*format_const)(const json & value);
+};
+
+static const common_grammar_dialect_def & common_grammar_dialect_json() {
+    static const common_grammar_dialect_def def = {
+        /* .prefix                      = */ "",
+        /* .primitive_rules             = */ &PRIMITIVE_RULES,
+        /* .string_format_rules         = */ &STRING_FORMAT_RULES,
+        /* .key_rule                    = */ "string",
+        /* .obj_open                    = */ "\"{\" space",
+        /* .obj_sep                     = */ "\",\" space",
+        /* .obj_close                   = */ "\"}\" space",
+        /* .arr_open                    = */ "\"[\" space",
+        /* .arr_sep                     = */ "\",\" space",
+        /* .arr_close                   = */ "\"]\" space",
+        /* .supports_string_constraints = */ true,
+        /* .supports_not_strings        = */ true,
+        /* .format_key                  = */ [](const std::string & prop_name) {
+            return format_literal(json(prop_name).dump()) + " space \":\" space ";
+        },
+        /* .format_const                = */ [](const json & value) {
+            return format_literal(value.dump());
+        },
+    };
+    return def;
+}
+
 class common_schema_converter {
 private:
     friend class common_schema_info;
     friend std::string build_grammar(const std::function<void(const common_grammar_builder &)> & cb, const common_grammar_options & options);
     std::function<json(const std::string &)> _fetch_json;
     bool _dotall;
+    const common_grammar_dialect_def * _dialect = &common_grammar_dialect_json();
     std::map<std::string, std::string> _rules;
     std::unordered_map<std::string, json> _refs;
     std::unordered_set<std::string> _refs_being_resolved;
@@ -584,7 +638,7 @@ private:
             trie.insert(s);
         }
 
-        std::string char_rule = _add_primitive("char", PRIMITIVE_RULES.at("char"));
+        std::string char_rule = _add_primitive("char");
         std::ostringstream out;
         out << "[\"] ( ";
         std::function<void(const TrieNode &)> visit = [&](const TrieNode & node) {
@@ -627,7 +681,7 @@ private:
         auto it = ref.find('#');
         std::string ref_fragment = it != std::string::npos ? ref.substr(it + 1) : ref;
         static const std::regex nonalphanumeric_regex(R"([^a-zA-Z0-9-]+)");
-        std::string ref_name = "ref" + std::regex_replace(ref_fragment, nonalphanumeric_regex, "-");
+        std::string ref_name = _dialect->prefix + "ref" + std::regex_replace(ref_fragment, nonalphanumeric_regex, "-");
         if (_rules.find(ref_name) == _rules.end() && _refs_being_resolved.find(ref) == _refs_being_resolved.end()) {
             _refs_being_resolved.insert(ref);
             json resolved = _refs[ref];
@@ -654,7 +708,7 @@ private:
             std::string prop_rule_name = visit(prop_schema, name + (name.empty() ? "" : "-") + prop_name);
             prop_kv_rule_names[prop_name] = _add_rule(
                 name + (name.empty() ? "" : "-") + prop_name + "-kv",
-                format_literal(json(prop_name).dump()) + " space \":\" space " + prop_rule_name
+                _dialect->format_key(prop_name) + prop_rule_name
             );
             if (required.find(prop_name) != required.end()) {
                 required_props.push_back(prop_name);
@@ -667,20 +721,26 @@ private:
             std::string sub_name = name + (name.empty() ? "" : "-") + "additional";
             std::string value_rule =
                 additional_properties.is_object() ? visit(additional_properties, sub_name + "-value")
-                : _add_primitive("value", PRIMITIVE_RULES.at("value"));
+                : _add_primitive("value");
 
-            auto key_rule =
-                prop_names.empty() ? _add_primitive("string", PRIMITIVE_RULES.at("string"))
-                : _add_rule(sub_name + "-k", _not_strings(prop_names));
+            std::string key_rule;
+            if (prop_names.empty()) {
+                key_rule = _add_primitive(_dialect->key_rule);
+            } else if (_dialect->supports_not_strings) {
+                key_rule = _add_rule(sub_name + "-k", _not_strings(prop_names));
+            } else {
+                _warnings.push_back("Cannot exclude property names from additional keys in this dialect");
+                key_rule = _add_primitive(_dialect->key_rule);
+            }
             std::string kv_rule = _add_rule(sub_name + "-kv", key_rule + " \":\" space " + value_rule);
             prop_kv_rule_names["*"] = kv_rule;
             optional_props.push_back("*");
         }
 
-        std::string rule = "\"{\" space ";
+        std::string rule = _dialect->obj_open + " ";
         for (size_t i = 0; i < required_props.size(); i++) {
             if (i > 0) {
-                rule += " \",\" space ";
+                rule += " " + _dialect->obj_sep + " ";
             }
             rule += prop_kv_rule_names[required_props[i]];
         }
@@ -688,7 +748,7 @@ private:
         if (!optional_props.empty()) {
             rule += " (";
             if (!required_props.empty()) {
-                rule += " \",\" space ( ";
+                rule += " " + _dialect->obj_sep + " ( ";
             }
 
             std::function<std::string(const std::vector<std::string> &, bool)> get_recursive_refs = [&](const std::vector<std::string> & ks, bool first_is_optional) {
@@ -698,7 +758,7 @@ private:
                 }
                 const std::string& k = ks[0];
                 std::string kv_rule_name = prop_kv_rule_names[k];
-                std::string comma_ref = "( \",\" space " + kv_rule_name + " )";
+                std::string comma_ref = "( " + _dialect->obj_sep + " " + kv_rule_name + " )";
                 if (first_is_optional) {
                     res = comma_ref + (k == "*" ? "*" : "?");
                 } else {
@@ -725,7 +785,7 @@ private:
             rule += " )?";
         }
 
-        rule += " \"}\" space";
+        rule += " " + _dialect->obj_close;
 
         return rule;
     }
@@ -734,10 +794,10 @@ private:
         auto n = _add_rule(name, rule.content);
         for (const auto & dep : rule.deps) {
             BuiltinRule dep_rule;
-            auto it = PRIMITIVE_RULES.find(dep);
-            if (it == PRIMITIVE_RULES.end()) {
-                it = STRING_FORMAT_RULES.find(dep);
-                if (it == STRING_FORMAT_RULES.end()) {
+            auto it = _dialect->primitive_rules->find(dep);
+            if (it == _dialect->primitive_rules->end()) {
+                it = _dialect->string_format_rules->find(dep);
+                if (it == _dialect->string_format_rules->end()) {
                     _errors.push_back("Rule " + dep + " not known");
                     continue;
                 }
@@ -747,6 +807,35 @@ private:
             }
         }
         return n;
+    }
+
+    // Resolves a logical primitive name to the active dialect's entry,
+    // preferring a dialect-prefixed rule (e.g. "string" -> "gemma4-string").
+    const BuiltinRule * _find_primitive(const std::string & logical, std::string & out_name) const {
+        const auto & prims = *_dialect->primitive_rules;
+        if (!_dialect->prefix.empty()) {
+            auto it = prims.find(_dialect->prefix + logical);
+            if (it != prims.end()) {
+                out_name = it->first;
+                return &it->second;
+            }
+        }
+        auto it = prims.find(logical);
+        if (it != prims.end()) {
+            out_name = it->first;
+            return &it->second;
+        }
+        return nullptr;
+    }
+
+    std::string _add_primitive(const std::string & logical) {
+        std::string name;
+        const auto * rule = _find_primitive(logical, name);
+        if (rule == nullptr) {
+            _errors.push_back("Rule " + logical + " not known");
+            return "";
+        }
+        return _add_primitive(name, *rule);
     }
 
 public:
@@ -832,8 +921,9 @@ public:
         visit_refs(schema);
     }
 
-    static std::string _generate_constant_rule(const json & value) {
-        return format_literal(value.dump());
+    // Returns an empty string if the dialect cannot express the value.
+    std::string _generate_constant_rule(const json & value) const {
+        return _dialect->format_const(value);
     }
 
     std::string visit(const json & schema, const std::string & name) {
@@ -858,12 +948,22 @@ public:
             return _add_rule(rule_name, _generate_union_rule(name, schema_types));
         }
         if (schema.contains("const")) {
-            return _add_rule(rule_name, _generate_constant_rule(schema["const"]) + " space");
+            auto const_rule = _generate_constant_rule(schema["const"]);
+            if (const_rule.empty()) {
+                _warnings.push_back("Unsupported const value in this dialect, using unconstrained value");
+                return _add_rule(rule_name, _add_primitive("value"));
+            }
+            return _add_rule(rule_name, const_rule + " space");
         }
         if (schema.contains("enum")) {
             std::vector<std::string> enum_values;
             for (const auto & v : schema["enum"]) {
-                enum_values.push_back(_generate_constant_rule(v));
+                auto const_rule = _generate_constant_rule(v);
+                if (const_rule.empty()) {
+                    _warnings.push_back("Unsupported enum value in this dialect, using unconstrained value");
+                    return _add_rule(rule_name, _add_primitive("value"));
+                }
+                enum_values.push_back(const_rule);
             }
             return _add_rule(rule_name, "(" + string_join(enum_values, " | ") + ") space");
         }
@@ -907,6 +1007,9 @@ public:
                 } else if (comp_schema.contains("enum")) {
                     for (const auto & v : comp_schema["enum"]) {
                         const auto rule = _generate_constant_rule(v);
+                        if (rule.empty()) {
+                            continue;
+                        }
                         if (enum_values.find(rule) == enum_values.end()) {
                             enum_values[rule] = 0;
                         }
@@ -941,14 +1044,14 @@ public:
         if ((schema_type.is_null() || schema_type == "array") && (schema.contains("items") || schema.contains("prefixItems"))) {
             json items = schema.contains("items") ? schema["items"] : schema["prefixItems"];
             if (items.is_array()) {
-                std::string rule = "\"[\" space ";
+                std::string rule = _dialect->arr_open + " ";
                 for (size_t i = 0; i < items.size(); i++) {
                     if (i > 0) {
-                        rule += " \",\" space ";
+                        rule += " " + _dialect->arr_sep + " ";
                     }
                     rule += visit(items[i], name + (name.empty() ? "" : "-") + "tuple-" + std::to_string(i));
                 }
-                rule += " \"]\" space";
+                rule += " " + _dialect->arr_close;
                 return _add_rule(rule_name, rule);
             }
             std::string item_rule_name = visit(items, name + (name.empty() ? "" : "-") + "item");
@@ -956,20 +1059,32 @@ public:
             json max_items_json = schema.contains("maxItems") ? schema["maxItems"] : json();
             int max_items = max_items_json.is_number_integer() ? max_items_json.get<int>() : std::numeric_limits<int>::max();
 
-            return _add_rule(rule_name, "\"[\" space " + build_repetition(item_rule_name, min_items, max_items, "\",\" space") + " \"]\" space");
+            return _add_rule(rule_name, _dialect->arr_open + " " + build_repetition(item_rule_name, min_items, max_items, _dialect->arr_sep) + " " + _dialect->arr_close);
         }
         if ((schema_type.is_null() || schema_type == "string") && schema.contains("pattern")) {
+            if (!_dialect->supports_string_constraints) {
+                _warnings.push_back("Pattern not supported in this dialect, using unconstrained string");
+                return _add_rule(rule_name, _add_primitive("string"));
+            }
             return _visit_pattern(schema["pattern"], rule_name);
         }
         if ((schema_type.is_null() || schema_type == "string") && std::regex_match(schema_format, std::regex("^uuid[1-5]?$"))) {
+            if (!_dialect->supports_string_constraints) {
+                _warnings.push_back("Format " + schema_format + " not supported in this dialect, using unconstrained string");
+                return _add_rule(rule_name, _add_primitive("string"));
+            }
             return _add_primitive(rule_name == "root" ? "root" : schema_format, PRIMITIVE_RULES.at("uuid"));
         }
-        if ((schema_type.is_null() || schema_type == "string") && STRING_FORMAT_RULES.find(schema_format + "-string") != STRING_FORMAT_RULES.end()) {
+        if ((schema_type.is_null() || schema_type == "string") && _dialect->string_format_rules->find(schema_format + "-string") != _dialect->string_format_rules->end()) {
             auto prim_name = schema_format + "-string";
-            return _add_rule(rule_name, _add_primitive(prim_name, STRING_FORMAT_RULES.at(prim_name)));
+            return _add_rule(rule_name, _add_primitive(prim_name, _dialect->string_format_rules->at(prim_name)));
         }
         if (schema_type == "string" && (schema.contains("minLength") || schema.contains("maxLength"))) {
-            std::string char_rule = _add_primitive("char", PRIMITIVE_RULES.at("char"));
+            if (!_dialect->supports_string_constraints) {
+                _warnings.push_back("minLength/maxLength not supported in this dialect, using unconstrained string");
+                return _add_rule(rule_name, _add_primitive("string"));
+            }
+            std::string char_rule = _add_primitive("char");
             int min_len = schema.contains("minLength") ? schema["minLength"].get<int>() : 0;
             int max_len = schema.contains("maxLength") ? schema["maxLength"].get<int>() : std::numeric_limits<int>::max();
             return _add_rule(rule_name, "\"\\\"\" " + build_repetition(char_rule, min_len, max_len) + " \"\\\"\" space");
@@ -994,19 +1109,21 @@ public:
             return _add_rule(rule_name, out.str());
         }
         if (schema.empty() || schema_type == "object") {
-            return _add_rule(rule_name, _add_primitive("object", PRIMITIVE_RULES.at("object")));
+            return _add_rule(rule_name, _add_primitive("object"));
         }
         if (schema_type.is_null() && schema.is_object()) {
             // No type constraint and no recognized structural keywords (e.g. {"description": "..."}).
             // Per JSON Schema semantics this is equivalent to {} and accepts any value.
-            return _add_rule(rule_name, _add_primitive("value", PRIMITIVE_RULES.at("value")));
+            return _add_rule(rule_name, _add_primitive("value"));
         }
-        if (!schema_type.is_string() || PRIMITIVE_RULES.find(schema_type.get<std::string>()) == PRIMITIVE_RULES.end()) {
+        std::string prim_name;
+        const BuiltinRule * prim = schema_type.is_string() ? _find_primitive(schema_type.get<std::string>(), prim_name) : nullptr;
+        if (prim == nullptr) {
             _errors.push_back("Unrecognized schema: " + schema.dump());
             return "";
         }
         // TODO: support minimum, maximum, exclusiveMinimum, exclusiveMaximum at least for zero
-        return _add_primitive(rule_name == "root" ? "root" : schema_type.get<std::string>(), PRIMITIVE_RULES.at(schema_type.get<std::string>()));
+        return _add_primitive(rule_name == "root" ? "root" : prim_name, *prim);
     }
 
     void check_errors() {
