@@ -28,9 +28,15 @@ class common_schema_info {
     bool resolves_to_string(const nlohmann::ordered_json & schema);
 };
 
+// Output syntax for schema-derived grammar rules. JSON is the default; other
+// dialects constrain a model's native (non-JSON) value syntax to a schema.
+enum common_grammar_dialect {
+    COMMON_GRAMMAR_DIALECT_JSON = 0,
+};
+
 struct common_grammar_builder {
     std::function<std::string(const std::string &, const std::string &)> add_rule;
-    std::function<std::string(const std::string &, const nlohmann::ordered_json &)> add_schema;
+    std::function<std::string(const std::string &, const nlohmann::ordered_json &, common_grammar_dialect)> add_schema;
     std::function<void(nlohmann::ordered_json &)> resolve_refs;
 };
 

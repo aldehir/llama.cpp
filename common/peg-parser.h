@@ -11,7 +11,7 @@
 #include <vector>
 #include <variant>
 
-struct common_grammar_builder;
+#include "json-schema-to-grammar.h"
 
 class common_peg_parser_builder;
 
@@ -249,6 +249,9 @@ struct common_peg_schema_parser {
 
     // Indicates if the GBNF should accept a raw string that matches the schema.
     bool raw;
+
+    // Output syntax the generated GBNF rules constrain.
+    common_grammar_dialect dialect = COMMON_GRAMMAR_DIALECT_JSON;
 };
 
 struct common_peg_rule_parser {
@@ -484,7 +487,9 @@ class common_peg_parser_builder {
 
     // Wraps a parser with JSON schema metadata for grammar generation.
     // Used internally to convert JSON schemas to GBNF grammar rules.
-    common_peg_parser schema(const common_peg_parser & p, const std::string & name, const nlohmann::ordered_json & schema, bool raw = false);
+    // The dialect selects the output syntax of the generated rules.
+    common_peg_parser schema(const common_peg_parser & p, const std::string & name, const nlohmann::ordered_json & schema, bool raw = false,
+                             common_grammar_dialect dialect = COMMON_GRAMMAR_DIALECT_JSON);
 
     // Creates a named rule, stores it in the grammar, and returns a ref.
     // If trigger=true, marks this rule as an entry point for lazy grammar generation.
@@ -521,3 +526,6 @@ class common_peg_parser_builder {
 
 // Helper function for building parsers
 common_peg_arena build_peg_parser(const std::function<common_peg_parser(common_peg_parser_builder & builder)> & fn);
+
+// GBNF pattern matching any text that does not contain one of the given strings.
+std::string gbnf_excluding_pattern(const std::vector<std::string> & strings);

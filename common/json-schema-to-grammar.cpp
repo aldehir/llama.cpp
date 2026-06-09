@@ -338,6 +338,8 @@ struct common_grammar_dialect_def {
     std::string (*format_const)(const json & value);
 };
 
+static const common_grammar_dialect_def & common_grammar_dialect_get(common_grammar_dialect dialect);
+
 static const common_grammar_dialect_def & common_grammar_dialect_json() {
     static const common_grammar_dialect_def def = {
         /* .prefix                      = */ "",
@@ -360,6 +362,14 @@ static const common_grammar_dialect_def & common_grammar_dialect_json() {
         },
     };
     return def;
+}
+
+static const common_grammar_dialect_def & common_grammar_dialect_get(common_grammar_dialect dialect) {
+    switch (dialect) {
+        case COMMON_GRAMMAR_DIALECT_JSON:
+        default:
+            return common_grammar_dialect_json();
+    }
 }
 
 class common_schema_converter {
@@ -926,6 +936,14 @@ public:
         return _dialect->format_const(value);
     }
 
+    std::string visit(const json & schema, const std::string & name, common_grammar_dialect dialect) {
+        const auto * prev = _dialect;
+        _dialect = &common_grammar_dialect_get(dialect);
+        auto rule = visit(schema, name);
+        _dialect = prev;
+        return rule;
+    }
+
     std::string visit(const json & schema, const std::string & name) {
         json schema_type = schema.contains("type") ? schema["type"] : json();
         std::string schema_format = schema.contains("format") ? schema["format"].get<std::string>() : "";
@@ -1283,7 +1301,7 @@ std::string json_schema_to_grammar(const json & schema, bool force_gbnf) {
     return build_grammar([&](const common_grammar_builder & callbacks) {
         auto copy = schema;
         callbacks.resolve_refs(copy);
-        callbacks.add_schema("", copy);
+        callbacks.add_schema("", copy, COMMON_GRAMMAR_DIALECT_JSON);
     });
 }
 
@@ -1293,8 +1311,8 @@ std::string build_grammar(const std::function<void(const common_grammar_builder 
         /* .add_rule = */ [&](const std::string & name, const std::string & rule) {
             return converter._add_rule(name, rule);
         },
-        /* .add_schema = */ [&](const std::string & name, const nlohmann::ordered_json & schema) {
-            return converter.visit(schema, name == "root" ? "" : name);
+        /* .add_schema = */ [&](const std::string & name, const nlohmann::ordered_json & schema, common_grammar_dialect dialect) {
+            return converter.visit(schema, name == "root" ? "" : name, dialect);
         },
         /* .resolve_refs = */ [&](nlohmann::ordered_json & schema) {
             converter.resolve_refs(schema, "");

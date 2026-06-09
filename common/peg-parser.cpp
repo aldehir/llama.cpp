@@ -1223,8 +1223,9 @@ common_peg_parser common_peg_parser_builder::chars(const std::string & classes, 
     return wrap(arena_.add_parser(common_peg_chars_parser{classes, ranges, negated, min, max}));
 }
 
-common_peg_parser common_peg_parser_builder::schema(const common_peg_parser & p, const std::string & name, const nlohmann::ordered_json & schema, bool raw) {
-    return wrap(arena_.add_parser(common_peg_schema_parser{p.id(), name, std::make_shared<nlohmann::ordered_json>(schema), raw}));
+common_peg_parser common_peg_parser_builder::schema(const common_peg_parser & p, const std::string & name, const nlohmann::ordered_json & schema, bool raw,
+                                                    common_grammar_dialect dialect) {
+    return wrap(arena_.add_parser(common_peg_schema_parser{p.id(), name, std::make_shared<nlohmann::ordered_json>(schema), raw, dialect}));
 }
 
 common_peg_parser common_peg_parser_builder::rule(const std::string & name, const common_peg_parser & p, bool trigger) {
@@ -1507,7 +1508,7 @@ static std::string gbnf_escape_char_class(uint32_t c) {
     return std::string(buf);
 }
 
-static std::string gbnf_excluding_pattern(const std::vector<std::string> & strings) {
+std::string gbnf_excluding_pattern(const std::vector<std::string> & strings) {
     trie matcher(strings);
     auto pieces = matcher.collect_prefix_and_next();
 
@@ -1755,7 +1756,7 @@ void common_peg_arena::build_grammar(const common_grammar_builder & builder, boo
                 if (schema_delegates(p)) {
                     return to_gbnf(p.child);
                 }
-                return builder.add_schema(p.name, *p.schema);
+                return builder.add_schema(p.name, *p.schema, p.dialect);
             } else if constexpr (std::is_same_v<T, common_peg_rule_parser>) {
                 return p.name;
             } else if constexpr (std::is_same_v<T, common_peg_ref_parser>) {
@@ -1882,7 +1883,8 @@ static nlohmann::json serialize_parser_variant(const common_peg_parser_variant &
                 {"child", p.child},
                 {"name", p.name},
                 {"schema", p.schema ? *p.schema : nullptr},
-                {"raw", p.raw}
+                {"raw", p.raw},
+                {"dialect", static_cast<int>(p.dialect)}
             };
         } else if constexpr (std::is_same_v<T, common_peg_rule_parser>) {
             return json{
@@ -2029,6 +2031,7 @@ static common_peg_parser_variant deserialize_parser_variant(const nlohmann::json
             parser.schema = std::make_shared<nlohmann::ordered_json>(j["schema"]);
         }
         parser.raw = j["raw"].get<bool>();
+        parser.dialect = static_cast<common_grammar_dialect>(j.value("dialect", 0));
         return parser;
     }
     if (type == "rule") {
