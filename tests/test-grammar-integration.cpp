@@ -191,6 +191,14 @@ static void test_grammar(const std::string & test_desc, const std::string & gram
 static void test_schema(const std::string & test_desc, const std::string & schema_str, const std::vector<std::string> & passing_strings, const std::vector<std::string> & failing_strings) {
     test(test_desc + ". Schema: " + schema_str, json_schema_to_grammar(json::parse(schema_str), true), passing_strings, failing_strings);
 }
+static void test_schema_gemma4(const std::string & test_desc, const std::string & schema_str, const std::vector<std::string> & passing_strings, const std::vector<std::string> & failing_strings) {
+    auto grammar_str = build_grammar([&](const common_grammar_builder & builder) {
+        auto schema = json::parse(schema_str);
+        builder.resolve_refs(schema);
+        builder.add_schema("root", schema, COMMON_GRAMMAR_DIALECT_GEMMA4);
+    });
+    test(test_desc + " (gemma4). Schema: " + schema_str, grammar_str, passing_strings, failing_strings);
+}
 
 static void test_simple_grammar() {
     test_schema(
@@ -1476,6 +1484,101 @@ static void test_json_schema() {
     );
 }
 
+static void test_json_schema_gemma4() {
+    test_schema_gemma4(
+        "tool arguments",
+        // Schema
+        R"""({
+            "type": "object",
+            "properties": {
+                "city": {"type": "string"},
+                "days": {"type": "integer"},
+                "units": {"type": "string", "enum": ["metric", "imperial"]}
+            },
+            "required": ["city", "days"]
+        })""",
+        // Passing strings
+        {
+            R"""({city:<|"|>London<|"|>,days:3})""",
+            R"""({city:<|"|>San Francisco<|"|>, days:-2, units:<|"|>metric<|"|>})""",
+            R"""({ city:<|"|>L<|"|>, days:3, units:<|"|>imperial<|"|> })""",
+        },
+        // Failing strings
+        {
+            R"""({days:3, city:<|"|>London<|"|>})""",                              // wrong property order
+            R"""({city:"London", days:3})""",                                      // JSON string syntax
+            R"""({"city":<|"|>London<|"|>, days:3})""",                            // quoted key
+            R"""({city:<|"|>London<|"|>})""",                                      // missing required property
+            R"""({city:<|"|>London<|"|>, days:<|"|>3<|"|>})""",                    // wrong type
+            R"""({city:<|"|>London<|"|>, days:3, units:<|"|>celsius<|"|>})""",     // enum violation
+        }
+    );
+
+    test_schema_gemma4(
+        "array of integers",
+        // Schema
+        R"""({
+            "type": "array",
+            "items": {"type": "integer"},
+            "minItems": 1,
+            "maxItems": 3
+        })""",
+        // Passing strings
+        {
+            R"""([1])""",
+            R"""([1, 2,3])""",
+        },
+        // Failing strings
+        {
+            R"""([])""",
+            R"""([1,2,3,4])""",
+            R"""([<|"|>x<|"|>])""",
+        }
+    );
+
+    test_schema_gemma4(
+        "additional properties fall back to unconstrained keys",
+        // Schema
+        R"""({
+            "type": "object",
+            "properties": {
+                "a": {"type": "integer"}
+            },
+            "required": ["a"],
+            "additionalProperties": true
+        })""",
+        // Passing strings
+        {
+            R"""({a:1})""",
+            R"""({a:1, b:<|"|>x<|"|>})""",
+            R"""({a:1, b:{c:[1,true,null]}})""",
+        },
+        // Failing strings
+        {
+            R"""({b:1})""",
+            R"""({a:1 b:2})""",
+        }
+    );
+
+    test_schema_gemma4(
+        "pattern falls back to unconstrained string",
+        // Schema
+        R"""({
+            "type": "string",
+            "pattern": "^a+$"
+        })""",
+        // Passing strings
+        {
+            R"""(<|"|>anything goes, even { or [<|"|>)""",
+        },
+        // Failing strings
+        {
+            R"""("anything")""",
+            R"""(anything)""",
+        }
+    );
+}
+
 int main() {
     fprintf(stdout, "Running grammar integration tests...\n");
     test_simple_grammar();
@@ -1488,6 +1591,7 @@ int main() {
     test_failure_missing_root_symbol();
     test_custom_root_symbol_check();
     test_json_schema();
+    test_json_schema_gemma4();
     fprintf(stdout, "All tests passed.\n");
     return 0;
 }

@@ -1566,6 +1566,113 @@ int main() {
         });
     }
 
+    // Gemma4 dialect tests (C++ only)
+    {
+        fprintf(stderr, "#\n# Testing gemma4 dialect\n#\n");
+        auto run = [](const TestCase & tc) {
+            fprintf(stderr, "- %s\n", tc.name.c_str());
+            try {
+                auto grammar = build_grammar([&](const common_grammar_builder & builder) {
+                    auto schema = nlohmann::ordered_json::parse(tc.schema);
+                    builder.resolve_refs(schema);
+                    builder.add_schema("root", schema, COMMON_GRAMMAR_DIALECT_GEMMA4);
+                });
+                tc.verify(grammar);
+                tc.verify_status(SUCCESS);
+                tc.verify_expectation_parseable();
+            } catch (const std::invalid_argument & ex) {
+                fprintf(stderr, "Error: %s\n", ex.what());
+                tc.verify_status(FAILURE);
+            }
+        };
+
+        run({
+            SUCCESS,
+            "object with required, optional and enum properties",
+            R"""({
+                "type": "object",
+                "properties": {
+                    "city": {"type": "string"},
+                    "days": {"type": "integer"},
+                    "units": {"type": "string", "enum": ["metric", "imperial"]}
+                },
+                "required": ["city", "days"]
+            })""",
+            R"""(
+                city-kv ::= "city:" space gemma4-string
+                days-kv ::= "days:" space integer
+                gemma4-string ::= "<|\"|>" ([^<] | "<" [^|] | "<|" [^"] | "<|\"" [^|] | "<|\"|" [^>])* "<|\"|>" space
+                integer ::= ("-"? integral-part) space
+                integral-part ::= [0] | [1-9] [0-9]{0,15}
+                root ::= "{" space city-kv "," space days-kv ( "," space ( units-kv ) )? "}" space
+                space ::= | " " | "\n"{1,2} [ \t]{0,20}
+                units ::= ("<|\"|>metric<|\"|>" | "<|\"|>imperial<|\"|>") space
+                units-kv ::= "units:" space units
+            )""",
+        });
+
+        run({
+            SUCCESS,
+            "pattern falls back to unconstrained string",
+            R"""({
+                "type": "string",
+                "pattern": "^a+$"
+            })""",
+            R"""(
+                gemma4-string ::= "<|\"|>" ([^<] | "<" [^|] | "<|" [^"] | "<|\"" [^|] | "<|\"|" [^>])* "<|\"|>" space
+                root ::= gemma4-string
+                space ::= | " " | "\n"{1,2} [ \t]{0,20}
+            )""",
+        });
+
+        run({
+            SUCCESS,
+            "string const",
+            R"""({"const": "hello world"})""",
+            R"""(
+                root ::= "<|\"|>hello world<|\"|>" space
+                space ::= | " " | "\n"{1,2} [ \t]{0,20}
+            )""",
+        });
+
+        run({
+            SUCCESS,
+            "additional properties",
+            R"""({
+                "type": "object",
+                "additionalProperties": {"type": "integer"}
+            })""",
+            R"""(
+                additional-kv ::= gemma4-key ":" space integer
+                gemma4-key ::= [^:}]+
+                integer ::= ("-"? integral-part) space
+                integral-part ::= [0] | [1-9] [0-9]{0,15}
+                root ::= "{" space  (additional-kv ( "," space additional-kv )* )? "}" space
+                space ::= | " " | "\n"{1,2} [ \t]{0,20}
+            )""",
+        });
+
+        run({
+            SUCCESS,
+            "unconstrained value",
+            R"""({})""",
+            R"""(
+                boolean ::= ("true" | "false") space
+                decimal-part ::= [0-9]{1,16}
+                gemma4-array ::= "[" space ( gemma4-value ("," space gemma4-value)* )? "]" space
+                gemma4-key ::= [^:}]+
+                gemma4-object ::= "{" space ( gemma4-key ":" space gemma4-value ("," space gemma4-key ":" space gemma4-value)* )? "}" space
+                gemma4-string ::= "<|\"|>" ([^<] | "<" [^|] | "<|" [^"] | "<|\"" [^|] | "<|\"|" [^>])* "<|\"|>" space
+                gemma4-value ::= gemma4-object | gemma4-array | gemma4-string | number | boolean | null
+                integral-part ::= [0] | [1-9] [0-9]{0,15}
+                null ::= "null" space
+                number ::= ("-"? integral-part) ("." decimal-part)? ([eE] [-+]? integral-part)? space
+                root ::= gemma4-object
+                space ::= | " " | "\n"{1,2} [ \t]{0,20}
+            )""",
+        });
+    }
+
     if (getenv("LLAMA_SKIP_TESTS_SLOW_ON_EMULATOR")) {
         fprintf(stderr, "\033[33mWARNING: Skipping slow tests on emulator.\n\033[0m");
     } else {
