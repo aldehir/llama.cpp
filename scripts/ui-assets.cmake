@@ -2,9 +2,11 @@
 #
 # Asset provisioning priority:
 #   1. Pre-built assets in SRC_DIST_DIR (manually built by user)
-#   2. If BUILD_UI=ON: npm build
-#   3. If above did not produce assets and HF_ENABLED=ON: HF Bucket download
-#      of dist.tar.gz (verified against dist.tar.gz.sha256)
+#   2. If HF_ENABLED=ON: HF Bucket download of the resolved version
+#      (dist.tar.gz, verified against dist.tar.gz.sha256)
+#   3. If the above did not produce assets:
+#        - BUILD_UI=ON:  npm build (npm install is the user's responsibility)
+#        - BUILD_UI=OFF: HF Bucket download of "latest"
 
 cmake_minimum_required(VERSION 3.18)
 
@@ -89,33 +91,9 @@ function(npm_build out_var)
         return()
     endif()
 
-    # npm writes node_modules/.package-lock.json on every successful install,
-    # so a package-lock.json newer than this marker means node_modules is stale
-    set(NPM_MARKER "${UI_SOURCE_DIR}/node_modules/.package-lock.json")
-    set(need_install FALSE)
-    if(NOT EXISTS "${NPM_MARKER}")
-        set(need_install TRUE)
-    else()
-        file(TIMESTAMP "${UI_SOURCE_DIR}/package-lock.json" lock_ts)
-        file(TIMESTAMP "${NPM_MARKER}" marker_ts)
-        if(lock_ts STRGREATER marker_ts)
-            set(need_install TRUE)
-        endif()
-    endif()
-
-    if(need_install)
-        message(STATUS "UI: running npm install")
-        execute_process(
-            COMMAND ${NPM_EXECUTABLE} install
-            WORKING_DIRECTORY "${UI_SOURCE_DIR}"
-            RESULT_VARIABLE rc
-            ERROR_VARIABLE  err
-        )
-        if(NOT rc EQUAL 0)
-            message(STATUS "UI: npm install failed (${rc})")
-            message(STATUS "  stderr: ${err}")
-            return()
-        endif()
+    if(NOT EXISTS "${UI_SOURCE_DIR}/node_modules")
+        message(STATUS "UI: node_modules missing - run 'npm install' in ${UI_SOURCE_DIR}; skipping npm build")
+        return()
     endif()
 
     file(MAKE_DIRECTORY "${DIST_DIR}")
@@ -161,68 +139,79 @@ function(resolve_version out_var)
     set(${out_var} "" PARENT_SCOPE)
 endfunction()
 
-function(hf_download version out_var out_resolved)
-    set(${out_var}      FALSE PARENT_SCOPE)
-    set(${out_resolved} ""    PARENT_SCOPE)
+function(hf_download version out_var)
+    set(${out_var} FALSE PARENT_SCOPE)
 
     set(archive "${UI_BINARY_DIR}/dist.tar.gz")
+    set(base "https://huggingface.co/buckets/${HF_BUCKET}/resolve/${version}")
 
-    set(candidates "")
-    if(NOT "${version}" STREQUAL "")
-        list(APPEND candidates "${version}")
-    endif()
-    list(APPEND candidates "latest")
+    message(STATUS "UI: downloading from ${version}: ${base}/dist.tar.gz")
 
-    foreach(resolved ${candidates})
-        set(base "https://huggingface.co/buckets/${HF_BUCKET}/resolve/${resolved}")
-
-        message(STATUS "UI: downloading from ${resolved}: ${base}/dist.tar.gz")
-
-        file(DOWNLOAD "${base}/dist.tar.gz?download=true" "${archive}"
-            STATUS status TIMEOUT 300
-        )
-        list(GET status 0 rc)
-        if(NOT rc EQUAL 0)
-            list(GET status 1 errmsg)
-            message(STATUS "UI: download dist.tar.gz from ${resolved} failed: ${errmsg}")
-            continue()
-        endif()
-
-        file(DOWNLOAD "${base}/dist.tar.gz.sha256?download=true" "${archive}.sha256"
-            STATUS status TIMEOUT 30
-        )
-        list(GET status 0 rc)
-        if(NOT rc EQUAL 0)
-            list(GET status 1 errmsg)
-            message(STATUS "UI: download dist.tar.gz.sha256 from ${resolved} failed: ${errmsg}")
-            continue()
-        endif()
-
-        # Validate sha256 checkums
-        file(READ "${archive}.sha256" expected)
-        string(REGEX MATCH "^[0-9a-fA-F]+" expected "${expected}")
-        string(TOLOWER "${expected}" expected)
-        file(SHA256 "${archive}" actual)
-        if("${expected}" STREQUAL "" OR NOT "${actual}" STREQUAL "${expected}")
-            message(STATUS "UI: checksum mismatch for dist.tar.gz from ${resolved}")
-            continue()
-        endif()
-
-        # Clear DIST_DIR to remove stale files first
-        file(REMOVE_RECURSE "${DIST_DIR}")
-
-        file(ARCHIVE_EXTRACT INPUT "${archive}" DESTINATION "${DIST_DIR}")
-
-        if(NOT EXISTS "${DIST_DIR}/index.html")
-            message(STATUS "UI: archive from ${resolved} is missing required assets")
-            continue()
-        endif()
-
-        message(STATUS "UI: archive verified and extracted")
-        set(${out_var}      TRUE          PARENT_SCOPE)
-        set(${out_resolved} "${resolved}" PARENT_SCOPE)
+    file(DOWNLOAD "${base}/dist.tar.gz?download=true" "${archive}"
+        STATUS status TIMEOUT 300
+    )
+    list(GET status 0 rc)
+    if(NOT rc EQUAL 0)
+        list(GET status 1 errmsg)
+        message(STATUS "UI: download dist.tar.gz from ${version} failed: ${errmsg}")
         return()
-    endforeach()
+    endif()
+
+    file(DOWNLOAD "${base}/dist.tar.gz.sha256?download=true" "${archive}.sha256"
+        STATUS status TIMEOUT 30
+    )
+    list(GET status 0 rc)
+    if(NOT rc EQUAL 0)
+        list(GET status 1 errmsg)
+        message(STATUS "UI: download dist.tar.gz.sha256 from ${version} failed: ${errmsg}")
+        return()
+    endif()
+
+    # Validate sha256 checkums
+    file(READ "${archive}.sha256" expected)
+    string(REGEX MATCH "^[0-9a-fA-F]+" expected "${expected}")
+    string(TOLOWER "${expected}" expected)
+    file(SHA256 "${archive}" actual)
+    if("${expected}" STREQUAL "" OR NOT "${actual}" STREQUAL "${expected}")
+        message(STATUS "UI: checksum mismatch for dist.tar.gz from ${version}")
+        return()
+    endif()
+
+    # Clear DIST_DIR to remove stale files first
+    file(REMOVE_RECURSE "${DIST_DIR}")
+
+    file(ARCHIVE_EXTRACT INPUT "${archive}" DESTINATION "${DIST_DIR}")
+
+    if(NOT EXISTS "${DIST_DIR}/index.html")
+        message(STATUS "UI: archive from ${version} is missing required assets")
+        return()
+    endif()
+
+    message(STATUS "UI: archive verified and extracted")
+    set(${out_var} TRUE PARENT_SCOPE)
+endfunction()
+
+function(hf_provision version out_var)
+    set(${out_var} FALSE PARENT_SCOPE)
+
+    if(EXISTS "${STAMP_FILE}" AND EXISTS "${DIST_DIR}/index.html")
+        file(READ "${STAMP_FILE}" stamped)
+        string(STRIP "${stamped}" stamped)
+        if("${stamped}" STREQUAL "${version}")
+            message(STATUS "UI: HF stamp '${stamped}' matches '${version}', skipping HF fetch")
+            set(${out_var} TRUE PARENT_SCOPE)
+            return()
+        endif()
+    endif()
+
+    hf_download("${version}" HF_OK)
+    if(HF_OK)
+        file(WRITE "${STAMP_FILE}" "${version}")
+        message(STATUS "UI: HF download succeeded, stamp updated (${version})")
+        set(${out_var} TRUE PARENT_SCOPE)
+    else()
+        message(STATUS "UI: HF download from '${version}' failed")
+    endif()
 endfunction()
 
 function(emit_files dist_dir)
@@ -276,50 +265,34 @@ if(EXISTS "${SRC_DIST_DIR}/index.html")
     return()
 endif()
 
-# ---------------------------------------------------------------------------
-# 2. Priority 2: npm build (if BUILD_UI=ON)
-# ---------------------------------------------------------------------------
+# Resolve version from git build-info if not explicitly set
 set(provisioned FALSE)
+resolve_version(VERSION)
+set(HF_VERSION "${VERSION}")
 
-if(BUILD_UI)
-    # Resolve version from git build-info if not explicitly set
-    resolve_version(HF_VERSION)
-    npm_build(NPM_OK)
-    if(NPM_OK)
+# ---------------------------------------------------------------------------
+# 2. Priority 2: HF Bucket download of the resolved version (if HF_ENABLED=ON)
+# ---------------------------------------------------------------------------
+if(HF_ENABLED AND NOT "${VERSION}" STREQUAL "")
+    hf_provision("${VERSION}" HF_OK)
+    if(HF_OK)
         set(provisioned TRUE)
     endif()
 endif()
 
 # ---------------------------------------------------------------------------
-# 3. Priority 3: HF Bucket download (if npm did not produce assets and HF_ENABLED=ON)
+# 3. Priority 3: npm build (BUILD_UI=ON) or HF "latest" (BUILD_UI=OFF)
 # ---------------------------------------------------------------------------
-if(NOT provisioned AND HF_ENABLED)
-    resolve_version(VERSION)
-
-    set(stamp_ok FALSE)
-    if(EXISTS "${STAMP_FILE}" AND NOT "${VERSION}" STREQUAL "")
-        file(READ "${STAMP_FILE}" stamped)
-        string(STRIP "${stamped}" stamped)
-        if("${stamped}" STREQUAL "${VERSION}")
-            set(stamp_ok TRUE)
-        endif()
-    endif()
-
-    set(have_assets FALSE)
-    if(EXISTS "${DIST_DIR}/index.html")
-        set(have_assets TRUE)
-    endif()
-    if(stamp_ok AND have_assets)
-        message(STATUS "UI: HF stamp '${stamped}' matches version, skipping HF fetch")
-        set(provisioned TRUE)
-    else()
-        hf_download("${VERSION}" HF_OK HF_RESOLVED)
-        if(HF_OK)
-            file(WRITE "${STAMP_FILE}" "${HF_RESOLVED}")
-            message(STATUS "UI: HF download succeeded, stamp updated (${HF_RESOLVED})")
+if(NOT provisioned)
+    if(BUILD_UI)
+        npm_build(NPM_OK)
+        if(NPM_OK)
             set(provisioned TRUE)
-        else()
-            message(STATUS "UI: HF download failed")
+        endif()
+    elseif(HF_ENABLED)
+        hf_provision("latest" HF_OK)
+        if(HF_OK)
+            set(provisioned TRUE)
         endif()
     endif()
 endif()
