@@ -1471,15 +1471,12 @@ static std::string gbnf_escape_char_class(uint32_t c) {
     return std::string(buf);
 }
 
-// Build a GBNF grammar matching every string that contains none of `strings`
-// as a substring. The Aho-Corasick automaton of `strings` is emitted as a
-// right-linear grammar: one rule per automaton state, where every state is
-// accepting (the empty alternative). Transitions that would complete a
-// forbidden string are omitted, which is exactly the constraint; the failure
-// links keep overlapping partial matches alive (e.g. for "aab", reading "aaab"
-// must not reset after the first "aa"). The extra state rules are registered
-// through `builder` with names derived from `prefix`; the start-state rule name
-// is returned.
+// GBNF grammar for L = { s : no `strings`[i] is a substring of s }.
+// Emits the Aho-Corasick automaton as a right-linear grammar (one rule per
+// state, every state accepting); transitions completing a delimiter are
+// dropped. Failure links keep overlapping partials alive (excluding "aab",
+// "aaab" must not reset after "aa"). State rules are added through `builder`
+// using `prefix`; returns the start-state rule name.
 static std::string gbnf_excluding_grammar(const common_grammar_builder & builder,
                                           const std::string &            prefix,
                                           const std::vector<std::string> & strings) {
@@ -1509,8 +1506,6 @@ static std::string gbnf_excluding_grammar(const common_grammar_builder & builder
         }
     }
 
-    // terminal[s]: reaching s means a forbidden string just matched, directly or
-    // through a suffix via the failure links.
     std::vector<bool> terminal(n, false);
     for (size_t u : order) {
         terminal[u] = nodes[u].is_word || (u != 0 && terminal[fail[u]]);
