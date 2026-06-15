@@ -2052,7 +2052,7 @@ static void test_template_output_peg_parsers(bool detailed_debug) {
         // trailing newline). The structural delimiter is "\n</parameter>\n", so the value
         // "#include\n" renders as "...#include\n\n</parameter>\n". The trailing newline must
         // be preserved faithfully (no stripping), and the generated grammar must admit a
-        // value ending on a delimiter prefix. Regression test for gbnf_excluding_pattern.
+        // value ending on a delimiter prefix. Regression test for gbnf_excluding_grammar.
         tst.test(
                "<tool_call>\n"
                "<function=edit>\n"
