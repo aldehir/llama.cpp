@@ -193,6 +193,15 @@ value binary_expression::execute_impl(context & ctx) {
         } else if (op.value == "/") {
             JJ_DEBUG("Division operation: %f / %f", a, b);
             return mk_val<value_float>(a / b);
+        } else if (op.value == "//") {
+            double res = std::floor(a / b);
+            JJ_DEBUG("Floor division operation: %f // %f = %f", a, b, res);
+            bool is_float = is_val<value_float>(left_val) || is_val<value_float>(right_val);
+            if (is_float) {
+                return mk_val<value_float>(res);
+            } else {
+                return mk_val<value_int>(static_cast<int64_t>(res));
+            }
         } else if (op.value == "%") {
             double rem = std::fmod(a, b);
             JJ_DEBUG("Modulo operation: %f %% %f = %f", a, b, rem);
