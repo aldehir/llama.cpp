@@ -15,9 +15,8 @@
 // ---------------------------------------------------------------------------
 // Recipe evaluation dialect
 //
-//   program := ws ("default" NAME)? stmt* EOF
-//   stmt    := "type" "=" expr
-//            | "set" NAME "=" expr
+//   program := ws stmt* EOF
+//   stmt    := NAME "=" expr
 //            | "if" expr stmt* ("elif" expr stmt*)* ("else" stmt*)? "endif"
 //   expr    := or
 //   or      := and  ("or"  and)*
@@ -67,8 +66,10 @@ common_peg_arena build_recipe_grammar() {
             });
         });
 
-        // reserve operator words so they are not consumed as a bare name
-        auto reserved = (b.literal("and") | b.literal("or") | b.literal("not")) + b.negate(word_char);
+        // reserve keywords so they are not consumed as a bare name
+        auto reserved = (b.literal("and")  | b.literal("or")   | b.literal("not") |
+                         b.literal("if")   | b.literal("elif") | b.literal("else") | b.literal("endif"))
+                      + b.negate(word_char);
 
         // expression grammar, lowest precedence first
         auto expr = b.ref("or-expr");
@@ -110,11 +111,10 @@ common_peg_arena build_recipe_grammar() {
             return b.ref("and-expr") + b.zero_or_more(op_kw("or") + b.ref("and-expr"));
         });
 
-        // statements
-        common_peg_parser stmt = b.choice({ b.ref("assign-type"), b.ref("assign-set"), b.ref("if-stmt") });
+        // statements (if-stmt first so "if" is never read as an assignment target)
+        common_peg_parser stmt = b.choice({ b.ref("if-stmt"), b.ref("assign") });
 
-        b.rule("assign-type", [&]() { return kw("type") + sym("=") + expr; });
-        b.rule("assign-set",  [&]() { return kw("set") + name_lit + ws + sym("=") + expr; });
+        b.rule("assign", [&]() { return b.negate(reserved) + name_lit + ws + sym("=") + expr; });
 
         b.rule("if-stmt", [&]() {
             auto block = [&](const std::string & key) { return b.tag(key, b.zero_or_more(stmt)); };
@@ -126,10 +126,8 @@ common_peg_arena build_recipe_grammar() {
                  + kw("endif");
         });
 
-        auto default_clause = b.rule("default", [&]() { return kw("default") + name_lit + ws; });
-
         return b.rule("program", [&]() {
-            return ws + b.optional(default_clause) + b.zero_or_more(stmt) + b.end();
+            return ws + b.zero_or_more(stmt) + b.end();
         });
     });
 }
@@ -167,13 +165,7 @@ struct recipe_builder {
     jinja::program build_program(const common_peg_ast_node & node) const {
         jinja::program prog;
         for (auto cid : node.children) {
-            const auto & child = get(cid);
-            if (child.rule == "default") {
-                const auto & name = get(child.children.at(0));
-                prog.body.push_back(set_type(std::make_unique<jinja::identifier>(std::string(name.text))));
-            } else {
-                prog.body.push_back(build_stmt(child));
-            }
+            prog.body.push_back(build_stmt(get(cid)));
         }
         return prog;
     }
@@ -187,10 +179,7 @@ struct recipe_builder {
     }
 
     jinja::statement_ptr build_stmt(const common_peg_ast_node & node) const {
-        if (node.rule == "assign-type") {
-            return set_type(build_expr(get(node.children.at(0))));
-        }
-        if (node.rule == "assign-set") {
+        if (node.rule == "assign") {
             std::string var = std::string(get(node.children.at(0)).text);
             auto val = build_expr(get(node.children.at(1)));
             return std::make_unique<jinja::set_statement>(
@@ -278,11 +267,6 @@ struct recipe_builder {
                 make_op_token(std::string(op_node.text), op_node.start), std::move(arg));
         }
         return build_expr(get(ch.at(0)));
-    }
-
-    static jinja::statement_ptr set_type(jinja::statement_ptr value) {
-        return std::make_unique<jinja::set_statement>(
-            std::make_unique<jinja::identifier>("type"), std::move(value), jinja::statements{});
     }
 
     static std::string unquote(std::string_view text) {

@@ -39,44 +39,44 @@ static void test_floor_division(testing & t) {
 
     // // is integer floor division: 7 // 2 == 3 (float / would give 3.5)
     t.assert_equal("7 // 2 == 3", std::string("q6_K"),
-        eval_name(quant_recipe::parse("default Q4_K\nif 7 // 2 == 3\n  type = Q6_K\nendif\n"), ctx));
+        eval_name(quant_recipe::parse("type = Q4_K\nif 7 // 2 == 3\n  type = Q6_K\nendif\n"), ctx));
 
     // threshold lands where C++ integer division would: 80 // 8 == 10
     ctx.n_layer = 80;
     t.assert_equal("n_layer // 8 threshold", std::string("q6_K"),
-        eval_name(quant_recipe::parse("default Q4_K\nif n_layer // 8 == 10\n  type = Q6_K\nendif\n"), ctx));
+        eval_name(quant_recipe::parse("type = Q4_K\nif n_layer // 8 == 10\n  type = Q6_K\nendif\n"), ctx));
 
     // modulo on integers stays integer
     t.assert_equal("10 % 3 == 1", std::string("q6_K"),
-        eval_name(quant_recipe::parse("default Q4_K\nif 10 % 3 == 1\n  type = Q6_K\nendif\n"), ctx));
+        eval_name(quant_recipe::parse("type = Q4_K\nif 10 % 3 == 1\n  type = Q6_K\nendif\n"), ctx));
 }
 
 static void test_basic_statements(testing & t) {
     quant_recipe_tensor ctx;
 
-    t.assert_equal("default only", std::string("q4_K"),
-        eval_name(quant_recipe::parse("default Q4_K\n"), ctx));
+    t.assert_equal("baseline only", std::string("q4_K"),
+        eval_name(quant_recipe::parse("type = Q4_K\n"), ctx));
 
     t.assert_equal("type reassignment, last wins", std::string("q8_0"),
-        eval_name(quant_recipe::parse("default Q4_K\ntype = Q6_K\ntype = Q8_0\n"), ctx));
+        eval_name(quant_recipe::parse("type = Q4_K\ntype = Q6_K\ntype = Q8_0\n"), ctx));
 
-    // `set` binds a name, then it can be read later
+    // assignment binds a name, then it can be read later
     ctx.layer = 20;
-    t.assert_equal("set then read", std::string("q6_K"),
-        eval_name(quant_recipe::parse("default Q4_K\nset hi = layer > 10\nif hi\n  type = Q6_K\nendif\n"), ctx));
+    t.assert_equal("assign then read", std::string("q6_K"),
+        eval_name(quant_recipe::parse("type = Q4_K\nhi = layer > 10\nif hi\n  type = Q6_K\nendif\n"), ctx));
 
     // reading the mutable `type` in a guard
     t.assert_equal("guard reads type", std::string("q5_K"),
-        eval_name(quant_recipe::parse("default Q4_K\nif type == Q4_K\n  type = Q5_K\nendif\n"), ctx));
+        eval_name(quant_recipe::parse("type = Q4_K\nif type == Q4_K\n  type = Q5_K\nendif\n"), ctx));
 
     // lower-case canonical type names work too
     t.assert_equal("canonical type name", std::string("q6_K"),
-        eval_name(quant_recipe::parse("default q4_K\ntype = q6_K\n"), ctx));
+        eval_name(quant_recipe::parse("type = q4_K\ntype = q6_K\n"), ctx));
 }
 
 static void test_control_flow(testing & t) {
     const char * src =
-        "default Q4_K\n"
+        "type = Q4_K\n"
         "if category == \"attn_v\"\n"
         "  type = Q6_K\n"
         "elif category == \"ffn_down\"\n"
@@ -94,13 +94,13 @@ static void test_control_flow(testing & t) {
     // nested if + and/or/not precedence
     t.assert_equal("and/or/not", std::string("q6_K"),
         eval_name(quant_recipe::parse(
-            "default Q4_K\nset done = layer > 0\nset a = n_expert == 8\nset b = n_gqa >= 4\n"
+            "type = Q4_K\ndone = layer > 0\na = n_expert == 8\nb = n_gqa >= 4\n"
             "if not done and (a or b)\n  type = Q6_K\nendif\n"),
             [] { quant_recipe_tensor c; c.layer = 0; c.n_expert = 1; c.n_gqa = 8; return c; }()));
 
     // line comments are ignored
     t.assert_equal("comments", std::string("q6_K"),
-        eval_name(quant_recipe::parse("# pick a type\ndefault Q4_K\ntype = Q6_K  # override\n"),
+        eval_name(quant_recipe::parse("# pick a type\ntype = Q4_K\ntype = Q6_K  # override\n"),
             quant_recipe_tensor{}));
 }
 
@@ -115,20 +115,20 @@ static void test_parse_errors(testing & t) {
     };
 
     // bare `/` is deliberately not offered (only `//`)
-    t.assert_true("bare / rejected", throws("default Q4_K\ntype = n_layer / 2\n"));
+    t.assert_true("bare / rejected", throws("type = n_layer / 2\n"));
     // no for/macro/function-call productions: totality by construction
-    t.assert_true("for rejected", throws("default Q4_K\nfor x in y\n  type = Q6_K\nendfor\n"));
+    t.assert_true("for rejected", throws("type = Q4_K\nfor x in y\n  type = Q6_K\nendfor\n"));
     // dangling block
-    t.assert_true("missing endif rejected", throws("default Q4_K\nif a\n  type = Q6_K\n"));
+    t.assert_true("missing endif rejected", throws("type = Q4_K\nif a\n  type = Q6_K\n"));
 }
 
 // Full Q4_K_M recipe, transcribed from llama_tensor_get_type_impl.
 static const char * Q4_K_M = R"(# Q4_K_M -- transcribed from llama_tensor_get_type_impl
-default Q4_K
+type = Q4_K
 
-set more_bits = layer < n_layer // 8
-             or layer >= 7 * n_layer // 8
-             or (layer - n_layer // 8) % 3 == 2
+more_bits = layer < n_layer // 8
+         or layer >= 7 * n_layer // 8
+         or (layer - n_layer // 8) % 3 == 2
 
 if category == "attn_v"
     if more_bits
