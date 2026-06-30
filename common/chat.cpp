@@ -1284,7 +1284,8 @@ static common_chat_params common_chat_params_init_gemma4(const common_chat_templ
         data.prompt += data.generation_prompt;
     }
 
-    if (inputs.add_generation_prompt && string_ends_with(data.prompt, "<tool_response|>") && inputs.enable_thinking) {
+    if (inputs.add_generation_prompt && inputs.enable_thinking &&
+        (string_ends_with(data.prompt, "<tool_response|>") || string_ends_with(data.prompt, "<|turn>model\n"))) {
         // The current Gemma 4 template does not automatically add the thinking
         // sequence which leads to occasional parsing errors as the model will
         // not generate the `thought` token.
