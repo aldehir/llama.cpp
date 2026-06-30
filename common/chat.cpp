@@ -1284,6 +1284,15 @@ static common_chat_params common_chat_params_init_gemma4(const common_chat_templ
         data.prompt += data.generation_prompt;
     }
 
+    if (inputs.add_generation_prompt && string_ends_with(data.prompt, "<tool_response|>") && inputs.enable_thinking) {
+        // The current Gemma 4 template does not automatically add the thinking
+        // sequence which leads to occasional parsing errors as the model will
+        // not generate the `thought` token.
+        //
+        // ref: https://huggingface.co/google/gemma-4-31B-it/discussions/118
+        data.prompt += "<|channel>thought\n";
+    }
+
     data.message_delimiters = {
         { COMMON_CHAT_ROLE_USER,      "<|turn>user"  },
         { COMMON_CHAT_ROLE_ASSISTANT, "<|turn>model" },
