@@ -3,7 +3,9 @@
 #include "build-info.h"
 #include "common.h"
 #include "imatrix-loader.h"
+#include "quant-recipe.h"
 
+#include "ggml.h"
 #include "gguf.h"
 
 #include <algorithm>
@@ -12,6 +14,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <map>
 #include <vector>
 #include <string>
 #include <unordered_map>
@@ -121,7 +124,7 @@ static bool try_parse_ftype(const std::string & ftype_str_in, llama_ftype & ftyp
 static void usage(const char * executable) {
     printf("usage: %s [--help] [--allow-requantize] [--leave-output-tensor] [--pure] [--imatrix] [--include-weights]\n", executable);
     printf("       [--exclude-weights] [--output-tensor-type] [--token-embedding-type] [--tensor-type] [--tensor-type-file]\n");
-    printf("       [--prune-layers] [--keep-split] [--override-kv] [--dry-run]\n");
+    printf("       [--prune-layers] [--keep-split] [--override-kv] [--recipe] [--dry-run]\n");
     printf("       model-f32.gguf [model-quant.gguf] type [nthreads]\n\n");
     printf("  --allow-requantize\n");
     printf("                                      allow requantizing tensors that have already been quantized\n");
@@ -155,6 +158,9 @@ static void usage(const char * executable) {
     printf("                                      WARNING: this is an advanced option, use with care.\n");
     printf("  --keep-split\n");
     printf("                                      generate quantized model in the same shards as input\n");
+    printf("  --recipe recipe.txt\n");
+    printf("                                      select per-tensor types from a recipe file (evaluation dialect).\n");
+    printf("                                      evaluated once per tensor; overrides the built-in type selection.\n");
     printf("  --override-kv KEY=TYPE:VALUE\n");
     printf("                                      override model metadata by key in the quantized model. may be specified multiple times.\n");
     printf("                                      WARNING: this is an advanced option, use with care.\n");
@@ -385,6 +391,155 @@ static bool parse_layer_prune(const char * data, std::vector<int> & prune_layers
     return true;
 }
 
+// broad tensor category, kept in sync with tensor_get_category() in src/llama-quant.cpp.
+// returns an empty string for tensors with no recognized category.
+static std::string recipe_tensor_category(const std::string & name) {
+    if (name == "output.weight")              return "output";
+    if (name == "token_embd.weight" ||
+        name == "per_layer_token_embd.weight") return "token_embd";
+    if (name.find("attn_qkv.weight")   != std::string::npos) return "attn_qkv";
+    if (name.find("attn_kv_b.weight")  != std::string::npos) return "attn_kv_b";
+    if (name.find("attn_v.weight")     != std::string::npos) return "attn_v";
+    if (name.find("attn_k.weight")     != std::string::npos) return "attn_k";
+    if (name.find("attn_q.weight")     != std::string::npos) return "attn_q";
+    if (name.find("attn_output.weight")!= std::string::npos) return "attn_output";
+    if (name.find("ffn_up")            != std::string::npos) return "ffn_up";
+    if (name.find("ffn_gate")          != std::string::npos) return "ffn_gate";
+    if (name.find("ffn_down")          != std::string::npos) return "ffn_down";
+    return "";
+}
+
+// parse the absolute layer index from "blk.<N>." in a tensor name, -1 if absent.
+static int recipe_tensor_layer(const std::string & name) {
+    const size_t pos = name.find("blk.");
+    if (pos == std::string::npos) {
+        return -1;
+    }
+    int layer = 0;
+    size_t i = pos + 4;
+    if (i >= name.size() || !std::isdigit((unsigned char) name[i])) {
+        return -1;
+    }
+    for (; i < name.size() && std::isdigit((unsigned char) name[i]); ++i) {
+        layer = layer * 10 + (name[i] - '0');
+    }
+    return layer;
+}
+
+// escape a literal tensor name into an anchored regex so it matches exactly.
+static std::string recipe_anchor_name(const std::string & name) {
+    std::string out = "^";
+    for (char c : name) {
+        if (std::strchr(".^$|()[]{}*+?\\", c)) {
+            out += '\\';
+        }
+        out += c;
+    }
+    out += '$';
+    return out;
+}
+
+static uint32_t recipe_meta_u32(const gguf_context * gguf, const std::string & key, uint32_t fallback) {
+    const int64_t id = gguf_find_key(gguf, key.c_str());
+    if (id < 0) {
+        return fallback;
+    }
+    if (gguf_get_kv_type(gguf, id) != GGUF_TYPE_UINT32) {
+        return fallback;
+    }
+    return gguf_get_val_u32(gguf, id);
+}
+
+static std::string recipe_meta_str(const gguf_context * gguf, const std::string & key, const std::string & fallback) {
+    const int64_t id = gguf_find_key(gguf, key.c_str());
+    if (id < 0 || gguf_get_kv_type(gguf, id) != GGUF_TYPE_STRING) {
+        return fallback;
+    }
+    return gguf_get_val_str(gguf, id);
+}
+
+// Evaluate a recipe against every quantizable tensor of the input model and
+// append the resulting per-tensor types to `tensor_type_opts` as overrides.
+static bool apply_recipe(const std::string & recipe_path, const std::string & fname_inp,
+                         bool has_imatrix, std::vector<tensor_type_option> & tensor_type_opts) {
+    quant_recipe recipe;
+    try {
+        recipe = quant_recipe::load(recipe_path);
+    } catch (const std::exception & e) {
+        fprintf(stderr, "%s: %s\n", __func__, e.what());
+        return false;
+    }
+
+    ggml_context * meta = nullptr;
+    gguf_init_params gp = { /*.no_alloc =*/ true, /*.ctx =*/ &meta };
+    gguf_context * gguf = gguf_init_from_file(fname_inp.c_str(), gp);
+    if (!gguf) {
+        fprintf(stderr, "%s: failed to read GGUF metadata from '%s'\n", __func__, fname_inp.c_str());
+        return false;
+    }
+
+    const std::string arch       = recipe_meta_str(gguf, "general.architecture", "");
+    const std::string model_type = recipe_meta_str(gguf, "general.size_label", "");
+    const int n_expert  = (int) recipe_meta_u32(gguf, arch + ".expert_count", 0);
+    const int n_head    = (int) recipe_meta_u32(gguf, arch + ".attention.head_count", 0);
+    const int n_head_kv = (int) recipe_meta_u32(gguf, arch + ".attention.head_count_kv", n_head);
+    const int n_gqa     = n_head_kv > 0 ? n_head / n_head_kv : 0;
+    int n_layer = (int) recipe_meta_u32(gguf, arch + ".block_count", 0);
+
+    const int64_t n_tensors = gguf_get_n_tensors(gguf);
+
+    // first pass: count quantizable tensors per category (and derive n_layer if absent)
+    std::map<std::string, int> category_count;
+    for (int64_t i = 0; i < n_tensors; ++i) {
+        const std::string name = gguf_get_tensor_name(gguf, i);
+        const ggml_tensor * tensor = ggml_get_tensor(meta, name.c_str());
+        const std::string category = recipe_tensor_category(name);
+        if (!tensor || ggml_n_dims(tensor) < 2 || category.empty()) {
+            continue;
+        }
+        category_count[category]++;
+        n_layer = std::max(n_layer, recipe_tensor_layer(name) + 1);
+    }
+
+    // second pass: evaluate the recipe and emit one override per tensor
+    std::map<std::string, int> category_index;
+    int n_applied = 0;
+    for (int64_t i = 0; i < n_tensors; ++i) {
+        const std::string name = gguf_get_tensor_name(gguf, i);
+        const ggml_tensor * tensor = ggml_get_tensor(meta, name.c_str());
+        const std::string category = recipe_tensor_category(name);
+        if (!tensor || ggml_n_dims(tensor) < 2 || category.empty()) {
+            continue;
+        }
+
+        quant_recipe_tensor t;
+        t.category       = category;
+        t.arch           = arch;
+        t.model_type     = model_type;
+        t.layer          = recipe_tensor_layer(name);
+        t.n_layer        = n_layer;
+        t.n_expert       = n_expert;
+        t.n_gqa          = n_gqa;
+        t.category_index = category_index[category]++;
+        t.category_count = category_count[category];
+        t.has_imatrix    = has_imatrix;
+
+        const ggml_type type = recipe.eval(t);
+        if (type == GGML_TYPE_COUNT) {
+            continue;
+        }
+
+        tensor_type_opts.push_back({ recipe_anchor_name(name), type });
+        n_applied++;
+    }
+
+    printf("%s: applied recipe '%s' to %d tensors\n", __func__, recipe_path.c_str(), n_applied);
+
+    gguf_free(gguf);
+    ggml_free(meta);
+    return true;
+}
+
 // satisfies -Wmissing-declarations
 int llama_quantize(int argc, char ** argv);
 
@@ -398,6 +553,7 @@ int llama_quantize(int argc, char ** argv) {
 
     int arg_idx = 1;
     std::string imatrix_file;
+    std::string recipe_file;
     std::vector<std::string> included_weights, excluded_weights;
     std::vector<llama_model_kv_override> kv_overrides;
     std::vector<tensor_type_option> tensor_type_opts;
@@ -449,6 +605,12 @@ int llama_quantize(int argc, char ** argv) {
         } else if (strcmp(argv[arg_idx], "--imatrix") == 0) {
             if (arg_idx < argc-1) {
                 imatrix_file = argv[++arg_idx];
+            } else {
+                usage(argv[0]);
+            }
+        } else if (strcmp(argv[arg_idx], "--recipe") == 0) {
+            if (arg_idx < argc-1) {
+                recipe_file = argv[++arg_idx];
             } else {
                 usage(argv[0]);
             }
@@ -529,14 +691,6 @@ int llama_quantize(int argc, char ** argv) {
         kv_overrides.back().key[0] = 0;
         params.kv_overrides = kv_overrides.data();
     }
-    if (!tensor_type_opts.empty()) {
-        t_override.reserve(tensor_type_opts.size() + 1);
-        for (const auto & tt : tensor_type_opts) {
-            t_override.push_back({tt.name.c_str(), tt.type});
-        }
-        t_override.push_back({nullptr, GGML_TYPE_COUNT});  // array terminator
-        params.tt_overrides = t_override.data();
-    }
     if (!prune_layers.empty()) {
         prune_layers.push_back(-1);  // array terminator
         params.prune_layers = prune_layers.data();
@@ -608,6 +762,23 @@ int llama_quantize(int argc, char ** argv) {
             fprintf(stderr, "%s: error: input and output files are the same: '%s'\n", __func__, fname_inp.c_str());
             return 1;
         }
+    }
+
+    // evaluate a recipe (if any) now that the input file is known, then build the
+    // tensor-type override list. user-provided --tensor-type entries come first
+    // so they take precedence over recipe-derived types.
+    if (!recipe_file.empty()) {
+        if (!apply_recipe(recipe_file, fname_inp, !imatrix_data.empty(), tensor_type_opts)) {
+            return 1;
+        }
+    }
+    if (!tensor_type_opts.empty()) {
+        t_override.reserve(tensor_type_opts.size() + 1);
+        for (const auto & tt : tensor_type_opts) {
+            t_override.push_back({tt.name.c_str(), tt.type});
+        }
+        t_override.push_back({nullptr, GGML_TYPE_COUNT});  // array terminator
+        params.tt_overrides = t_override.data();
     }
 
     llama_print_build_info();

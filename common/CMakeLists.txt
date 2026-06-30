@@ -106,8 +106,6 @@ add_library(${TARGET}
     jinja/lexer.h
     jinja/parser.cpp
     jinja/parser.h
-    jinja/recipe.cpp
-    jinja/recipe.h
     jinja/runtime.cpp
     jinja/runtime.h
     jinja/value.cpp

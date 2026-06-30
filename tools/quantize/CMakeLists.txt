@@ -2,7 +2,7 @@
 
 set(TARGET llama-quantize-impl)
 
-add_library(${TARGET} quantize.cpp)
+add_library(${TARGET} quantize.cpp quant-recipe.cpp)
 set_target_properties(${TARGET} PROPERTIES WINDOWS_EXPORT_ALL_SYMBOLS ON)
 
 target_include_directories(${TARGET} PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
