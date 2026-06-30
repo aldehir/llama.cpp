@@ -308,9 +308,26 @@ quant_recipe::~quant_recipe() = default;
 quant_recipe::quant_recipe(quant_recipe &&) noexcept = default;
 quant_recipe & quant_recipe::operator=(quant_recipe &&) noexcept = default;
 
+// Built-in definitions prepended to every recipe. Authored in the recipe
+// dialect itself (not magic host state) so the behavior stays transparent and
+// an author can still override these names locally.
+static const char * RECIPE_PRELUDE =
+    "more_bits = layer < n_layer // 8\n"
+    "         or layer >= 7 * n_layer // 8\n"
+    "         or (layer - n_layer // 8) % 3 == 2\n";
+
 quant_recipe quant_recipe::parse(const std::string & src) {
     quant_recipe r;
-    r.prog_ = std::make_unique<jinja::program>(parse_recipe_program(src));
+
+    // prelude statements run first, so the names they bind are available to the
+    // recipe; a later assignment in the recipe overrides them.
+    jinja::program prog = parse_recipe_program(RECIPE_PRELUDE);
+    jinja::program user = parse_recipe_program(src);
+    for (auto & stmt : user.body) {
+        prog.body.push_back(std::move(stmt));
+    }
+
+    r.prog_ = std::make_unique<jinja::program>(std::move(prog));
     return r;
 }
 

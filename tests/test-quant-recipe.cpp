@@ -72,6 +72,18 @@ static void test_basic_statements(testing & t) {
     // lower-case canonical type names work too
     t.assert_equal("canonical type name", std::string("q6_K"),
         eval_name(quant_recipe::parse("type = q4_K\ntype = q6_K\n"), ctx));
+
+    // more_bits is predefined by the prelude; a recipe can use it without defining it
+    const char * mb_recipe = "type = Q4_K\nif more_bits\n  type = Q6_K\nendif\n";
+    quant_recipe mb = quant_recipe::parse(mb_recipe);
+    quant_recipe_tensor first; first.layer = 0;  first.n_layer = 80; // layer < 80//8 -> true
+    quant_recipe_tensor mid;   mid.layer   = 40; mid.n_layer   = 80; // not first/last/middle-third -> false
+    t.assert_equal("built-in more_bits true",  std::string("q6_K"), eval_name(mb, first));
+    t.assert_equal("built-in more_bits false", std::string("q4_K"), eval_name(mb, mid));
+
+    // a recipe may override the predefined name
+    t.assert_equal("override more_bits", std::string("q4_K"),
+        eval_name(quant_recipe::parse("type = Q4_K\nmore_bits = false\nif more_bits\n  type = Q6_K\nendif\n"), first));
 }
 
 static void test_control_flow(testing & t) {
@@ -131,11 +143,8 @@ static void test_parse_errors(testing & t) {
 
 // Full Q4_K_M recipe, transcribed from llama_tensor_get_type_impl.
 static const char * Q4_K_M = R"(# Q4_K_M -- transcribed from llama_tensor_get_type_impl
+# more_bits is provided by the built-in prelude
 type = Q4_K
-
-more_bits = layer < n_layer // 8
-         or layer >= 7 * n_layer // 8
-         or (layer - n_layer // 8) % 3 == 2
 
 if category == ATTN_V
     if more_bits
