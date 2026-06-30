@@ -75,11 +75,12 @@ static void test_basic_statements(testing & t) {
 }
 
 static void test_control_flow(testing & t) {
+    // categories are referenced as named constants (ATTN_V, FFN_DOWN)
     const char * src =
         "type = Q4_K\n"
-        "if category == \"attn_v\"\n"
+        "if category == ATTN_V\n"
         "  type = Q6_K\n"
-        "elif category == \"ffn_down\"\n"
+        "elif category == FFN_DOWN\n"
         "  type = Q5_K\n"
         "else\n"
         "  type = Q8_0\n"
@@ -87,9 +88,15 @@ static void test_control_flow(testing & t) {
     quant_recipe recipe = quant_recipe::parse(src);
 
     quant_recipe_tensor ctx;
-    ctx.category = "attn_v";   t.assert_equal("if branch",   std::string("q6_K"), eval_name(recipe, ctx));
-    ctx.category = "ffn_down"; t.assert_equal("elif branch", std::string("q5_K"), eval_name(recipe, ctx));
-    ctx.category = "attn_k";   t.assert_equal("else branch", std::string("q8_0"), eval_name(recipe, ctx));
+    ctx.category = quant_category::ATTN_V;   t.assert_equal("if branch",   std::string("q6_K"), eval_name(recipe, ctx));
+    ctx.category = quant_category::FFN_DOWN; t.assert_equal("elif branch", std::string("q5_K"), eval_name(recipe, ctx));
+    ctx.category = quant_category::ATTN_K;   t.assert_equal("else branch", std::string("q8_0"), eval_name(recipe, ctx));
+
+    // the constant and the equivalent string literal behave identically
+    ctx.category = quant_category::FFN_DOWN;
+    t.assert_equal("constant == string literal",
+        eval_name(quant_recipe::parse("type = Q4_K\nif category == FFN_DOWN\n  type = Q6_K\nendif\n"), ctx),
+        eval_name(quant_recipe::parse("type = Q4_K\nif category == \"ffn_down\"\n  type = Q6_K\nendif\n"), ctx));
 
     // nested if + and/or/not precedence
     t.assert_equal("and/or/not", std::string("q6_K"),
@@ -130,7 +137,7 @@ more_bits = layer < n_layer // 8
          or layer >= 7 * n_layer // 8
          or (layer - n_layer // 8) % 3 == 2
 
-if category == "attn_v"
+if category == ATTN_V
     if more_bits
         type = Q6_K
     endif
@@ -142,7 +149,7 @@ if category == "attn_v"
     endif
 endif
 
-if category == "ffn_down"
+if category == FFN_DOWN
     if arch == "falcon"
         if layer < n_layer // 16
             type = Q6_K
@@ -164,13 +171,13 @@ static void test_q4_k_m(testing & t) {
 
     auto wv = [&](int layer, int n_layer, const std::string & model_type, int n_expert) {
         quant_recipe_tensor c;
-        c.category = "attn_v"; c.layer = layer; c.n_layer = n_layer;
+        c.category = quant_category::ATTN_V; c.layer = layer; c.n_layer = n_layer;
         c.arch = "llama"; c.model_type = model_type; c.n_expert = n_expert;
         return eval_name(recipe, c);
     };
     auto ffn = [&](int layer, int n_layer, const std::string & arch) {
         quant_recipe_tensor c;
-        c.category = "ffn_down"; c.layer = layer; c.n_layer = n_layer;
+        c.category = quant_category::FFN_DOWN; c.layer = layer; c.n_layer = n_layer;
         c.arch = arch; c.model_type = "7B"; c.n_expert = 1;
         return eval_name(recipe, c);
     };
@@ -195,7 +202,7 @@ static void test_q4_k_m(testing & t) {
 
     // unmatched category falls through to the default
     quant_recipe_tensor other;
-    other.category = "attn_q"; other.layer = 0; other.n_layer = 80; other.arch = "llama";
+    other.category = quant_category::ATTN_Q; other.layer = 0; other.n_layer = 80; other.arch = "llama";
     other.model_type = "7B"; other.n_expert = 1;
     t.assert_equal("other category -> Q4_K", std::string("q4_K"), eval_name(recipe, other));
 }

@@ -394,18 +394,18 @@ static bool parse_layer_prune(const char * data, std::vector<int> & prune_layers
 // broad tensor category, kept in sync with tensor_get_category() in src/llama-quant.cpp.
 // returns an empty string for tensors with no recognized category.
 static std::string recipe_tensor_category(const std::string & name) {
-    if (name == "output.weight")              return "output";
+    if (name == "output.weight")              return quant_category::OUTPUT;
     if (name == "token_embd.weight" ||
-        name == "per_layer_token_embd.weight") return "token_embd";
-    if (name.find("attn_qkv.weight")   != std::string::npos) return "attn_qkv";
-    if (name.find("attn_kv_b.weight")  != std::string::npos) return "attn_kv_b";
-    if (name.find("attn_v.weight")     != std::string::npos) return "attn_v";
-    if (name.find("attn_k.weight")     != std::string::npos) return "attn_k";
-    if (name.find("attn_q.weight")     != std::string::npos) return "attn_q";
-    if (name.find("attn_output.weight")!= std::string::npos) return "attn_output";
-    if (name.find("ffn_up")            != std::string::npos) return "ffn_up";
-    if (name.find("ffn_gate")          != std::string::npos) return "ffn_gate";
-    if (name.find("ffn_down")          != std::string::npos) return "ffn_down";
+        name == "per_layer_token_embd.weight") return quant_category::TOKEN_EMBD;
+    if (name.find("attn_qkv.weight")   != std::string::npos) return quant_category::ATTN_QKV;
+    if (name.find("attn_kv_b.weight")  != std::string::npos) return quant_category::ATTN_KV_B;
+    if (name.find("attn_v.weight")     != std::string::npos) return quant_category::ATTN_V;
+    if (name.find("attn_k.weight")     != std::string::npos) return quant_category::ATTN_K;
+    if (name.find("attn_q.weight")     != std::string::npos) return quant_category::ATTN_Q;
+    if (name.find("attn_output.weight")!= std::string::npos) return quant_category::ATTN_OUTPUT;
+    if (name.find("ffn_up")            != std::string::npos) return quant_category::FFN_UP;
+    if (name.find("ffn_gate")          != std::string::npos) return quant_category::FFN_GATE;
+    if (name.find("ffn_down")          != std::string::npos) return quant_category::FFN_DOWN;
     return "";
 }
 

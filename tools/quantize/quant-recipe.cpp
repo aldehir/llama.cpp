@@ -339,6 +339,13 @@ ggml_type quant_recipe::eval(const quant_recipe_tensor & tensor) const {
         ctx.set_val(to_upper(name), val);
     }
 
+    // seed the category names as constants (canonical and upper-cased alias)
+    for (const char * cat : QUANT_RECIPE_CATEGORIES) {
+        auto val = jinja::mk_val<jinja::value_string>(std::string(cat));
+        ctx.set_val(cat, val);
+        ctx.set_val(to_upper(cat), val);
+    }
+
     // seed the per-tensor context
     ctx.set_val("category",       jinja::mk_val<jinja::value_string>(tensor.category));
     ctx.set_val("arch",           jinja::mk_val<jinja::value_string>(tensor.arch));
