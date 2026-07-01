@@ -215,9 +215,6 @@ struct server_slot {
 
     server_prompt prompt;
 
-    // positions where context checkpoints will be created for the current task (ascending, unique)
-    std::vector<int32_t> checkpoint_pos;
-
     bool prompt_save(server_prompt_cache & prompt_cache) const {
         if (prompt.tokens.size() == 0) {
             return false;
@@ -320,7 +317,6 @@ struct server_slot {
         }
         generated_tokens.clear();
         generated_token_probs.clear();
-        checkpoint_pos.clear();
         json_schema = json();
 
         // clear speculative decoding stats
@@ -3369,81 +3365,6 @@ private:
 
                         slot.prompt.tokens.keep_first(n_past);
 
-                        // determine ahead of time the positions at which context checkpoints will be created,
-                        // so that the prompt batches are split only at positions where a checkpoint is actually created
-                        slot.checkpoint_pos.clear();
-
-                        // make checkpoints only for completion tasks and only if:
-                        // - the model does not support partial sequence removal
-                        // - the model uses SWA (and we are not using `swa_full`)
-                        // - the model supports partial sequence removal but only up to a fixed bound
-                        if (params_base.n_ctx_checkpoints > 0 &&
-                            slot.task->type == SERVER_TASK_TYPE_COMPLETION &&
-                            (ctx_tgt_seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_FULL ||
-                             ctx_tgt_seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_RS ||
-                             n_swa > 0)) {
-                            const auto & spans = slot.task->params.message_spans;
-
-                            const int32_t n_prompt      = slot.task->n_tokens();
-                            const int32_t last_user_pos = spans.last_user_message_pos();
-
-                            std::vector<int32_t> candidates;
-
-                            // checkpoint exactly before each user message
-                            for (const auto & span : spans.spans) {
-                                if (span.role == COMMON_CHAT_ROLE_USER) {
-                                    candidates.push_back((int32_t) span.pos);
-                                }
-                            }
-
-                            // keep checkpoints near the end of the prompt:
-                            //  - 4 + n_ubatch
-                            //  - 4
-                            // clamp to n_past: if the cache already covers the tail, checkpoint at the first batch instead
-                            // ref: https://github.com/ggml-org/llama.cpp/pull/20288
-                            for (const int32_t offset : { 4 + n_ubatch, 4 }) {
-                                candidates.push_back(std::max(n_prompt - std::min(n_batch, offset), n_past));
-                            }
-
-                            std::sort(candidates.begin(), candidates.end());
-                            candidates.erase(std::unique(candidates.begin(), candidates.end()), candidates.end());
-
-                            bool    has_last = !slot.prompt.checkpoints.empty();
-                            int32_t last     = has_last ? (int32_t) slot.prompt.checkpoints.back().n_tokens : 0;
-
-                            for (const int32_t pos : candidates) {
-                                // positions before the cached prefix can never start a batch and
-                                // pos == 0 cannot be checkpointed (nothing has been decoded yet)
-                                if (pos < n_past || pos < 1 || pos >= n_prompt) {
-                                    continue;
-                                }
-
-                                // do not checkpoint at or right after mtmd chunks
-                                if (input_tokens[pos] == LLAMA_TOKEN_NULL ||
-                                    (pos > n_past && input_tokens[pos - 1] == LLAMA_TOKEN_NULL)) {
-                                    continue;
-                                }
-
-                                // no need to create checkpoints that are too close together, unless it's the last user message
-                                if (has_last && pos != last_user_pos && pos <= last + params_base.checkpoint_min_step) {
-                                    continue;
-                                }
-
-                                slot.checkpoint_pos.push_back(pos);
-
-                                has_last = true;
-                                last     = pos;
-                            }
-
-                            if (!slot.checkpoint_pos.empty()) {
-                                std::stringstream ss;
-                                for (const auto pos : slot.checkpoint_pos) {
-                                    ss << pos << " ";
-                                }
-                                SLT_DBG(slot, "planned checkpoint positions: %s\n", ss.str().c_str());
-                            }
-                        }
-
                         // this is to signal the client that the request has started processing
                         if (slot.task->params.stream) {
                             if (slot.task->params.return_progress) {
@@ -3491,6 +3412,86 @@ private:
                         alora_disabled_id = enabled_loras[0];
                     }
 
+                    // determine ahead of time the positions at which context checkpoints will be created,
+                    // so that the prompt batches are split only at positions where a checkpoint is actually created
+                    std::vector<int32_t> checkpoint_pos;
+
+                    // make checkpoints only for completion tasks and only if:
+                    // - the model does not support partial sequence removal
+                    // - the model uses SWA (and we are not using `swa_full`)
+                    // - the model supports partial sequence removal but only up to a fixed bound
+                    if (params_base.n_ctx_checkpoints > 0 &&
+                        slot.task->type == SERVER_TASK_TYPE_COMPLETION &&
+                        (ctx_tgt_seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_FULL ||
+                         ctx_tgt_seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_RS ||
+                         n_swa > 0)) {
+                        const auto & spans = slot.task->params.message_spans;
+
+                        const int32_t n_prompt      = slot.task->n_tokens();
+                        const int32_t n_cur         = slot.prompt.n_tokens();
+                        const int32_t last_user_pos = spans.last_user_message_pos();
+
+                        std::vector<int32_t> candidates;
+
+                        // checkpoint exactly before each user message
+                        for (const auto & span : spans.spans) {
+                            if (span.role == COMMON_CHAT_ROLE_USER) {
+                                candidates.push_back((int32_t) span.pos);
+                            }
+                        }
+
+                        // keep checkpoints near the end of the prompt:
+                        //  - 4 + n_ubatch
+                        //  - 4
+                        // clamp to the current position: if the cache already covers the tail,
+                        // checkpoint at the start of the current batch instead
+                        // ref: https://github.com/ggml-org/llama.cpp/pull/20288
+                        for (const int32_t offset : { 4 + n_ubatch, 4 }) {
+                            candidates.push_back(std::max(n_prompt - std::min(n_batch, offset), n_cur));
+                        }
+
+                        std::sort(candidates.begin(), candidates.end());
+                        candidates.erase(std::unique(candidates.begin(), candidates.end()), candidates.end());
+
+                        bool    has_last = !slot.prompt.checkpoints.empty();
+                        int32_t last     = has_last ? (int32_t) slot.prompt.checkpoints.back().n_tokens : 0;
+
+                        for (const int32_t pos : candidates) {
+                            // positions before the current one can never start a batch and
+                            // pos == 0 cannot be checkpointed (nothing has been decoded yet)
+                            if (pos < n_cur || pos < 1 || pos >= n_prompt) {
+                                continue;
+                            }
+
+                            // do not checkpoint at or right after mtmd chunks
+                            if (input_tokens[pos] == LLAMA_TOKEN_NULL ||
+                                (pos > n_cur && input_tokens[pos - 1] == LLAMA_TOKEN_NULL)) {
+                                continue;
+                            }
+
+                            // no need to create checkpoints that are too close together, unless it's the last user message
+                            if (has_last && pos != last_user_pos && pos <= last + params_base.checkpoint_min_step) {
+                                continue;
+                            }
+
+                            checkpoint_pos.push_back(pos);
+
+                            has_last = true;
+                            last     = pos;
+                        }
+
+                        if (!checkpoint_pos.empty()) {
+                            std::stringstream ss;
+                            for (const auto pos : checkpoint_pos) {
+                                ss << pos << " ";
+                            }
+                            SLT_DBG(slot, "planned checkpoint positions: %s\n", ss.str().c_str());
+                        }
+                    }
+
+                    // a checkpoint is created before decoding the current batch if it starts at a planned position
+                    const bool checkpoint_at_start = !checkpoint_pos.empty() && checkpoint_pos.front() == slot.prompt.n_tokens();
+
                     bool has_mtmd = false;
 
                     // check if we should process the image
@@ -3524,6 +3525,9 @@ private:
                         has_mtmd = true;
                     }
 
+                    // the next planned checkpoint position, advanced as the batch is filled
+                    auto it_ckpt = checkpoint_pos.cbegin();
+
                     // add prompt tokens for processing in the current batch
                     while (slot.prompt.n_tokens() < slot.task->n_tokens() && batch.size() < n_batch) {
                         // get next token to process
@@ -3553,15 +3557,16 @@ private:
 
                         // stop the prompt batch exactly at planned checkpoint positions, so that
                         // the next batch (and the checkpoint) starts there
-                        if (std::binary_search(slot.checkpoint_pos.begin(), slot.checkpoint_pos.end(), slot.prompt.n_tokens())) {
+                        while (it_ckpt != checkpoint_pos.cend() && *it_ckpt < slot.prompt.n_tokens()) {
+                            ++it_ckpt;
+                        }
+                        if (it_ckpt != checkpoint_pos.cend() && *it_ckpt == slot.prompt.n_tokens()) {
                             break;
                         }
                     }
 
                     // the number of tokens added to the batch for the current slot
                     const auto n_tokens_cur = batch.size() - n_tokens_prev;
-
-                    const auto n_tokens_start = slot.prompt.n_tokens() - n_tokens_cur;
 
                     // entire prompt has been processed
                     if (slot.prompt.n_tokens() == slot.task->n_tokens()) {
@@ -3582,7 +3587,7 @@ private:
                     const auto pos_max = llama_memory_seq_pos_max(llama_get_memory(ctx_tgt), slot.id);
 
                     // create a checkpoint only if the batch starts exactly at a planned position
-                    bool do_checkpoint = std::binary_search(slot.checkpoint_pos.begin(), slot.checkpoint_pos.end(), n_tokens_start);
+                    bool do_checkpoint = checkpoint_at_start;
 
                     // nothing to checkpoint yet
                     do_checkpoint = do_checkpoint && pos_min >= 0;
