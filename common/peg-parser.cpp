@@ -633,9 +633,7 @@ struct parser_executor {
             }
             return common_peg_parse_result(COMMON_PEG_PARSE_RESULT_NEED_MORE_INPUT, start_pos);
         }
-        if (result.status == utf8_parse_result::INVALID) {
-            return common_peg_parse_result(COMMON_PEG_PARSE_RESULT_FAIL, start_pos);
-        }
+        // INVALID decodes as U+FFFD and is consumed permissively
         return common_peg_parse_result(COMMON_PEG_PARSE_RESULT_SUCCESS, start_pos, start_pos + result.bytes_consumed);
     }
 
@@ -673,15 +671,7 @@ struct parser_executor {
                 return common_peg_parse_result(COMMON_PEG_PARSE_RESULT_NEED_MORE_INPUT, start_pos, pos);
             }
 
-            if (result.status == utf8_parse_result::INVALID) {
-                // Malformed UTF-8 in input
-                if (match_count >= p.min_count) {
-                    // We have enough matches, succeed up to here
-                    return common_peg_parse_result(COMMON_PEG_PARSE_RESULT_SUCCESS, start_pos, pos);
-                }
-                // Not enough matches, fail
-                return common_peg_parse_result(COMMON_PEG_PARSE_RESULT_FAIL, start_pos);
-            }
+            // INVALID decodes as U+FFFD and is matched like any other codepoint
 
             // Check if this codepoint matches our character class
             bool matches = false;
@@ -781,10 +771,7 @@ struct parser_executor {
                     return common_peg_parse_result(COMMON_PEG_PARSE_RESULT_NEED_MORE_INPUT, start_pos, pos);
                 }
 
-                if (utf8_result.status == utf8_parse_result::INVALID) {
-                    return common_peg_parse_result(COMMON_PEG_PARSE_RESULT_FAIL, start_pos);
-                }
-
+                // INVALID decodes as U+FFFD and is consumed permissively
                 pos += utf8_result.bytes_consumed;
             }
         }
@@ -816,10 +803,7 @@ struct parser_executor {
                 return common_peg_parse_result(COMMON_PEG_PARSE_RESULT_NEED_MORE_INPUT, start_pos, last_valid_pos);
             }
 
-            if (utf8_result.status == utf8_parse_result::INVALID) {
-                // Malformed UTF-8
-                return common_peg_parse_result(COMMON_PEG_PARSE_RESULT_FAIL, start_pos);
-            }
+            // INVALID decodes as U+FFFD and is consumed permissively
 
             // Check if a delimiter starts at this position
             auto match = matcher.check_at(ctx.input, pos);

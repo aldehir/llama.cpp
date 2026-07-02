@@ -1,6 +1,7 @@
 #include "tests.h"
 
 #include "peg-parser.h"
+#include "unicode.h"
 
 #include <string>
 #include <sstream>
@@ -43,10 +44,10 @@ void test_unicode(testing &t) {
             {std::string("\xE4\xBD"), "", COMMON_PEG_PARSE_RESULT_NEED_MORE_INPUT},
             {std::string("\xF0\x9F\x9A"), "", COMMON_PEG_PARSE_RESULT_NEED_MORE_INPUT},
 
-            // Invalid/malformed UTF-8 sequences
-            {std::string("\xFF\xFE"), "", COMMON_PEG_PARSE_RESULT_FAIL},
-            {std::string("Hello\x80World"), "Hello", COMMON_PEG_PARSE_RESULT_FAIL},
-            {std::string("\xC3\x28"), "", COMMON_PEG_PARSE_RESULT_FAIL},
+            // Invalid/malformed UTF-8 sequences are consumed permissively
+            {std::string("\xFF\xFE"), std::string("\xFF\xFE"), COMMON_PEG_PARSE_RESULT_SUCCESS},
+            {std::string("Hello\x80World"), std::string("Hello\x80World"), COMMON_PEG_PARSE_RESULT_SUCCESS},
+            {std::string("\xC3\x28"), std::string("\xC3\x28"), COMMON_PEG_PARSE_RESULT_SUCCESS},
         };
 
         auto parser = build_peg_parser([](common_peg_parser_builder& p) {
@@ -274,14 +275,17 @@ void test_unicode(testing &t) {
 
         t.test("malformed UTF-8", [](testing &t) {
             std::vector<test_case> test_cases {
-                // Invalid UTF-8 bytes
-                {std::string("Hello\xFF\xFE"), "", COMMON_PEG_PARSE_RESULT_FAIL},
+                // Invalid UTF-8 bytes are consumed permissively
+                {std::string("Hello\xFF\xFE</tag>"), std::string("Hello\xFF\xFE"), COMMON_PEG_PARSE_RESULT_SUCCESS},
 
                 // Continuation byte without lead byte
-                {std::string("Hello\x80World"), "", COMMON_PEG_PARSE_RESULT_FAIL},
+                {std::string("Hello\x80World</tag>"), std::string("Hello\x80World"), COMMON_PEG_PARSE_RESULT_SUCCESS},
 
                 // Invalid continuation byte
-                {std::string("\xC3\x28"), "", COMMON_PEG_PARSE_RESULT_FAIL},
+                {std::string("\xC3\x28</tag>"), std::string("\xC3\x28"), COMMON_PEG_PARSE_RESULT_SUCCESS},
+
+                // No delimiter, consume everything
+                {std::string("Hello\xFF\xFE"), std::string("Hello\xFF\xFE"), COMMON_PEG_PARSE_RESULT_SUCCESS},
             };
 
             auto parser = build_peg_parser([](common_peg_parser_builder& p) {
@@ -297,6 +301,11 @@ void test_unicode(testing &t) {
                     auto result = parser.parse(ctx);
 
                     assert_result_equal(t, tc.expected_result, result.type);
+
+                    if (result.success()) {
+                        std::string matched = tc.input.substr(result.start, result.end - result.start);
+                        t.assert_equal(tc.expected_text, matched);
+                    }
                 });
             }
         });
@@ -382,14 +391,14 @@ void test_unicode(testing &t) {
 
         t.test("malformed UTF-8", [](testing &t) {
             std::vector<test_case> test_cases {
-                // Invalid UTF-8 bytes
-                {std::string("Hello\xFF\xFE"), "", COMMON_PEG_PARSE_RESULT_FAIL},
+                // Invalid UTF-8 bytes are consumed permissively
+                {std::string("Hello\xFF\xFE\""), std::string("Hello\xFF\xFE"), COMMON_PEG_PARSE_RESULT_SUCCESS},
 
                 // Continuation byte without lead byte
-                {std::string("Hello\x80World"), "", COMMON_PEG_PARSE_RESULT_FAIL},
+                {std::string("Hello\x80World\""), std::string("Hello\x80World"), COMMON_PEG_PARSE_RESULT_SUCCESS},
 
                 // Invalid continuation byte
-                {std::string("\xC3\x28"), "", COMMON_PEG_PARSE_RESULT_FAIL},
+                {std::string("\xC3\x28\""), std::string("\xC3\x28"), COMMON_PEG_PARSE_RESULT_SUCCESS},
             };
 
             for (size_t i = 0; i < test_cases.size(); i++) {
@@ -398,13 +407,18 @@ void test_unicode(testing &t) {
 
                 t.test(test_name, [&](testing &t) {
                     auto parser = build_peg_parser([](common_peg_parser_builder& p) {
-                        return p.string_content('"');
+                        return p.sequence({p.string_content('"'), p.literal("\"")});
                     });
 
                     common_peg_parse_context ctx(tc.input);
                     auto result = parser.parse(ctx);
 
                     assert_result_equal(t, tc.expected_result, result.type);
+
+                    if (result.success()) {
+                        std::string matched = tc.input.substr(result.start, result.end - result.start - 1);  // -1 to exclude closing quote
+                        t.assert_equal(tc.expected_text, matched);
+                    }
                 });
             }
         });
@@ -442,5 +456,47 @@ void test_unicode(testing &t) {
                 });
             }
         });
+    });
+
+    t.test("sanitize", [](testing &t) {
+        struct sanitize_case {
+            std::string input;
+            std::string expected;
+        };
+
+        const std::string rep = "\xEF\xBF\xBD"; // U+FFFD
+
+        std::vector<sanitize_case> test_cases {
+            // Valid input is returned unchanged
+            {"Hello", "Hello"},
+            {std::string("Caf\xC3\xA9"), std::string("Caf\xC3\xA9")},
+            {std::string("\xF0\x9F\x98\x80"), std::string("\xF0\x9F\x98\x80")},
+            {"", ""},
+
+            // Lone continuation bytes are each replaced
+            {std::string("Hello\x80World"), "Hello" + rep + "World"},
+            {std::string("\x80\x80"), rep + rep},
+
+            // Invalid lead bytes
+            {std::string("\xFF\xFE"), rep + rep},
+
+            // Maximal subpart: lead byte plus valid continuations replaced as one unit
+            {std::string("\xC3\x28"), rep + "("},
+            {std::string("\xE4\xBD\x28"), rep + "("},
+            {std::string("\xF0\x9F\x9A\x28"), rep + "("},
+
+            // Truncated sequence at end of input
+            {std::string("Caf\xC3"), "Caf" + rep},
+            {std::string("Hi\xF0\x9F\x9A"), "Hi" + rep},
+        };
+
+        for (size_t i = 0; i < test_cases.size(); i++) {
+            const auto & tc = test_cases[i];
+            std::string test_name = "case " + std::to_string(i) + ": " + hex_dump(tc.input);
+
+            t.test(test_name, [&](testing &t) {
+                t.assert_equal(hex_dump(tc.expected), hex_dump(common_utf8_sanitize(tc.input)));
+            });
+        }
     });
 }

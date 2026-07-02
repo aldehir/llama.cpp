@@ -3,6 +3,7 @@
 #include "chat-auto-parser.h"
 #include "ggml.h"
 #include "peg-parser.h"
+#include "unicode.h"
 
 #include <nlohmann/json.hpp>
 
@@ -67,8 +68,9 @@ static int json_brace_depth(const std::string & s) {
 }
 
 // JSON-escape a string and return the inner content (without surrounding quotes).
+// Invalid UTF-8 is replaced with U+FFFD, as dump() throws on it otherwise.
 static std::string escape_json_string_inner(const std::string & s) {
-    std::string escaped = ordered_json(s).dump();
+    std::string escaped = ordered_json(common_utf8_sanitize(s)).dump();
     if (escaped.size() >= 2 && escaped.front() == '"' && escaped.back() == '"') {
         return escaped.substr(1, escaped.size() - 2);
     }
@@ -187,7 +189,7 @@ static std::string normalize_quotes_to_json(const std::string & input) {
 void tag_based_peg_mapper::from_ast(const common_peg_ast_arena & arena, const common_peg_parse_result & result) {
     arena.visit(result, [this](const common_peg_ast_node & node) {
         if (!node.tag.empty()) {
-            tags[node.tag] = std::string(node.text);
+            tags[node.tag] = common_utf8_sanitize(node.text);
         }
     });
 }
@@ -280,13 +282,13 @@ void common_chat_peg_mapper::map(const common_peg_ast_node & node) {
     bool is_content   = node.tag == common_chat_peg_builder::CONTENT;
 
     if (is_reasoning) { // GPT OSS can have more than 1 reasoning block, so concatenate here
-        result.reasoning_content += std::string(node.text);
+        result.reasoning_content += common_utf8_sanitize(node.text);
     }
 
     if (is_content) {
         // Concatenate content from multiple content nodes (e.g., when reasoning markers
         // are preserved before content markers in reasoning_format=NONE mode)
-        result.content += std::string(node.text);
+        result.content += common_utf8_sanitize(node.text);
     }
 
     // Handle tool-related tags (supporting both JSON and tagged formats)
@@ -314,11 +316,11 @@ void common_chat_peg_mapper::map(const common_peg_ast_node & node) {
         if (text.size() >= 2 && text.front() == '"' && text.back() == '"') {
             text = text.substr(1, text.size() - 2);
         }
-        current_tool->id = std::string(text);
+        current_tool->id = common_utf8_sanitize(text);
     }
 
     if (is_tool_name && current_tool) {
-        current_tool->name = std::string(trim_trailing_space(node.text));
+        current_tool->name = common_utf8_sanitize(trim_trailing_space(node.text));
         // Now that we have the name, populate the arguments from the buffer
         if (!args_buffer.empty()) {
             current_tool->arguments = args_buffer;
@@ -339,7 +341,7 @@ void common_chat_peg_mapper::map(const common_peg_ast_node & node) {
         // For tagged format: built up from individual arg_name/arg_value nodes
         auto text = trim_trailing_space(node.text);
         if (!text.empty() && text.front() == '{') {
-            args_target() = std::string(text);
+            args_target() = common_utf8_sanitize(text);
         }
     }
 
@@ -352,7 +354,7 @@ void common_chat_peg_mapper::map(const common_peg_ast_node & node) {
         if (arg_count > 0) {
             arg_entry = ",";
         }
-        arg_entry += ordered_json(trim(node.text)).dump() + ":";
+        arg_entry += ordered_json(common_utf8_sanitize(trim(node.text))).dump() + ":";
         ++arg_count;
 
         auto & target = args_target();
@@ -363,7 +365,7 @@ void common_chat_peg_mapper::map(const common_peg_ast_node & node) {
     }
 
     if ((is_arg_value || is_arg_string_value) && current_tool) {
-        std::string value_content = std::string(node.text);
+        std::string value_content = common_utf8_sanitize(node.text);
 
         std::string value_to_add;
         if (value_content.empty() && is_arg_string_value) {
@@ -1022,12 +1024,12 @@ void common_chat_peg_gemma4_mapper::visit(const common_peg_ast_arena & arena, co
     const auto & node = arena.get(id);
 
     if (node.tag == "reasoning") {
-        result.reasoning_content += std::string(node.text);
+        result.reasoning_content += common_utf8_sanitize(node.text);
         return;
     }
 
     if (node.tag == "content") {
-        result.content += std::string(node.text);
+        result.content += common_utf8_sanitize(node.text);
         return;
     }
 

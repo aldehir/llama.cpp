@@ -8,7 +8,7 @@
 // UTF-8 parsing utilities for streaming-aware unicode support
 
 struct utf8_parse_result {
-    uint32_t codepoint;      // Decoded codepoint (only valid if status == SUCCESS)
+    uint32_t codepoint;      // Decoded codepoint (U+FFFD if status == INVALID)
     size_t bytes_consumed;   // How many bytes this codepoint uses (1-4)
     enum status { SUCCESS, INCOMPLETE, INVALID } status;
 
@@ -23,8 +23,13 @@ size_t common_utf8_sequence_length(unsigned char first_byte);
 // Check if a string ends with a complete UTF-8 sequence.
 bool common_utf8_is_complete(const std::string & s);
 
-// Parse a single UTF-8 codepoint from input
+// Parse a single UTF-8 codepoint from input.
+// On INVALID, codepoint is U+FFFD and bytes_consumed covers the maximal
+// invalid subpart (at least 1 byte), so callers may consume it permissively.
 utf8_parse_result common_parse_utf8_codepoint(std::string_view input, size_t offset);
+
+// Replace invalid UTF-8 sequences with U+FFFD (replacement character)
+std::string common_utf8_sanitize(std::string_view s);
 
 std::string common_unicode_cpts_to_utf8(const std::vector<uint32_t> & cps);
 std::string common_unicode_cpt_to_utf8(uint32_t cpt);

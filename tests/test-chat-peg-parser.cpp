@@ -21,6 +21,7 @@ static void test_example_qwen3_non_coder(testing & t);
 static void test_command7_parser_compare(testing & t);
 static void test_prefix_tool_names(testing & t);
 static void test_tagged_peg_parser(testing & t);
+static void test_invalid_utf8(testing & t);
 
 int main(int argc, char * argv[]) {
     testing t(std::cout);
@@ -39,6 +40,7 @@ int main(int argc, char * argv[]) {
     t.test("comparison", test_command7_parser_compare);
     t.test("prefix tool names", test_prefix_tool_names);
     t.test("tagged peg parser", test_tagged_peg_parser);
+    t.test("invalid utf8", test_invalid_utf8);
 
     return t.summary();
 }
@@ -979,5 +981,59 @@ static void test_tagged_peg_parser(testing & t) {
         t.assert_true("success", result.result.success());
         t.assert_equal("fun_pre should be '<function='", "<function=", result.tags["fun_pre"]);
         t.assert_equal("fun_post should be '>'", ">", result.tags["fun_post"]);
+    });
+}
+
+// Invalid UTF-8 in model output should parse permissively and extract as U+FFFD.
+static void test_invalid_utf8(testing & t) {
+    auto tools  = create_tools();
+    auto parser = build_chat_peg_parser([&](common_chat_peg_builder & p) {
+        auto tool_call = p.standard_json_tools("<tool_call>", "</tool_call>", tools, true, false);
+
+        return p.sequence({ p.content(p.until("<tool_call>")), p.optional(p.space() + tool_call), p.end() });
+    });
+
+    const std::string rep = "\xEF\xBF\xBD"; // U+FFFD
+
+    t.test("invalid bytes in content", [&](testing & t) {
+        std::string input = "The byte \x80 is invalid.";
+
+        common_peg_parse_context ctx(input);
+        auto                     result = parser.parse(ctx);
+
+        t.assert_true("success", result.success());
+
+        common_chat_msg msg;
+        auto            mapper = common_chat_peg_mapper(msg);
+        mapper.from_ast(ctx.ast, result);
+
+        t.assert_equal("content", "The byte " + rep + " is invalid.", msg.content);
+    });
+
+    t.test("invalid bytes in tool arguments", [&](testing & t) {
+        std::string input =
+            "Checking.\n"
+            "<tool_call>"
+            "{\"name\": \"get_current_weather\", \"arguments\": {\"location\": \"New \xC3\x28 York\", \"unit\": "
+            "\"celsius\"}}"
+            "</tool_call>";
+
+        common_peg_parse_context ctx(input);
+        auto                     result = parser.parse(ctx);
+
+        t.assert_true("success", result.success());
+
+        common_chat_msg msg;
+        auto            mapper = common_chat_peg_mapper(msg);
+        mapper.from_ast(ctx.ast, result);
+
+        t.assert_equal("tool calls count", 1u, msg.tool_calls.size());
+        if (!msg.tool_calls.empty()) {
+            t.assert_equal("tool name", "get_current_weather", msg.tool_calls[0].name);
+
+            // Arguments must be valid JSON with the invalid sequence replaced
+            auto args = json::parse(msg.tool_calls[0].arguments);
+            t.assert_equal("location", "New " + rep + "( York", args.at("location").get<std::string>());
+        }
     });
 }
