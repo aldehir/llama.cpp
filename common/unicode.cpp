@@ -95,21 +95,9 @@ bool common_utf8_is_complete(const std::string & s) {
 }
 
 std::string common_utf8_sanitize(std::string_view s) {
-    size_t offset = 0;
-    while (offset < s.size()) {
-        auto result = common_parse_utf8_codepoint(s, offset);
-        if (result.status != utf8_parse_result::SUCCESS) {
-            break;
-        }
-        offset += result.bytes_consumed;
-    }
-    if (offset == s.size()) {
-        return std::string(s);
-    }
-
     std::string out;
     out.reserve(s.size());
-    out.append(s.substr(0, offset));
+    size_t offset = 0;
     while (offset < s.size()) {
         auto result = common_parse_utf8_codepoint(s, offset);
         if (result.status == utf8_parse_result::SUCCESS) {
