@@ -3083,9 +3083,6 @@ private:
                 if (slot.state == SLOT_STATE_PROCESSING_PROMPT || slot.state == SLOT_STATE_STARTED) {
                     const auto & input_tokens = slot.task->tokens;
 
-                    // used to determine the number of tokens added to the batch for the current slot
-                    const auto n_tokens_prev = batch.size();
-
                     // TODO: maybe move branch to outside of this loop in the future
                     if (slot.state == SLOT_STATE_STARTED) {
                         slot.t_start_process_prompt = ggml_time_us();
@@ -3427,7 +3424,54 @@ private:
                             ctx_tgt_seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_RS ||
                             n_swa > 0);
 
-                    bool has_mtmd = false;
+                    const auto & spans = slot.task->params.message_spans;
+                    const auto last_user_pos = spans.last_user_message_pos();
+
+                    const int32_t n_cur = slot.prompt.n_tokens();
+
+                    // a checkpoint can be created only at the position where a prompt batch starts.
+                    // the same predicate is used to split the prompt batches below, which guarantees
+                    // that the batches are split only at positions that are actually checkpointed
+                    const auto is_checkpoint_pos = [&](const int32_t pos) {
+                        if (!do_checkpoint || pos < 1 || pos >= slot.task->n_tokens()) {
+                            return false;
+                        }
+
+                        // do not checkpoint at mtmd chunks
+                        if (input_tokens[pos] == LLAMA_TOKEN_NULL) {
+                            return false;
+                        }
+
+                        // checkpoint exactly before user messages and near the end of the prompt:
+                        //  - 4 + n_ubatch
+                        //  - 4
+                        // clamp to the current position if the cache already covers the tail
+                        // ref: https://github.com/ggml-org/llama.cpp/pull/20288
+                        bool eligible = spans.is_user_start(pos);
+
+                        for (const int32_t offset : {4 + n_ubatch, 4}) {
+                            eligible = eligible || pos == std::max(slot.task->n_tokens() - std::min(n_batch, offset), n_cur);
+                        }
+
+                        // no need to create checkpoints that are too close together, unless it's the last user message
+                        return eligible && (slot.prompt.checkpoints.empty() || pos == last_user_pos ||
+                                pos > slot.prompt.checkpoints.back().n_tokens + params_base.checkpoint_min_step);
+                    };
+
+                    // note: we create the checkpoint before calling llama_decode(), so the current batch is not
+                    //       yet processed and therefore it is not part of the checkpoint.
+                    if (is_checkpoint_pos(n_cur)) {
+                        const auto pos_min = llama_memory_seq_pos_min(llama_get_memory(ctx_tgt), slot.id);
+                        const auto pos_max = llama_memory_seq_pos_max(llama_get_memory(ctx_tgt), slot.id);
+
+                        SLT_DBG(slot, "creating checkpoint, pos_min = %d, pos_max = %d\n", pos_min, pos_max);
+
+                        // nothing to checkpoint yet
+                        // TODO: is this check needed?
+                        if (pos_min >= 0) {
+                            create_checkpoint(slot, 0, pos_min, pos_max);
+                        }
+                    }
 
                     // check if we should process the image
                     while (true) {
@@ -3456,12 +3500,7 @@ private:
                             const auto & chunk = input_tokens.find_chunk(cur_token_idx);
                             slot.prompt.tokens.push_back(chunk.get()); // copy
                         }
-
-                        has_mtmd = true;
                     }
-
-                    const auto & spans = slot.task->params.message_spans;
-                    const auto last_user_pos = spans.last_user_message_pos();
 
                     // add prompt tokens for processing in the current batch
                     while (slot.prompt.n_tokens() < slot.task->n_tokens() && batch.size() < n_batch) {
@@ -3490,42 +3529,12 @@ private:
 
                         slot.n_prompt_tokens_processed++;
 
-                        // stop the prompt batch exactly before a user message
-                        if (spans.is_user_start(slot.prompt.n_tokens())) {
+                        // split the prompt batch exactly at positions where a checkpoint will be
+                        // created, so that the next batch starts at the checkpoint position
+                        if (is_checkpoint_pos(slot.prompt.n_tokens())) {
                             break;
                         }
-
-                        // process the last few tokens of the prompt separately in order to allow for a checkpoint to be created.
-                        // create checkpoints that many tokens before the end of the prompt:
-                        //  - 4 + n_ubatch
-                        //  - 4
-                        // ref: https://github.com/ggml-org/llama.cpp/pull/20288
-                        if (do_checkpoint) {
-                            static const int checkpoint_offsets[] = {4 + n_ubatch, 4};
-
-                            bool should_break = false;
-                            for (int offset : checkpoint_offsets) {
-                                const int n_last = std::min(n_batch, offset);
-                                if (slot.task->n_tokens() == slot.prompt.n_tokens() + n_last) {
-                                    should_break = true;
-                                    break;
-                                }
-                            }
-                            if (should_break) {
-                                break;
-                            }
-                        }
                     }
-
-                    // the number of tokens added to the batch for the current slot
-                    const auto n_tokens_cur = batch.size() - n_tokens_prev;
-
-                    const auto n_tokens_start = slot.prompt.n_tokens() - n_tokens_cur;
-
-                    const bool near_prompt_end = slot.task->n_tokens() < slot.prompt.n_tokens() + n_ubatch;
-
-                    const bool is_user_start = spans.is_user_start(n_tokens_start);
-                    const bool is_last_user_message = n_tokens_start == last_user_pos;
 
                     // entire prompt has been processed
                     if (slot.prompt.n_tokens() == slot.task->n_tokens()) {
@@ -3540,34 +3549,6 @@ private:
                         slot.i_batch   = batch.size() - 1;
 
                         slot.init_sampler();
-                    } else {
-                        // skip ordinary mid-prompt checkpoints, unless the batch starts a user
-                        // message or we are near the end of the prompt
-                        if (!is_user_start && !near_prompt_end) {
-                            do_checkpoint = false;
-                        }
-                    }
-
-                    const auto pos_min = llama_memory_seq_pos_min(llama_get_memory(ctx_tgt), slot.id);
-                    const auto pos_max = llama_memory_seq_pos_max(llama_get_memory(ctx_tgt), slot.id);
-
-                    // nothing to checkpoint yet
-                    // TODO: is this check needed?
-                    if (do_checkpoint && pos_min < 0) {
-                        do_checkpoint = false;
-                    }
-
-                    // do not checkpoint after mtmd chunks
-                    do_checkpoint = do_checkpoint && !has_mtmd;
-
-                    // no need to create checkpoints that are too close together, unless it's the last user message
-                    do_checkpoint = do_checkpoint && (slot.prompt.checkpoints.empty() || is_last_user_message || n_tokens_start > slot.prompt.checkpoints.back().n_tokens + params_base.checkpoint_min_step);
-                    SLT_DBG(slot, "main/do_checkpoint = %s, pos_min = %d, pos_max = %d\n", do_checkpoint ? "yes" : "no", pos_min, pos_max);
-
-                    // note: we create the checkpoint before calling llama_decode(), so the current batch is not
-                    //       yet processed and therefore it is not part of the checkpoint.
-                    if (do_checkpoint) {
-                        create_checkpoint(slot, n_tokens_cur, pos_min, pos_max);
                     }
                 }
 
