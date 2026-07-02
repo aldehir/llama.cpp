@@ -3496,8 +3496,6 @@ private:
                     // a checkpoint is created before decoding the current batch if it starts at a planned position
                     const bool checkpoint_at_start = checkpoint_pos.count(slot.prompt.n_tokens()) != 0;
 
-                    bool has_mtmd = false;
-
                     // check if we should process the image
                     while (true) {
                         auto cur_token_idx = slot.prompt.n_tokens();
@@ -3525,8 +3523,6 @@ private:
                             const auto & chunk = input_tokens.find_chunk(cur_token_idx);
                             slot.prompt.tokens.push_back(chunk.get()); // copy
                         }
-
-                        has_mtmd = true;
                     }
 
                     // add prompt tokens for processing in the current batch
@@ -3589,9 +3585,6 @@ private:
 
                     // nothing to checkpoint yet
                     do_checkpoint = do_checkpoint && pos_min >= 0;
-
-                    // do not checkpoint after mtmd chunks
-                    do_checkpoint = do_checkpoint && !has_mtmd;
 
                     SLT_DBG(slot, "main/do_checkpoint = %s, pos_min = %d, pos_max = %d\n", do_checkpoint ? "yes" : "no", pos_min, pos_max);
 
