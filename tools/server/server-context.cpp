@@ -3431,12 +3431,12 @@ private:
                         const int32_t n_cur         = slot.prompt.n_tokens();
                         const int32_t last_user_pos = spans.last_user_message_pos();
 
-                        std::vector<int32_t> candidates;
+                        std::set<int32_t> candidates;
 
                         // checkpoint exactly before each user message
                         for (const auto & span : spans.spans) {
                             if (span.role == COMMON_CHAT_ROLE_USER) {
-                                candidates.push_back((int32_t) span.pos);
+                                candidates.insert((int32_t) span.pos);
                             }
                         }
 
@@ -3447,11 +3447,8 @@ private:
                         // checkpoint at the start of the current batch instead
                         // ref: https://github.com/ggml-org/llama.cpp/pull/20288
                         for (const int32_t offset : { 4 + n_ubatch, 4 }) {
-                            candidates.push_back(std::max(n_prompt - std::min(n_batch, offset), n_cur));
+                            candidates.insert(std::max(n_prompt - std::min(n_batch, offset), n_cur));
                         }
-
-                        std::sort(candidates.begin(), candidates.end());
-                        candidates.erase(std::unique(candidates.begin(), candidates.end()), candidates.end());
 
                         bool    has_last = !slot.prompt.checkpoints.empty();
                         int32_t last     = has_last ? (int32_t) slot.prompt.checkpoints.back().n_tokens : 0;
