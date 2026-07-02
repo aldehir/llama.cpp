@@ -3429,7 +3429,7 @@ private:
 
                     // determine ahead of time the positions at which context checkpoints will be created,
                     // so that the prompt batches are split only at positions where a checkpoint is actually created
-                    std::vector<int32_t> checkpoint_pos;
+                    std::set<int32_t> checkpoint_pos;
 
                     if (do_checkpoint) {
                         const auto & spans = slot.task->params.message_spans;
@@ -3478,7 +3478,7 @@ private:
                                 continue;
                             }
 
-                            checkpoint_pos.push_back(pos);
+                            checkpoint_pos.insert(pos);
 
                             has_last = true;
                             last     = pos;
@@ -3494,7 +3494,7 @@ private:
                     }
 
                     // a checkpoint is created before decoding the current batch if it starts at a planned position
-                    const bool checkpoint_at_start = !checkpoint_pos.empty() && checkpoint_pos.front() == slot.prompt.n_tokens();
+                    const bool checkpoint_at_start = checkpoint_pos.count(slot.prompt.n_tokens()) != 0;
 
                     bool has_mtmd = false;
 
@@ -3529,9 +3529,6 @@ private:
                         has_mtmd = true;
                     }
 
-                    // the next planned checkpoint position, advanced as the batch is filled
-                    auto it_ckpt = checkpoint_pos.cbegin();
-
                     // add prompt tokens for processing in the current batch
                     while (slot.prompt.n_tokens() < slot.task->n_tokens() && batch.size() < n_batch) {
                         // get next token to process
@@ -3561,10 +3558,7 @@ private:
 
                         // stop the prompt batch exactly at planned checkpoint positions, so that
                         // the next batch (and the checkpoint) starts there
-                        while (it_ckpt != checkpoint_pos.cend() && *it_ckpt < slot.prompt.n_tokens()) {
-                            ++it_ckpt;
-                        }
-                        if (it_ckpt != checkpoint_pos.cend() && *it_ckpt == slot.prompt.n_tokens()) {
+                        if (checkpoint_pos.count(slot.prompt.n_tokens()) != 0) {
                             break;
                         }
                     }
