@@ -16,10 +16,6 @@ size_t common_utf8_sequence_length(unsigned char first_byte) {
 
 // Invalid sequences decode as U+FFFD, consuming the maximal subpart
 // (lead byte plus any valid continuation bytes), per the WHATWG standard
-static utf8_parse_result utf8_invalid(size_t bytes) {
-    return utf8_parse_result(utf8_parse_result::INVALID, 0xfffd, bytes);
-}
-
 utf8_parse_result common_parse_utf8_codepoint(std::string_view input, size_t offset) {
     if (offset >= input.size()) {
         return utf8_parse_result(utf8_parse_result::INCOMPLETE);
@@ -32,7 +28,7 @@ utf8_parse_result common_parse_utf8_codepoint(std::string_view input, size_t off
 
     // Invalid: continuation byte as first byte
     if (!(input[offset] & 0x40)) {
-        return utf8_invalid(1);
+        return utf8_parse_result(utf8_parse_result::INVALID, 0xfffd, 1);
     }
 
     // 2-byte sequence
@@ -41,7 +37,7 @@ utf8_parse_result common_parse_utf8_codepoint(std::string_view input, size_t off
             return utf8_parse_result(utf8_parse_result::INCOMPLETE);
         }
         if ((input[offset + 1] & 0xc0) != 0x80) {
-            return utf8_invalid(1);
+            return utf8_parse_result(utf8_parse_result::INVALID, 0xfffd, 1);
         }
         auto result = ((input[offset] & 0x1f) << 6) | (input[offset + 1] & 0x3f);
         return utf8_parse_result(utf8_parse_result::SUCCESS, result, 2);
@@ -50,10 +46,10 @@ utf8_parse_result common_parse_utf8_codepoint(std::string_view input, size_t off
     // 3-byte sequence
     if (!(input[offset] & 0x10)) {
         if (offset + 1 < input.size() && (input[offset + 1] & 0xc0) != 0x80) {
-            return utf8_invalid(1);
+            return utf8_parse_result(utf8_parse_result::INVALID, 0xfffd, 1);
         }
         if (offset + 2 < input.size() && (input[offset + 2] & 0xc0) != 0x80) {
-            return utf8_invalid(2);
+            return utf8_parse_result(utf8_parse_result::INVALID, 0xfffd, 2);
         }
         if (offset + 2 >= input.size()) {
             return utf8_parse_result(utf8_parse_result::INCOMPLETE);
@@ -65,13 +61,13 @@ utf8_parse_result common_parse_utf8_codepoint(std::string_view input, size_t off
     // 4-byte sequence
     if (!(input[offset] & 0x08)) {
         if (offset + 1 < input.size() && (input[offset + 1] & 0xc0) != 0x80) {
-            return utf8_invalid(1);
+            return utf8_parse_result(utf8_parse_result::INVALID, 0xfffd, 1);
         }
         if (offset + 2 < input.size() && (input[offset + 2] & 0xc0) != 0x80) {
-            return utf8_invalid(2);
+            return utf8_parse_result(utf8_parse_result::INVALID, 0xfffd, 2);
         }
         if (offset + 3 < input.size() && (input[offset + 3] & 0xc0) != 0x80) {
-            return utf8_invalid(3);
+            return utf8_parse_result(utf8_parse_result::INVALID, 0xfffd, 3);
         }
         if (offset + 3 >= input.size()) {
             return utf8_parse_result(utf8_parse_result::INCOMPLETE);
@@ -81,7 +77,7 @@ utf8_parse_result common_parse_utf8_codepoint(std::string_view input, size_t off
     }
 
     // Invalid first byte
-    return utf8_invalid(1);
+    return utf8_parse_result(utf8_parse_result::INVALID, 0xfffd, 1);
 }
 
 bool common_utf8_is_complete(const std::string & s) {
