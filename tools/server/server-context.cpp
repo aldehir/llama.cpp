@@ -3412,19 +3412,26 @@ private:
                         alora_disabled_id = enabled_loras[0];
                     }
 
+                    bool do_checkpoint = params_base.n_ctx_checkpoints > 0;
+
+                    // make checkpoints only for completion tasks
+                    do_checkpoint = do_checkpoint && slot.task->type == SERVER_TASK_TYPE_COMPLETION;
+
+                    // make a checkpoint of the parts of the memory that cannot be rolled back.
+                    // checkpoints are created only if:
+                    // - the model does not support partial sequence removal
+                    // - the model uses SWA (and we are not using `swa_full`)
+                    // - the model supports partial sequence removal but only up to a fixed bound
+                    do_checkpoint = do_checkpoint && (
+                            ctx_tgt_seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_FULL ||
+                            ctx_tgt_seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_RS ||
+                            n_swa > 0);
+
                     // determine ahead of time the positions at which context checkpoints will be created,
                     // so that the prompt batches are split only at positions where a checkpoint is actually created
                     std::vector<int32_t> checkpoint_pos;
 
-                    // make checkpoints only for completion tasks and only if:
-                    // - the model does not support partial sequence removal
-                    // - the model uses SWA (and we are not using `swa_full`)
-                    // - the model supports partial sequence removal but only up to a fixed bound
-                    if (params_base.n_ctx_checkpoints > 0 &&
-                        slot.task->type == SERVER_TASK_TYPE_COMPLETION &&
-                        (ctx_tgt_seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_FULL ||
-                         ctx_tgt_seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_RS ||
-                         n_swa > 0)) {
+                    if (do_checkpoint) {
                         const auto & spans = slot.task->params.message_spans;
 
                         const int32_t n_prompt      = slot.task->n_tokens();
@@ -3584,7 +3591,7 @@ private:
                     const auto pos_max = llama_memory_seq_pos_max(llama_get_memory(ctx_tgt), slot.id);
 
                     // create a checkpoint only if the batch starts exactly at a planned position
-                    bool do_checkpoint = checkpoint_at_start;
+                    do_checkpoint = do_checkpoint && checkpoint_at_start;
 
                     // nothing to checkpoint yet
                     do_checkpoint = do_checkpoint && pos_min >= 0;
