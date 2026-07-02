@@ -115,6 +115,10 @@ std::vector<enum common_sampler_type> common_sampler_types_from_chars(const std:
 llama_sampler * llama_sampler_init_llg(const llama_vocab * vocab,
                 const char * grammar_kind, const char * grammar_data);
 
+// mask tokens that would extend the generated text with invalid UTF-8 byte sequences
+// pieces[i] is the text of token i
+struct llama_sampler * common_sampler_init_utf8_validate(const std::vector<std::string> & pieces);
+
 struct common_sampler_deleter {
     void operator()(common_sampler * s) { common_sampler_free(s); }
 };

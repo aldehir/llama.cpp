@@ -8,6 +8,7 @@
 #include "ggml.h"
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <climits>
 #include <cmath>
@@ -167,6 +168,128 @@ struct common_sampler {
 
     mutable int64_t t_total_us = 0;
 };
+
+// UTF-8 validation sampler
+//
+// Masks tokens that would extend the generated text with invalid UTF-8, using the
+// same structural validation as common_parse_utf8_codepoint. The only state needed
+// is the number of continuation bytes still expected (0-3).
+
+// returns the resulting state after consuming the piece, or -1 if invalid
+static int8_t utf8_state_advance(int8_t state, const std::string & piece) {
+    for (const char b : piece) {
+        const auto c = (unsigned char) b;
+        if (state > 0) {
+            if ((c & 0xc0) != 0x80) {
+                return -1;
+            }
+            state--;
+        } else if ((c & 0x80) == 0x00) {
+            // ascii, state stays 0
+        } else if ((c & 0xe0) == 0xc0) {
+            state = 1;
+        } else if ((c & 0xf0) == 0xe0) {
+            state = 2;
+        } else if ((c & 0xf8) == 0xf0) {
+            state = 3;
+        } else {
+            // stray continuation byte or invalid lead byte (0xf8-0xff)
+            return -1;
+        }
+    }
+    return state;
+}
+
+struct utf8_validate_ctx {
+    // per token: resulting state for each in-state, -1 if the token is invalid from that state
+    std::vector<std::array<int8_t, 4>> trans;
+
+    int8_t state;
+};
+
+static const char * utf8_validate_name(const struct llama_sampler * /*smpl*/) {
+    return "utf8-validate";
+}
+
+static void utf8_validate_accept(struct llama_sampler * smpl, llama_token token) {
+    auto * ctx = (utf8_validate_ctx *) smpl->ctx;
+
+    if (token < 0 || (size_t) token >= ctx->trans.size()) {
+        return;
+    }
+
+    int8_t next = ctx->trans[token][ctx->state];
+    if (next < 0) {
+        // tokens that did not go through apply (e.g. prompt or forced tokens) may not
+        // fit the current state; restart tracking from the token itself
+        next = std::max<int8_t>(ctx->trans[token][0], 0);
+    }
+    ctx->state = next;
+}
+
+static void utf8_validate_apply(struct llama_sampler * smpl, llama_token_data_array * cur_p) {
+    auto * ctx = (utf8_validate_ctx *) smpl->ctx;
+
+    for (size_t i = 0; i < cur_p->size; i++) {
+        const llama_token id = cur_p->data[i].id;
+        if (id >= 0 && (size_t) id < ctx->trans.size() && ctx->trans[id][ctx->state] < 0) {
+            cur_p->data[i].logit = -INFINITY;
+        }
+    }
+}
+
+static void utf8_validate_reset(struct llama_sampler * smpl) {
+    ((utf8_validate_ctx *) smpl->ctx)->state = 0;
+}
+
+static struct llama_sampler * utf8_validate_clone(const struct llama_sampler * smpl);
+
+static void utf8_validate_free(struct llama_sampler * smpl) {
+    delete (utf8_validate_ctx *) smpl->ctx;
+}
+
+static struct llama_sampler_i utf8_validate_i = {
+    /* .name              = */ utf8_validate_name,
+    /* .accept            = */ utf8_validate_accept,
+    /* .apply             = */ utf8_validate_apply,
+    /* .reset             = */ utf8_validate_reset,
+    /* .clone             = */ utf8_validate_clone,
+    /* .free              = */ utf8_validate_free,
+    /* .backend_init      = */ nullptr,
+    /* .backend_accept    = */ nullptr,
+    /* .backend_apply     = */ nullptr,
+    /* .backend_set_input = */ nullptr,
+};
+
+static struct llama_sampler * utf8_validate_clone(const struct llama_sampler * smpl) {
+    return llama_sampler_init(&utf8_validate_i, new utf8_validate_ctx(*(const utf8_validate_ctx *) smpl->ctx));
+}
+
+struct llama_sampler * common_sampler_init_utf8_validate(const std::vector<std::string> & pieces) {
+    auto * ctx = new utf8_validate_ctx();
+    ctx->state = 0;
+
+    ctx->trans.resize(pieces.size());
+    for (size_t id = 0; id < pieces.size(); id++) {
+        for (int8_t s = 0; s < 4; s++) {
+            ctx->trans[id][s] = utf8_state_advance(s, pieces[id]);
+        }
+    }
+
+    return llama_sampler_init(&utf8_validate_i, ctx);
+}
+
+static struct llama_sampler * utf8_validate_init(const struct llama_vocab * vocab) {
+    const int32_t n_vocab = llama_vocab_n_tokens(vocab);
+
+    std::vector<std::string> pieces(n_vocab);
+    for (llama_token id = 0; id < n_vocab; id++) {
+        // control tokens render as empty pieces, keeping them valid from any state
+        pieces[id] = common_token_to_piece(vocab, id, false);
+    }
+
+    return common_sampler_init_utf8_validate(pieces);
+}
 
 std::string common_params_sampling::print() const {
     char result[1024];
@@ -385,10 +508,6 @@ struct common_sampler * common_sampler_init(const struct llama_model * model, st
         GGML_ASSERT(false && "unknown mirostat version");
     }
 
-    for (auto * smpl : samplers) {
-        llama_sampler_chain_add(chain, smpl);
-    }
-
     if (grmr && params.backend_sampling) {
         LOG_WRN("%s: backend sampling is not compatible with grammar, disabling\n", __func__);
 
@@ -399,6 +518,15 @@ struct common_sampler * common_sampler_init(const struct llama_model * model, st
         LOG_WRN("%s: backend sampling is not compatible with reasoning budget, disabling\n", __func__);
 
         params.backend_sampling = false;
+    }
+
+    // runs on the CPU, so it cannot be used together with backend sampling
+    if (!params.backend_sampling) {
+        llama_sampler_chain_add(chain, utf8_validate_init(vocab));
+    }
+
+    for (auto * smpl : samplers) {
+        llama_sampler_chain_add(chain, smpl);
     }
 
     auto * result = new common_sampler {
