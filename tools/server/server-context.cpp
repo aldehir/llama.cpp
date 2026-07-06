@@ -3463,6 +3463,13 @@ private:
                     const auto & spans = slot.task->params.message_spans;
                     const auto last_user_pos = spans.last_user_message_pos();
 
+                    // the last user break: the last checkpoint, or the batch start if it is a user message
+                    int64_t last_break_pos = slot.prompt.checkpoints.empty() ? -1 : slot.prompt.checkpoints.back().n_tokens;
+
+                    if (slot.prompt.n_tokens() > 0 && spans.is_user_start(slot.prompt.n_tokens())) {
+                        last_break_pos = std::max(last_break_pos, (int64_t) slot.prompt.n_tokens());
+                    }
+
                     // add prompt tokens for processing in the current batch
                     while (slot.prompt.n_tokens() < slot.task->n_tokens() && batch.size() < n_batch) {
                         // get next token to process
@@ -3490,9 +3497,13 @@ private:
 
                         slot.n_prompt_tokens_processed++;
 
-                        // stop the prompt batch exactly before a user message
-                        if (spans.is_user_start(slot.prompt.n_tokens())) {
-                            break;
+                        // break at the last user message, or at user messages at least min step past the last break
+                        if (do_checkpoint && spans.is_user_start(slot.prompt.n_tokens())) {
+                            const auto pos = slot.prompt.n_tokens();
+
+                            if (pos == last_user_pos || last_break_pos < 0 || pos > last_break_pos + params_base.checkpoint_min_step) {
+                                break;
+                            }
                         }
 
                         // process the last few tokens of the prompt separately in order to allow for a checkpoint to be created.
