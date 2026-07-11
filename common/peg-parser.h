@@ -143,10 +143,19 @@ struct common_peg_parse_result {
 };
 
 enum common_peg_parse_flags {
-    COMMON_PEG_PARSE_FLAG_NONE    = 0,
-    COMMON_PEG_PARSE_FLAG_LENIENT = 1 << 0,
-    COMMON_PEG_PARSE_FLAG_DEBUG   = 1 << 1,
+    COMMON_PEG_PARSE_FLAG_NONE          = 0,
+    COMMON_PEG_PARSE_FLAG_LENIENT       = 1 << 0,
+    COMMON_PEG_PARSE_FLAG_DEBUG         = 1 << 1,
+    COMMON_PEG_PARSE_FLAG_MARKED_TOKENS = 1 << 2,
 };
+
+// Sentinel byte used to mark special tokens in generated text. It never
+// occurs in valid UTF-8, so marked tokens cannot collide with ordinary text.
+constexpr char COMMON_PEG_TOKEN_MARKER = '\xff';
+
+// Wrap every occurrence of any of the given token strings in
+// COMMON_PEG_TOKEN_MARKER bytes (longest match first, left to right).
+std::string common_peg_mark_tokens(const std::string & text, const std::set<std::string> & tokens);
 
 inline common_peg_parse_flags operator|(common_peg_parse_flags a, common_peg_parse_flags b) {
     return static_cast<common_peg_parse_flags>(int(a) | int(b));
@@ -169,6 +178,10 @@ struct common_peg_parse_context {
     common_peg_parse_flags flags;
     common_peg_ast_arena ast;
 
+    // Token strings that appear in the input wrapped in COMMON_PEG_TOKEN_MARKER
+    // bytes. Only consulted when COMMON_PEG_PARSE_FLAG_MARKED_TOKENS is set.
+    std::set<std::string> marked_tokens;
+
     int parse_depth;
 
     common_peg_parse_context(common_peg_parse_flags flags = COMMON_PEG_PARSE_FLAG_NONE)
@@ -179,6 +192,7 @@ struct common_peg_parse_context {
 
     bool is_lenient() const { return flags & COMMON_PEG_PARSE_FLAG_LENIENT; }
     bool is_debug() const { return flags & COMMON_PEG_PARSE_FLAG_DEBUG; }
+    bool is_marked_tokens() const { return flags & COMMON_PEG_PARSE_FLAG_MARKED_TOKENS; }
 };
 
 class common_peg_arena;
@@ -192,6 +206,13 @@ struct common_peg_end_parser {};
 
 struct common_peg_literal_parser {
     std::string literal;
+};
+
+// Matches a special token's text. In marked-token mode the text matches only
+// in its COMMON_PEG_TOKEN_MARKER-wrapped form; otherwise it behaves exactly
+// like common_peg_literal_parser.
+struct common_peg_token_parser {
+    std::string text;
 };
 
 struct common_peg_sequence_parser {
@@ -286,6 +307,7 @@ using common_peg_parser_variant = std::variant<
     common_peg_start_parser,
     common_peg_end_parser,
     common_peg_literal_parser,
+    common_peg_token_parser,
     common_peg_sequence_parser,
     common_peg_choice_parser,
     common_peg_repetition_parser,
@@ -325,6 +347,9 @@ class common_peg_arena {
 
     common_peg_parse_result parse(common_peg_parse_context & ctx, size_t start = 0) const;
     common_peg_parse_result parse(common_peg_parser_id id, common_peg_parse_context & ctx, size_t start) const;
+
+    // Collect the texts of all token() parsers in the grammar.
+    std::set<std::string> collect_tokens() const;
 
     void resolve_refs();
 
@@ -373,6 +398,11 @@ class common_peg_parser_builder {
     // Matches an exact literal string.
     //   S -> "hello"
     common_peg_parser literal(const std::string & literal) { return add(common_peg_literal_parser{literal}); }
+
+    // Matches a special token's text. In marked-token mode, tokens listed in
+    // the parse context match only in their 0xff-wrapped form; otherwise this
+    // behaves exactly like literal().
+    common_peg_parser token(const std::string & text) { return add(common_peg_token_parser{text}); }
 
     // Matches a sequence of parsers in order, all must succeed.
     //   S -> A B C
@@ -428,6 +458,8 @@ class common_peg_parser_builder {
     common_peg_parser space() { return add(common_peg_space_parser{}); }
 
     // Matches all characters until a delimiter is found (delimiter not consumed).
+    // In marked-token mode, marked token strings inside a delimiter only match
+    // in their 0xff-wrapped form (see token()).
     //   S -> (!delim .)*
     common_peg_parser until(const std::string & delimiter) { return add(common_peg_until_parser{{delimiter}}); }
 

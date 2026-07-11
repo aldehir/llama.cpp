@@ -21,6 +21,7 @@ static void test_example_qwen3_non_coder(testing & t);
 static void test_command7_parser_compare(testing & t);
 static void test_prefix_tool_names(testing & t);
 static void test_tagged_peg_parser(testing & t);
+static void test_marked_tokens(testing & t);
 
 int main(int argc, char * argv[]) {
     testing t(std::cout);
@@ -39,6 +40,7 @@ int main(int argc, char * argv[]) {
     t.test("comparison", test_command7_parser_compare);
     t.test("prefix tool names", test_prefix_tool_names);
     t.test("tagged peg parser", test_tagged_peg_parser);
+    t.test("marked tokens", test_marked_tokens);
 
     return t.summary();
 }
@@ -979,5 +981,173 @@ static void test_tagged_peg_parser(testing & t) {
         t.assert_true("success", result.result.success());
         t.assert_equal("fun_pre should be '<function='", "<function=", result.tags["fun_pre"]);
         t.assert_equal("fun_post should be '>'", ">", result.tags["fun_post"]);
+    });
+}
+
+static void test_marked_tokens(testing & t) {
+    const std::string MARK(1, COMMON_PEG_TOKEN_MARKER);
+    auto marked = [&](const std::string & s) { return MARK + s + MARK; };
+
+    t.test("mark tokens helper", [&](testing & t) {
+        std::set<std::string> tokens = { "<think>", "</think>" };
+
+        t.assert_equal("wraps occurrences", marked("<think>") + "hi" + marked("</think>"),
+                       common_peg_mark_tokens("<think>hi</think>", tokens));
+        t.assert_equal("adjacent tokens", marked("<think>") + marked("</think>"),
+                       common_peg_mark_tokens("<think></think>", tokens));
+        t.assert_equal("no-op without matches", "hello", common_peg_mark_tokens("hello", tokens));
+        t.assert_equal("no-op with empty set", "<think>", common_peg_mark_tokens("<think>", {}));
+        t.assert_equal("longest match first", marked("<|end|>text"),
+                       common_peg_mark_tokens("<|end|>text", { "<|end|>", "<|end|>text" }));
+    });
+
+    auto parse = [](const common_peg_arena & arena, const std::string & input, bool marked_mode,
+                    const std::set<std::string> & tokens = { "<think>", "</think>" }) {
+        common_peg_parse_flags flags = COMMON_PEG_PARSE_FLAG_LENIENT;
+        if (marked_mode) {
+            flags |= COMMON_PEG_PARSE_FLAG_MARKED_TOKENS;
+        }
+        common_peg_parse_context ctx(input, flags);
+        if (marked_mode) {
+            ctx.marked_tokens = tokens;
+        }
+        return arena.parse(ctx);
+    };
+
+    t.test("token matching", [&](testing & t) {
+        auto arena = build_peg_parser([](common_peg_parser_builder & p) {
+            return p.token("</think>") + p.end();
+        });
+
+        t.assert_true("bare mode matches bare text", parse(arena, "</think>", false).success());
+        t.assert_true("bare mode rejects marked text", !parse(arena, marked("</think>"), false).success());
+        t.assert_true("marked mode matches marked text", parse(arena, marked("</think>"), true).success());
+        t.assert_true("marked mode rejects bare text", !parse(arena, "</think>", true).success());
+        t.assert_true("marked mode matches bare text when not in set",
+                      parse(arena, "</think>", true, { "<think>" }).success());
+
+        t.assert_true("partial marked token needs more input", parse(arena, MARK + "</thi", true).need_more_input());
+        t.assert_true("lone marker needs more input", parse(arena, MARK, true).need_more_input());
+        t.assert_true("mismatch after marker fails", parse(arena, MARK + "X", true).fail());
+    });
+
+    t.test("until with marked delimiters", [&](testing & t) {
+        auto arena = build_peg_parser([](common_peg_parser_builder & p) {
+            return p.token("<think>") + p.tag("reasoning", p.until("</think>")) + p.token("</think>") +
+                   p.tag("body", p.rest()) + p.end();
+        });
+
+        auto extract = [&](const common_peg_parse_result & result, common_peg_parse_context & ctx) {
+            std::map<std::string, std::string> tags;
+            ctx.ast.visit(result, [&](const common_peg_ast_node & node) {
+                if (!node.tag.empty()) {
+                    tags[node.tag] = std::string(node.text);
+                }
+            });
+            return tags;
+        };
+
+        {
+            // The headline case: bare marker text inside reasoning stays reasoning
+            std::string input = marked("<think>") + "a bare </think> is just text" + marked("</think>") + "after";
+            common_peg_parse_context ctx(input, COMMON_PEG_PARSE_FLAG_LENIENT | COMMON_PEG_PARSE_FLAG_MARKED_TOKENS);
+            ctx.marked_tokens = { "<think>", "</think>" };
+            auto result = arena.parse(ctx);
+            t.assert_true("does not fail", !result.fail());
+            auto tags = extract(result, ctx);
+            t.assert_equal("bare marker text stays in reasoning", "a bare </think> is just text", tags["reasoning"]);
+            t.assert_equal("body after marked end", "after", tags["body"]);
+        }
+
+        {
+            // A wrapped token that is not a delimiter is consumed as content
+            std::string input = marked("<think>") + "x " + marked("<tool>") + " y" + marked("</think>") + "after";
+            common_peg_parse_context ctx(input, COMMON_PEG_PARSE_FLAG_LENIENT | COMMON_PEG_PARSE_FLAG_MARKED_TOKENS);
+            ctx.marked_tokens = { "<think>", "</think>" };
+            auto result = arena.parse(ctx);
+            t.assert_true("does not fail", !result.fail());
+            auto tags = extract(result, ctx);
+            t.assert_equal("unexpected marked token kept in reasoning", "x " + marked("<tool>") + " y", tags["reasoning"]);
+        }
+
+        {
+            // A stray marker byte is consumed as content
+            std::string input = marked("<think>") + "he" + MARK + "llo" + marked("</think>") + "after";
+            common_peg_parse_context ctx(input, COMMON_PEG_PARSE_FLAG_LENIENT | COMMON_PEG_PARSE_FLAG_MARKED_TOKENS);
+            ctx.marked_tokens = { "<think>", "</think>" };
+            auto result = arena.parse(ctx);
+            t.assert_true("does not fail", !result.fail());
+            auto tags = extract(result, ctx);
+            t.assert_equal("stray marker byte kept in reasoning", "he" + MARK + "llo", tags["reasoning"]);
+        }
+
+        {
+            // Partial marked delimiter at end of input
+            std::string input = marked("<think>") + "partial " + MARK + "</thi";
+            t.assert_true("partial marked delimiter needs more input", parse(arena, input, true).need_more_input());
+        }
+
+        // Bare mode is unchanged
+        t.assert_true("bare mode still parses", !parse(arena, "<think>abc</think>after", false).fail());
+    });
+
+    t.test("fused literal", [&](testing & t) {
+        // Literals fusing a token with plain text match the wrapped token in marked mode
+        auto arena = build_peg_parser([](common_peg_parser_builder & p) {
+            return p.literal("<|channel|>analysis") + p.end();
+        });
+
+        t.assert_true("bare mode", parse(arena, "<|channel|>analysis", false).success());
+        t.assert_true("marked mode", parse(arena, marked("<|channel|>") + "analysis", true, { "<|channel|>" }).success());
+        t.assert_true("marked mode rejects bare", !parse(arena, "<|channel|>analysis", true, { "<|channel|>" }).success());
+    });
+
+    t.test("serialization round trip", [&](testing & t) {
+        auto arena = build_peg_parser([](common_peg_parser_builder & p) {
+            return p.token("<think>") + p.until("</think>") + p.token("</think>");
+        });
+
+        auto data = arena.save();
+        t.assert_true("no marker bytes in serialized arena", data.find(COMMON_PEG_TOKEN_MARKER) == std::string::npos);
+
+        common_peg_arena loaded;
+        loaded.load(data);
+        t.assert_equal("collect_tokens preserved", 2u, loaded.collect_tokens().size());
+        t.assert_true("marked parse after load",
+                      parse(loaded, marked("<think>") + "abc" + marked("</think>"), true).success());
+    });
+
+    t.test("chat parse with marked tokens", [&](testing & t) {
+        auto arena = build_chat_peg_parser([](common_chat_peg_builder & p) {
+            return p.token("<think>") + p.reasoning(p.until("</think>")) + p.token("</think>") +
+                   p.content(p.rest()) + p.end();
+        });
+
+        common_chat_parser_params params;
+        params.marked_tokens = { "<think>", "</think>" };
+
+        {
+            std::string input = marked("<think>") + "user pasted </think> here" + marked("</think>") + "hello";
+            auto msg = common_chat_peg_parse(arena, input, false, params);
+            t.assert_equal("reasoning keeps bare marker text", "user pasted </think> here", msg.reasoning_content);
+            t.assert_equal("content", "hello", msg.content);
+        }
+
+        {
+            // Marker bytes are scrubbed from mapped fields
+            std::string input = marked("<think>") + "a " + marked("<tool>") + " b" + marked("</think>") + "c" + MARK + "d";
+            auto msg = common_chat_peg_parse(arena, input, false, params);
+            t.assert_equal("markers scrubbed from reasoning", "a <tool> b", msg.reasoning_content);
+            t.assert_equal("markers scrubbed from content", "cd", msg.content);
+        }
+
+        {
+            // The generation prompt is marked before parsing
+            common_chat_parser_params prefill = params;
+            prefill.generation_prompt = "<think>";
+            auto msg = common_chat_peg_parse(arena, "still thinking" + marked("</think>") + "done", false, prefill);
+            t.assert_equal("prefilled reasoning", "still thinking", msg.reasoning_content);
+            t.assert_equal("content after prefill", "done", msg.content);
+        }
     });
 }
