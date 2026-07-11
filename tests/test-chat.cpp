@@ -988,6 +988,10 @@ struct peg_test_case {
     common_chat_msg              expect;
     bool                         is_partial            = false;
     bool                         expect_reconstruction = false;
+    // Also run the test with the grammar's token() strings marked in the input,
+    // mirroring how the server wraps preserved special tokens. Disable for cases
+    // where marker strings intentionally appear as plain text.
+    bool                         test_marked_tokens    = true;
 };
 
 struct make_peg_parser {
@@ -1006,6 +1010,13 @@ struct make_peg_parser {
     common_chat_msg parse(const std::string & msg, bool is_partial) const {
         common_chat_parser_params parser_params(params_);
         parser_params.debug = detailed_debug_;
+        return common_chat_peg_parse(arena_, msg, is_partial, parser_params);
+    }
+
+    common_chat_msg parse_marked(const std::string & msg, bool is_partial, const std::set<std::string> & marked_tokens) const {
+        common_chat_parser_params parser_params(params_);
+        parser_params.debug         = detailed_debug_;
+        parser_params.marked_tokens = marked_tokens;
         return common_chat_peg_parse(arena_, msg, is_partial, parser_params);
     }
 };
@@ -1031,6 +1042,10 @@ static void test_peg_parser(common_chat_templates *                      tmpls,
             unsigned char c = s[i];
             if ((c & 0x80) == 0) {
                 return len;
+            }
+            if (c == 0xFF) {
+                // token marker byte, always a complete unit
+                return i + 1;
             }
             if ((c & 0xC0) == 0xC0) {
                 size_t expected_len = 0;
@@ -1067,56 +1082,93 @@ static void test_peg_parser(common_chat_templates *                      tmpls,
         LOG_DBG("Generation prompt: '%s'\n", parser.params_.generation_prompt.c_str());
     }
 
-    common_chat_msg msg_accum;
-    common_chat_msg msg_prev;
-    msg_accum.role = msg_prev.role = "assistant";
+    auto run_streaming = [&](const std::string & input, const std::function<common_chat_msg(const std::string &, bool)> & parse_fn) {
+        common_chat_msg msg_accum;
+        common_chat_msg msg_prev;
+        msg_accum.role = msg_prev.role = "assistant";
 
-    for (size_t i = 1; i <= tc.input.size(); ++i) {
-        auto            is_partial  = i < tc.input.size() || tc.is_partial;
-        // Use UTF-8 safe truncation to avoid corrupting multi-byte characters
-        size_t          safe_len    = utf8_truncate_safe_len(std::string_view(tc.input).substr(0, i));
-        std::string     prefix      = tc.input.substr(0, safe_len);
-        common_chat_msg msg_current = parser.parse(prefix, is_partial);
+        for (size_t i = 1; i <= input.size(); ++i) {
+            auto            is_partial  = i < input.size() || tc.is_partial;
+            // Use UTF-8 safe truncation to avoid corrupting multi-byte characters
+            size_t          safe_len    = utf8_truncate_safe_len(std::string_view(input).substr(0, i));
+            std::string     prefix      = input.substr(0, safe_len);
+            common_chat_msg msg_current = parse_fn(prefix, is_partial);
 
-        for (const auto & diff : common_chat_msg_diff::compute_diffs(msg_prev, msg_current)) {
-            if (!diff.reasoning_content_delta.empty()) {
-                msg_accum.reasoning_content += diff.reasoning_content_delta;
+            for (const auto & diff : common_chat_msg_diff::compute_diffs(msg_prev, msg_current)) {
+                if (!diff.reasoning_content_delta.empty()) {
+                    msg_accum.reasoning_content += diff.reasoning_content_delta;
+                }
+                if (!diff.content_delta.empty()) {
+                    msg_accum.content += diff.content_delta;
+                }
+                if (diff.tool_call_index != std::string::npos) {
+                    // During partial parsing, a new tool call may appear with empty name initially
+                    // The name gets filled in as more input is parsed
+                    while (msg_accum.tool_calls.size() <= diff.tool_call_index) {
+                        msg_accum.tool_calls.push_back({ "", "", "" });
+                    }
+                    // Always update name and id from diff (may change during incremental parsing), but only if the delta
+                    // actually contains them
+                    if (!diff.tool_call_delta.name.empty()) {
+                        msg_accum.tool_calls[diff.tool_call_index].name = diff.tool_call_delta.name;
+                    }
+                    if (!diff.tool_call_delta.id.empty()) {
+                        msg_accum.tool_calls[diff.tool_call_index].id = diff.tool_call_delta.id;
+                    }
+                    if (!diff.tool_call_delta.arguments.empty()) {
+                        msg_accum.tool_calls[diff.tool_call_index].arguments += diff.tool_call_delta.arguments;
+                    }
+                }
             }
-            if (!diff.content_delta.empty()) {
-                msg_accum.content += diff.content_delta;
+            try {
+                assert_msg_equals(msg_current, msg_accum, true);
+            } catch (std::exception & e) {
+                throw std::runtime_error((std::string("Error comparing accumulated message to current: ") + e.what()).c_str());
             }
-            if (diff.tool_call_index != std::string::npos) {
-                // During partial parsing, a new tool call may appear with empty name initially
-                // The name gets filled in as more input is parsed
-                while (msg_accum.tool_calls.size() <= diff.tool_call_index) {
-                    msg_accum.tool_calls.push_back({ "", "", "" });
-                }
-                // Always update name and id from diff (may change during incremental parsing), but only if the delta
-                // actually contains them
-                if (!diff.tool_call_delta.name.empty()) {
-                    msg_accum.tool_calls[diff.tool_call_index].name = diff.tool_call_delta.name;
-                }
-                if (!diff.tool_call_delta.id.empty()) {
-                    msg_accum.tool_calls[diff.tool_call_index].id = diff.tool_call_delta.id;
-                }
-                if (!diff.tool_call_delta.arguments.empty()) {
-                    msg_accum.tool_calls[diff.tool_call_index].arguments += diff.tool_call_delta.arguments;
-                }
-            }
+
+            msg_prev = msg_current;
         }
-        try {
-            assert_msg_equals(msg_current, msg_accum, true);
-        } catch (std::exception & e) {
-            throw std::runtime_error((std::string("Error comparing accumulated message to current: ") + e.what()).c_str());
-        }
 
-        msg_prev = msg_current;
-    }
+        return msg_accum;
+    };
+
+    auto msg_accum = run_streaming(tc.input, [&](const std::string & prefix, bool is_partial) {
+        return parser.parse(prefix, is_partial);
+    });
 
     if (!tc.is_partial) {
         assert_msg_equals(tc.expect, parser.parse(tc.input, false), true);
     }
     assert_msg_equals(tc.expect, msg_accum, true);
+
+    // Re-run with the grammar's token() strings marked in the input, mirroring
+    // how the server wraps preserved special tokens. Expectations are unchanged.
+    // Approximates the server's marked set (grammar tokens that are preserved);
+    // the server additionally verifies each string against the vocab.
+    std::set<std::string> marked_tokens;
+    for (const auto & text : parser.arena_.collect_tokens()) {
+        bool preserved = std::find(parser.params_.preserved_tokens.begin(),
+                                   parser.params_.preserved_tokens.end(),
+                                   text) != parser.params_.preserved_tokens.end();
+        if (preserved && text.size() >= 3) {
+            marked_tokens.insert(text);
+        }
+    }
+    if (tc.test_marked_tokens && !marked_tokens.empty()) {
+        auto marked_input = common_peg_mark_tokens(tc.input, marked_tokens);
+        try {
+            auto msg_accum_marked = run_streaming(marked_input, [&](const std::string & prefix, bool is_partial) {
+                return parser.parse_marked(prefix, is_partial, marked_tokens);
+            });
+
+            if (!tc.is_partial) {
+                assert_msg_equals(tc.expect, parser.parse_marked(marked_input, false, marked_tokens), true);
+            }
+            assert_msg_equals(tc.expect, msg_accum_marked, true);
+        } catch (std::exception & e) {
+            throw std::runtime_error(std::string("Marked-token pass failed: ") + e.what());
+        }
+    }
 
     // Test grammar if present in params
     if (!parser.params_.grammar.empty()) {

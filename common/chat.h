@@ -295,6 +295,9 @@ struct common_chat_parser_params {
     bool                    echo                 = false;  // Include assistant prefilled msg in output
     bool                    debug                = false;  // Enable debug output for PEG parser
     common_peg_arena        parser               = {};
+    // Token strings that appear in the input wrapped in COMMON_PEG_TOKEN_MARKER
+    // bytes (see token() in the PEG builder). Empty = markers disabled.
+    std::set<std::string>   marked_tokens;
     common_chat_parser_params() = default;
     common_chat_parser_params(const common_chat_params & chat_params) {
         format  = chat_params.format;

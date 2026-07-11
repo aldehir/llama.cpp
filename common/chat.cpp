@@ -1047,7 +1047,7 @@ static common_chat_params common_chat_params_init_ministral_3(const common_chat_
     auto parser = build_chat_peg_parser([&](common_chat_peg_builder & p) {
         auto generation_prompt = p.eps();
         auto reasoning =
-            extract_reasoning ? p.optional("[THINK]" + p.reasoning(p.until("[/THINK]")) + "[/THINK]") : p.eps();
+            extract_reasoning ? p.optional(p.token("[THINK]") + p.reasoning(p.until("[/THINK]")) + p.token("[/THINK]")) : p.eps();
 
         // Response format parser
         if (has_response_format) {
@@ -1064,13 +1064,13 @@ static common_chat_params common_chat_params_init_ministral_3(const common_chat_
                 const auto & schema   = function.at("parameters");
 
                 tool_choice |=
-                    p.rule("tool-" + name, p.tool_open(p.tool_name(p.literal(name)) + "[ARGS]") +
+                    p.rule("tool-" + name, p.tool_open(p.tool_name(p.literal(name)) + p.token("[ARGS]")) +
                                                p.tool_args(p.schema(p.json(), "tool-" + name + "-schema", schema)));
             });
 
             auto min_calls  = inputs.tool_choice == COMMON_CHAT_TOOL_CHOICE_REQUIRED ? 1 : 0;
             auto max_calls  = inputs.parallel_tool_calls ? -1 : 1;
-            auto tool_calls = p.trigger_rule("tool-call", p.repeat("[TOOL_CALLS]" + tool_choice, min_calls, max_calls));
+            auto tool_calls = p.trigger_rule("tool-call", p.repeat(p.token("[TOOL_CALLS]") + tool_choice, min_calls, max_calls));
 
             return generation_prompt + (reasoning << p.content(p.until("[TOOL_CALLS]")) << tool_calls);
         }
@@ -1172,15 +1172,15 @@ static common_chat_params common_chat_params_init_gpt_oss(const common_chat_temp
     auto extract_reasoning   = inputs.reasoning_format != COMMON_REASONING_FORMAT_NONE;
 
     auto parser = build_chat_peg_parser([&](common_chat_peg_builder & p) {
-        auto start           = p.rule("start", p.literal("<|start|>assistant"));
-        auto end             = p.rule("end", p.literal("<|end|>"));
+        auto start           = p.rule("start", p.token("<|start|>") + "assistant");
+        auto end             = p.rule("end", p.token("<|end|>"));
         auto content         = p.rule("message-content", p.until("<|end|>"));
-        auto channel         = p.literal("<|channel|>") + (p.literal("commentary") | p.literal("analysis"));
+        auto channel         = p.token("<|channel|>") + (p.literal("commentary") | p.literal("analysis"));
         auto constrain_type  = p.chars("[A-Za-z0-9_-]", 1, -1);
 
         // Occasionally, gpt-oss-20b will prefix channels with this commentary
-        auto stray_commentary = p.optional(p.literal("<|channel|>commentary") + p.optional(p.literal(" to=assistant")));
-        auto start_analysis = stray_commentary + p.literal("<|channel|>analysis<|message|>");
+        auto stray_commentary = p.optional(p.token("<|channel|>") + "commentary" + p.optional(p.literal(" to=assistant")));
+        auto start_analysis = stray_commentary + p.token("<|channel|>") + "analysis" + p.token("<|message|>");
 
         if (extract_reasoning) {
             p.rule("analysis", start_analysis + p.reasoning(content) + end);
@@ -1189,8 +1189,8 @@ static common_chat_params common_chat_params_init_gpt_oss(const common_chat_temp
         }
 
         auto analysis = p.ref("analysis");
-        auto preamble = p.rule("preamble", p.literal("<|channel|>commentary<|message|>") + p.content(content) + end);
-        auto final_msg = p.rule("final", stray_commentary + p.literal("<|channel|>final<|message|>") + p.content(content));
+        auto preamble = p.rule("preamble", p.token("<|channel|>") + "commentary" + p.token("<|message|>") + p.content(content) + end);
+        auto final_msg = p.rule("final", stray_commentary + p.token("<|channel|>") + "final" + p.token("<|message|>") + p.content(content));
 
         // Consume any unsolicited tool calls, e.g. builtin functions
         auto unsolicited = p.rule("unsolicited", p.atomic(p.optional(channel) + p.literal(" to=") + content + end));
@@ -1198,9 +1198,9 @@ static common_chat_params common_chat_params_init_gpt_oss(const common_chat_temp
         auto any = p.rule("any", preamble | analysis);
 
         if (has_response_format) {
-            auto constraint = p.optional(p.space() + p.optional(p.literal("<|constrain|>")) + constrain_type);
+            auto constraint = p.optional(p.space() + p.optional(p.token("<|constrain|>")) + constrain_type);
             auto response_format = p.rule("response-format",
-                p.literal("<|channel|>final") + constraint + p.literal("<|message|>") +
+                p.token("<|channel|>") + "final" + constraint + p.token("<|message|>") +
                 p.content(p.schema(p.json(), "response-format-schema", inputs.json_schema)));
 
             return p.zero_or_more(start + analysis) + start + response_format;
@@ -1215,16 +1215,16 @@ static common_chat_params common_chat_params_init_gpt_oss(const common_chat_temp
                 const auto & params   = function.at("parameters");
 
                 auto func_name  = p.literal(" to=functions.") + p.tool_name(p.literal(name));
-                auto constraint = p.optional(p.space() + p.optional(p.literal("<|constrain|>")) + constrain_type);
+                auto constraint = p.optional(p.space() + p.optional(p.token("<|constrain|>")) + constrain_type);
                 auto args       = p.tool_args(p.schema(p.json(), "tool-" + name + "-schema", params));
 
                 // recipient in role header
                 //   <|start|>assistant to=functions.NAME<|channel|>(commentary|analysis)[constraint]<|message|>ARGS
-                auto tool_in_role = p.tool(p.tool_open(func_name + channel + constraint + p.literal("<|message|>")) + args);
+                auto tool_in_role = p.tool(p.tool_open(func_name + channel + constraint + p.token("<|message|>")) + args);
 
                 // recipient in channel header
                 //   <|channel|>(commentary|analysis) to=functions.NAME[constraint]<|message|>ARGS
-                auto tool_in_channel = p.tool(p.tool_open(channel + func_name + constraint + p.literal("<|message|>")) + args);
+                auto tool_in_channel = p.tool(p.tool_open(channel + func_name + constraint + p.token("<|message|>")) + args);
 
                 tool_choice |= p.rule("tool-" + name, tool_in_role | tool_in_channel);
             });
@@ -1320,16 +1320,16 @@ static common_chat_params common_chat_params_init_gemma4(const common_chat_templ
     auto extract_reasoning   = inputs.reasoning_format != COMMON_REASONING_FORMAT_NONE;
 
     auto parser = build_chat_peg_parser([&](common_chat_peg_builder & p) {
-        auto start = p.rule("start", p.optional(p.literal("<|turn>model\n")));
+        auto start = p.rule("start", p.optional(p.token("<|turn>") + "model\n"));
 
         if (extract_reasoning) {
-            p.rule("thought", p.literal("<|channel>thought") + p.space() + p.reasoning(p.until("<channel|>")) + p.literal("<channel|>"));
+            p.rule("thought", p.token("<|channel>") + "thought" + p.space() + p.reasoning(p.until("<channel|>")) + p.token("<channel|>"));
         } else {
-            p.rule("thought", p.content(p.literal("<|channel>thought") + p.space() + p.until("<channel|>") + p.literal("<channel|>")));
+            p.rule("thought", p.content(p.token("<|channel>") + "thought" + p.space() + p.until("<channel|>") + p.token("<channel|>")));
         }
 
-        auto consume_empty_channels = p.gbnf(p.zero_or_more(p.literal("<|channel>") + p.negate(p.literal("thought"))), "");
-        auto thought = (p.peek(p.literal("<|channel>")) + consume_empty_channels + p.ref("thought")) | p.negate(p.literal("<|channel>"));
+        auto consume_empty_channels = p.gbnf(p.zero_or_more(p.token("<|channel>") + p.negate(p.literal("thought"))), "");
+        auto thought = (p.peek(p.token("<|channel>")) + consume_empty_channels + p.ref("thought")) | p.negate(p.token("<|channel>"));
 
         if (has_response_format) {
             auto response_format = p.literal("```json") <<
@@ -1388,7 +1388,7 @@ static common_chat_params common_chat_params_init_gemma4(const common_chat_templ
             });
 
             auto tool_call = p.trigger_rule("tool-call", p.repeat(
-                "<|tool_call>call:" + tool_choice + "<tool_call|>",
+                p.token("<|tool_call>") + "call:" + tool_choice + p.token("<tool_call|>"),
                 /* min = */ inputs.tool_choice == COMMON_CHAT_TOOL_CHOICE_REQUIRED ? 1 : 0,
                 /* max = */ inputs.parallel_tool_calls ? -1 : 1
             ));
@@ -1596,9 +1596,9 @@ static common_chat_params common_chat_params_init_kimi_k2(const common_chat_temp
 
         // Note: this model is CRAZY. It can diverge from its supposed tool calling pattern in so many ways it's not funny.
         // For example, it can call tools at the end of reasoning without closing reasoning...
-        auto reasoning = extract_reasoning ? p.optional(THINK_START + p.reasoning(
-            p.until_one_of({ THINK_END, "<|tool_calls_section_begin|>", "<|tool_call_begin|>" })) +
-            p.optional(p.literal(THINK_END))) : p.eps();
+        auto reasoning = extract_reasoning ? p.optional(p.token(THINK_START) + p.reasoning(
+            p.until_one_of({ THINK_END, SECTION_BEGIN, CALL_BEGIN })) +
+            p.optional(p.token(THINK_END))) : p.eps();
         auto generation_prompt = p.literal(GEN_PROMPT);
 
 
@@ -1620,9 +1620,9 @@ static common_chat_params common_chat_params_init_kimi_k2(const common_chat_temp
             // Capture the full call id (functions.<name>:<digits>) using tool_id tag
             auto tool_id = p.tool_id(p.literal("functions.") + p.tool_name(p.literal(name)) + p.literal(":") + p.chars("[0-9]", 1, -1));
             auto tool_parser = p.tool(
-                p.tool_open(tool_id + p.literal(ARGS_BEGIN)) +
+                p.tool_open(tool_id + p.token(ARGS_BEGIN)) +
                 p.tool_args(p.schema(p.json(), "tool-" + name + "-schema", schema)) +
-                p.tool_close(p.optional((p.literal(CALL_END))))
+                p.tool_close(p.optional((p.token(CALL_END))))
             );
 
             tool_choice |= p.rule("tool-" + name, tool_parser);
@@ -1633,9 +1633,9 @@ static common_chat_params common_chat_params_init_kimi_k2(const common_chat_temp
         auto max_calls  = inputs.parallel_tool_calls ? -1 : 1;
         // Use trigger_rule so grammar generator knows where to start generating rules
         auto tool_calls = p.rule("tool-calls",
-            p.optional(p.literal(SECTION_BEGIN)) +
-            p.trigger_rule("tool-call", p.repeat(CALL_BEGIN + tool_choice, min_calls, max_calls) +
-                p.optional(p.literal(SECTION_END)))
+            p.optional(p.token(SECTION_BEGIN)) +
+            p.trigger_rule("tool-call", p.repeat(p.token(CALL_BEGIN) + tool_choice, min_calls, max_calls) +
+                p.optional(p.token(SECTION_END)))
         );
 
         auto content_before_tools = p.content(p.until_one_of({ SECTION_BEGIN, CALL_BEGIN }));
@@ -1727,7 +1727,7 @@ static common_chat_params common_chat_params_init_lfm2(const common_chat_templat
 
         auto reasoning = p.eps();
         if (extract_reasoning) {
-            reasoning = p.optional(THINK_START + p.reasoning(p.until(THINK_END)) + THINK_END);
+            reasoning = p.optional(p.token(THINK_START) + p.reasoning(p.until(THINK_END)) + p.token(THINK_END));
         }
 
         if (!has_tools || inputs.tool_choice == COMMON_CHAT_TOOL_CHOICE_NONE) {
@@ -1739,9 +1739,9 @@ static common_chat_params common_chat_params_init_lfm2(const common_chat_templat
         }
         auto tool_calls = p.rule("tool-calls",
             p.trigger_rule("tool-call",
-                p.literal(TOOL_CALL_START) +
+                p.token(TOOL_CALL_START) +
                 p.python_style_tool_calls(inputs.tools, inputs.parallel_tool_calls, /* allow_json_literals = */ true) +
-                p.literal(TOOL_CALL_END)
+                p.token(TOOL_CALL_END)
             )
         );
 
@@ -1821,7 +1821,8 @@ static common_chat_params common_chat_params_init_gigachat_v3(
             // Define the tool call structure
             auto min_calls = inputs.tool_choice == COMMON_CHAT_TOOL_CHOICE_REQUIRED ? 1 : 0;
             auto max_calls = 1; // parallel toolcalls are not supported
-            auto tool_call = p.rule("tool-call", p.literal(tool_call_start_prefix) + tool_choice);
+            auto tool_call = p.rule("tool-call",
+                p.token("<|message_sep|>\n\n") + "function call" + p.token("<|role_sep|>\n") + tool_choice);
             auto tool_calls = p.trigger_rule("tool-call-root", p.repeat(tool_call, /* min = */ min_calls, /* max = */ max_calls));
 
             ret = p.content(p.until("<|message_sep|>\n\n")) << tool_calls;
@@ -1831,7 +1832,7 @@ static common_chat_params common_chat_params_init_gigachat_v3(
             ret = p.content(p.rest());
         }
 
-        return p.literal("assistant<|role_sep|>\n") + ret;
+        return p.literal("assistant") + p.token("<|role_sep|>\n") + ret;
     });
 
     data.parser = parser.save();
@@ -1904,11 +1905,11 @@ static common_chat_params common_chat_params_init_deepseek_v3_2(const common_cha
 
         auto reasoning = p.eps();
         if (extract_reasoning && inputs.enable_thinking) {
-            reasoning = p.optional(THINK_START + p.reasoning(p.until(THINK_END)) + THINK_END);
+            reasoning = p.optional(p.token(THINK_START) + p.reasoning(p.until(THINK_END)) + p.token(THINK_END));
         } else if (extract_reasoning) {
             // Thinking disabled but reasoning extraction requested: the generation prompt
             // contains an empty <think></think> pair that must still be consumed.
-            reasoning = p.optional(p.literal(THINK_START) + p.until(THINK_END) + p.literal(THINK_END));
+            reasoning = p.optional(p.token(THINK_START) + p.until(THINK_END) + p.token(THINK_END));
         }
 
         if (has_response_format) {
@@ -1946,7 +1947,7 @@ static common_chat_params common_chat_params_init_deepseek_v3_2(const common_cha
 
                 auto arg = p.tool_arg(
                     p.tool_arg_open(
-                        p.literal(PARAM_START + " name=\"") +
+                        "<" + p.token(DSML) + "parameter name=\"" +
                         p.tool_arg_name(p.literal(param_name)) +
                         p.literal("\" string=\"" + std::string(is_string ? "true" : "false") + "\">")) +
                     (is_string
@@ -1954,7 +1955,7 @@ static common_chat_params common_chat_params_init_deepseek_v3_2(const common_cha
                          : p.tool_arg_json_value(p.schema(p.json(),
                                                           "tool-" + name + "-arg-" + param_name + "-schema",
                                                           param_schema, false))) +
-                    p.tool_arg_close(p.literal(PARAM_END)));
+                    p.tool_arg_close("</" + p.token(DSML) + "parameter>"));
 
                 auto named_arg = p.rule("tool-" + name + "-arg-" + param_name, arg);
                 if (is_required) {
@@ -1982,24 +1983,27 @@ static common_chat_params common_chat_params_init_deepseek_v3_2(const common_cha
 
             common_peg_parser invoke_body = args_seq;
             auto func_parser = p.tool(
-                p.tool_open(p.literal(INVOKE_START + " name=\"") +
+                p.tool_open("<" + p.token(DSML) + "invoke name=\"" +
                             p.tool_name(p.literal(name)) + p.literal("\">\n")) +
                 invoke_body + p.space() +
-                p.tool_close(p.literal(INVOKE_END)));
+                p.tool_close("</" + p.token(DSML) + "invoke>"));
 
             tool_choice |= p.rule("tool-" + name, func_parser);
         });
 
         auto require_tools = inputs.tool_choice == COMMON_CHAT_TOOL_CHOICE_REQUIRED;
 
+        auto fc_start = "<" + p.token(DSML) + "function_calls>";
+        auto fc_end   = "</" + p.token(DSML) + "function_calls>";
+
         common_peg_parser tool_calls = p.eps();
         if (inputs.parallel_tool_calls) {
             tool_calls = p.trigger_rule("tool-call",
-                p.literal(FC_START) + p.space() + tool_choice +
-                p.zero_or_more(p.space() + tool_choice) + p.space() + p.literal(FC_END));
+                fc_start + p.space() + tool_choice +
+                p.zero_or_more(p.space() + tool_choice) + p.space() + fc_end);
         } else {
             tool_calls = p.trigger_rule("tool-call",
-                p.literal(FC_START) + p.space() + tool_choice + p.space() + p.literal(FC_END));
+                fc_start + p.space() + tool_choice + p.space() + fc_end);
         }
 
         if (!require_tools) {
@@ -2120,19 +2124,19 @@ static common_chat_params common_chat_params_init_cohere2moe(const common_chat_t
         // included) inline as content, matching reasoning_format=NONE conventions.
         common_peg_parser reasoning = p.eps();
         if (extract_reasoning) {
-            reasoning = p.optional(p.literal(THINK_START) +
+            reasoning = p.optional(p.token(THINK_START) +
                                    p.reasoning(p.until_one_of({ THINK_END, TEXT_START, ACTION_START })) +
-                                   p.optional(p.literal(THINK_END)));
+                                   p.optional(p.token(THINK_END)));
         } else {
-            reasoning = p.optional(p.content(p.literal(THINK_START) +
+            reasoning = p.optional(p.content(p.token(THINK_START) +
                                              p.until_one_of({ THINK_END, TEXT_START, ACTION_START }) +
-                                             p.optional(p.literal(THINK_END))));
+                                             p.optional(p.token(THINK_END))));
         }
 
-        auto text_content = p.literal(TEXT_START) + p.content(p.until(TEXT_END)) + p.optional(p.literal(TEXT_END));
+        auto text_content = p.token(TEXT_START) + p.content(p.until(TEXT_END)) + p.optional(p.token(TEXT_END));
 
         if (!has_tools || inputs.tool_choice == COMMON_CHAT_TOOL_CHOICE_NONE) {
-            return generation_prompt + reasoning + text_content + p.optional(p.literal(TURN_END)) + end;
+            return generation_prompt + reasoning + text_content + p.optional(p.token(TURN_END)) + end;
         }
 
         auto require_tools = inputs.tool_choice == COMMON_CHAT_TOOL_CHOICE_REQUIRED;
@@ -2151,7 +2155,7 @@ static common_chat_params common_chat_params_init_cohere2moe(const common_chat_t
         // Content and tool calls are mutually exclusive in this format.
         common_peg_parser body = require_tools ? tool_calls : p.choice({ tool_calls, text_content });
 
-        return generation_prompt + reasoning + body + p.optional(p.literal(TURN_END)) + end;
+        return generation_prompt + reasoning + body + p.optional(p.token(TURN_END)) + end;
     });
 
     data.parser = parser.save();
@@ -2448,7 +2452,7 @@ static common_chat_params common_chat_params_init_minicpm5(const common_chat_tem
 
         auto reasoning = p.eps();
         if (extract_reasoning) {
-            reasoning = ("<think>" << p.reasoning(p.until("</think>")) << "</think>") + p.space();
+            reasoning = (p.token("<think>") << p.reasoning(p.until("</think>")) << p.token("</think>")) + p.space();
         }
 
         // Response format parser
@@ -2460,8 +2464,8 @@ static common_chat_params common_chat_params_init_minicpm5(const common_chat_tem
             // CDATA lets a value carry characters that would otherwise close the tag (e.g.
             // </param>); capture the inner text only, excluding the CDATA markers.
             auto string_value = p.choice({
-                p.literal("<![CDATA[") + p.ac(p.tool_arg_string_value(p.until("]]>")) + p.literal("]]>"), "]]>") + p.tool_arg_close(p.literal("</param>")),
-                p.negate(p.literal("<![CDATA[")) + p.ac(p.tool_arg_string_value(p.until("</param>")) + p.tool_arg_close(p.literal("</param>")), "</param>")
+                p.literal("<![CDATA[") + p.ac(p.tool_arg_string_value(p.until("]]>")) + p.literal("]]>"), "]]>") + p.tool_arg_close(p.token("</param>")),
+                p.negate(p.literal("<![CDATA[")) + p.ac(p.tool_arg_string_value(p.until("</param>")) + p.tool_arg_close(p.token("</param>")), "</param>")
             });
 
             auto tool_choice = p.choice();
@@ -2483,11 +2487,11 @@ static common_chat_params common_chat_params_init_minicpm5(const common_chat_tem
                         } else {
                             value_parser = p.tool_arg_json_value(
                                     p.schema(p.json(), "tool-" + name + "-arg-" + prop_name + "-schema", prop_schema, false)
-                                ) + p.tool_arg_close(p.literal("</param>"));
+                                ) + p.tool_arg_close(p.token("</param>"));
                         }
 
                         auto arg_rule = p.tool_arg(
-                            p.tool_arg_open(p.literal("<param name=\"") + p.tool_arg_name(p.literal(prop_name)) + p.literal("\">")) +
+                            p.tool_arg_open(p.token("<param") + " name=\"" + p.tool_arg_name(p.literal(prop_name)) + p.literal("\">")) +
                             value_parser
                         );
 
@@ -2497,9 +2501,9 @@ static common_chat_params common_chat_params_init_minicpm5(const common_chat_tem
                 }
 
                 auto tool_parser = p.tool(
-                    p.tool_open(p.literal("<function name=\"") + p.tool_name(p.literal(name)) + p.literal("\">"))
+                    p.tool_open(p.token("<function") + " name=\"" + p.tool_name(p.literal(name)) + p.literal("\">"))
                     << p.tool_args(args)
-                    << p.tool_close(p.literal("</function>")));
+                    << p.tool_close(p.token("</function>")));
 
                 tool_choice |= p.rule("tool-" + name, tool_parser);
             });
@@ -2874,9 +2878,13 @@ common_chat_msg common_chat_peg_parse(const common_peg_arena &          src_pars
         LOG_DBG("No parser definition detected, assuming pure content parser.");
     }
 
-    const std::string effective_input = params.generation_prompt.empty()
+    // The generation prompt is raw template text, so wrap its token strings
+    // to match the marked generated output
+    const std::string generation_prompt = common_peg_mark_tokens(params.generation_prompt, params.marked_tokens);
+
+    const std::string effective_input = generation_prompt.empty()
         ? input
-        : params.generation_prompt + input;
+        : generation_prompt + input;
 
     //LOG_DBG("Parsing PEG input with format %s: %s\n", common_chat_format_name(params.format), effective_input.c_str());
 
@@ -2884,8 +2892,12 @@ common_chat_msg common_chat_peg_parse(const common_peg_arena &          src_pars
     if (params.debug) {
         flags |= COMMON_PEG_PARSE_FLAG_DEBUG;
     }
+    if (!params.marked_tokens.empty()) {
+        flags |= COMMON_PEG_PARSE_FLAG_MARKED_TOKENS;
+    }
 
     common_peg_parse_context ctx(effective_input, flags);
+    ctx.marked_tokens = params.marked_tokens;
     auto result = parser.parse(ctx);
 
     if (result.fail()) {
