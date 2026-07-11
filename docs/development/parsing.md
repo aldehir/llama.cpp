@@ -65,6 +65,7 @@ For a more complete example, see `test_example_native()` in
 - **`start()`** - Matches the start of input (anchor `^`)
 - **`end()`** - Matches the end of input (anchor `$`)
 - **`literal(string)`** - Matches an exact literal string
+- **`token(string)`** - Matches a special token's text; see [Token Markers](#token-markers)
 - **`any()`** - Matches any single character (`.`)
 
 ### Combinators
@@ -113,6 +114,41 @@ For a more complete example, see `test_example_native()` in
 
 - **`atomic(p)`** - Prevents AST node creation for partial parses
 - **`tag(tag, p)`** - Creates AST nodes with semantic tags (multiple nodes can share tags)
+
+## Token Markers
+
+Special-token marker text like `</think>` is ambiguous in generated output: it
+may come from the model emitting the actual special token, or from ordinary
+text that happens to spell it out (e.g. the model echoing part of the prompt).
+Token markers disambiguate the two.
+
+When enabled, the server wraps the text of each marked special token in
+`COMMON_PEG_TOKEN_MARKER` (`0xff`) bytes at detokenization time, e.g.
+`"\xff</think>\xff"`. Since `0xff` never occurs in valid UTF-8, the wrapped
+form cannot collide with ordinary text.
+
+On the parsing side, marked mode is active when the parse context has the
+`COMMON_PEG_PARSE_FLAG_MARKED_TOKENS` flag and a `marked_tokens` set. In this
+mode every text matcher (`literal`, `token`, and `until` delimiters) expects
+occurrences of marked token strings in their wrapped form
+(`common_peg_mark_tokens()` computes it), so bare marker text no longer
+matches and simply flows into content. Stray `0xff` bytes and unexpected
+wrapped tokens are consumed as content; the chat mappers strip the marker
+bytes from all message fields.
+
+Use `token(string)` instead of `literal(string)` for markers that are special
+tokens. Functionally it is identical to `literal()`, but it also *declares*
+the string: `common_peg_arena::collect_tokens()` returns all declared token
+strings, and the server marks exactly those that are preserved tokens and
+verify as a single special token in the model's vocab
+(`chat_parser_params.marked_tokens` / `task_params.marked_token_ids`). A
+declared string that does not verify (multi-token in this vocab, or not
+special) stays bare on both the emission and parsing side.
+
+Serialized parsers (`save()`/`load()`) and generated GBNF grammars always
+contain the bare text; wrapped forms are computed at match time only. The
+feature is enabled by default in the server chat path and can be disabled
+with `--no-chat-token-markers`.
 
 ## GBNF Grammar Generation
 

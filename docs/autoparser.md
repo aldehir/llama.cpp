@@ -243,6 +243,16 @@ common_chat_params (prompt, parser, grammar, triggers, preserved_tokens)
 
 The auto-parser is invoked in [common/chat.cpp:1280-1310](common/chat.cpp#L1280-L1310) in `common_chat_templates_apply_jinja`. A few specialized templates are handled first (Ministral/Magistral Large 3, GPT-OSS with `<|channel|>`, Functionary v3.2 with `>>>all`), then the auto-parser handles everything else via `autoparser::autoparser` + `peg_generator::generate_parser`.
 
+## Token Markers
+
+The generated parsers declare their structural markers with the `token()`
+combinator (see [Token Markers in the PEG parser docs](development/parsing.md#token-markers)).
+The server marks the declared strings that verify as single special tokens in
+the model's vocab and wraps them in `0xff` bytes during detokenization, so the
+parser can distinguish a real `</think>` token from the same text appearing in
+ordinary content. Declared strings that do not verify (e.g. `">"` or
+`"<function="` from constructed formats) simply keep matching their bare text.
+
 ## Algorithm Details
 
 ### Core Mechanism: Differential Comparison

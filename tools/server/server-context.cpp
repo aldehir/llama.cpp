@@ -3675,6 +3675,15 @@ private:
                 slot.task->params.sampling.preserved_tokens.find(token) != slot.task->params.sampling.preserved_tokens.end();
         };
 
+        auto token_to_output = [&](server_slot & slot, llama_token token) {
+            std::string piece = common_token_to_piece(slot.ctx_tgt, token, accept_special_token(slot, token));
+            if (!piece.empty() && slot.task->params.marked_token_ids.count(token) > 0) {
+                piece.insert(piece.begin(), COMMON_PEG_TOKEN_MARKER);
+                piece.push_back(COMMON_PEG_TOKEN_MARKER);
+            }
+            return piece;
+        };
+
         iterate(slots, [&](server_slot & slot) {
             // optionally send prompt processing progress
             if (slot.state == SLOT_STATE_PROCESSING_PROMPT || slot.state == SLOT_STATE_DONE_PROMPT) {
@@ -3750,7 +3759,7 @@ private:
 
             completion_token_output result;
             result.tok          = id;
-            result.text_to_send = common_token_to_piece(slot.ctx_tgt, result.tok, accept_special_token(slot, result.tok));
+            result.text_to_send = token_to_output(slot, result.tok);
             result.prob         = 1.0f; // TODO: set it here instead of doing inside populate_token_probs
 
             if (slot.task->params.sampling.n_probs > 0) {
@@ -3873,7 +3882,7 @@ private:
                 completion_token_output result;
 
                 result.tok          = ids[i];
-                result.text_to_send = common_token_to_piece(slot.ctx_tgt, result.tok, accept_special_token(slot, result.tok));
+                result.text_to_send = token_to_output(slot, result.tok);
                 result.prob         = 1.0f; // set later
 
                 // TODO: set result.probs

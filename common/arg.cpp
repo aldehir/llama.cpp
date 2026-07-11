@@ -1663,6 +1663,14 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         }
     ).set_examples({LLAMA_EXAMPLE_COMPLETION, LLAMA_EXAMPLE_CLI, LLAMA_EXAMPLE_SERVER}));
     add_opt(common_arg(
+        {"--chat-token-markers"},
+        {"--no-chat-token-markers"},
+        string_format("mark special tokens in generated text so the chat parser can distinguish them from identical text in ordinary content (default: %s)", params.chat_token_markers ? "enabled" : "disabled"),
+        [](common_params & params, bool value) {
+            params.chat_token_markers = value;
+        }
+    ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_CHAT_TOKEN_MARKERS"));
+    add_opt(common_arg(
         {"-cnv", "--conversation"},
         {"-no-cnv", "--no-conversation"},
         "whether to run in conversation mode:\n"

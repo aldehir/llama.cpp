@@ -555,6 +555,7 @@ struct common_params {
     bool completion        = false; // print source-able completion script
     bool use_color         = false; // use color to distinguish generations and inputs
     bool special           = false; // enable special token output
+    bool chat_token_markers = true; // mark special tokens in generated text for the chat parser (server)
     bool interactive       = false; // interactive mode
     bool interactive_first = false; // wait for user input immediately
     bool prompt_cache_all  = false; // save user input and generations to prompt cache

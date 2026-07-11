@@ -541,6 +541,34 @@ task_params eval_llama_cmpl_schema(
         // if "reasoning_format" is not provided, its handler will not be called, we will need to handle it here
         auto reasoning_format = params.chat_parser_params.reasoning_format;
         params.chat_parser_params.reasoning_in_content = params.stream && (reasoning_format == COMMON_REASONING_FORMAT_DEEPSEEK_LEGACY);
+
+        // mark the special tokens declared by the chat parser so it can
+        // distinguish them from identical text in ordinary content
+        if (params_base.chat_token_markers && vocab != nullptr) {
+            for (const auto & text : params.chat_parser_params.parser.collect_tokens()) {
+                auto ids = common_tokenize(vocab, text, false, true);
+                if (ids.size() != 1 || params.sampling.preserved_tokens.count(ids[0]) == 0) {
+                    continue;
+                }
+                // only mark actual special tokens, i.e. hidden unless rendered with special=true
+                if (common_token_to_piece(vocab, ids[0], true) == common_token_to_piece(vocab, ids[0], false)) {
+                    continue;
+                }
+                params.chat_parser_params.marked_tokens.insert(text);
+                params.marked_token_ids.insert(ids[0]);
+            }
+
+            // stop strings containing marked tokens must also match their marked spelling
+            if (!params.chat_parser_params.marked_tokens.empty()) {
+                const size_t n_stop = params.antiprompt.size();
+                for (size_t i = 0; i < n_stop; i++) {
+                    auto marked = common_peg_mark_tokens(params.antiprompt[i], params.chat_parser_params.marked_tokens);
+                    if (marked != params.antiprompt[i]) {
+                        params.antiprompt.push_back(std::move(marked));
+                    }
+                }
+            }
+        }
     }
 
     // debugging

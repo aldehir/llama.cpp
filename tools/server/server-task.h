@@ -91,6 +91,9 @@ struct task_params {
     // per-request parameters for chat parsing
     common_chat_parser_params chat_parser_params;
 
+    // tokens whose text is wrapped in COMMON_PEG_TOKEN_MARKER bytes when detokenized
+    std::set<llama_token> marked_token_ids;
+
     // message spans for checkpointing
     common_chat_msg_spans message_spans;
 
