@@ -245,13 +245,12 @@ The auto-parser is invoked in [common/chat.cpp:1280-1310](common/chat.cpp#L1280-
 
 ## Token Markers
 
-The generated parsers declare their structural markers with the `token()`
-combinator (see [Token Markers in the PEG parser docs](development/parsing.md#token-markers)).
-The server marks the declared strings that verify as single special tokens in
-the model's vocab and wraps them in `0xff` bytes during detokenization, so the
-parser can distinguish a real `</think>` token from the same text appearing in
-ordinary content. Declared strings that do not verify (e.g. `">"` or
-`"<function="` from constructed formats) simply keep matching their bare text.
+The auto-parser does not use the `token()` combinator or token markers (see
+[Token Markers in the PEG parser docs](development/parsing.md#token-markers)):
+it is too general to assume which of its detected markers are actual special
+tokens in a given vocab, so its parsers are rolled from plain literals and
+`common_chat_params::token_markers` stays unset. Special-token
+disambiguation applies only to the hand-written formats.
 
 ## Algorithm Details
 

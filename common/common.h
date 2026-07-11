@@ -555,7 +555,6 @@ struct common_params {
     bool completion        = false; // print source-able completion script
     bool use_color         = false; // use color to distinguish generations and inputs
     bool special           = false; // enable special token output
-    bool chat_token_markers = true; // mark special tokens in generated text for the chat parser (server)
     bool interactive       = false; // interactive mode
     bool interactive_first = false; // wait for user input immediately
     bool prompt_cache_all  = false; // save user input and generations to prompt cache
@@ -985,17 +984,24 @@ std::vector<llama_token> common_tokenize(
                         bool   add_special,
                         bool   parse_special = false);
 
+// Sentinel byte used to mark special tokens in generated text. It never
+// occurs in valid UTF-8, so marked tokens cannot collide with ordinary text.
+constexpr char COMMON_TOKEN_MARKER = '\xff';
+
 // tokenizes a token into a piece, optionally renders special/control tokens
 // should work similar to Python's `tokenizer.id_to_piece`
+// when marked, a non-empty piece is wrapped in COMMON_TOKEN_MARKER bytes
 std::string common_token_to_piece(
         const struct llama_context * ctx,
                        llama_token   token,
-                       bool          special = true);
+                       bool          special = true,
+                       bool          marked  = false);
 
 std::string common_token_to_piece(
           const struct llama_vocab * vocab,
                        llama_token   token,
-                       bool          special = true);
+                       bool          special = true,
+                       bool          marked  = false);
 
 // detokenizes a vector of tokens into a string
 // should work similar to Python's `tokenizer.decode`

@@ -177,9 +177,9 @@ common_peg_parser analyze_content::build_parser(parser_build_context & ctx) cons
 
     if (is_always_wrapped()) {
         if (ctx.extracting_reasoning) {
-            return ctx.reasoning_parser + p.token(start) + p.content(p.until(end)) + p.token(end) + p.end();
+            return ctx.reasoning_parser + start + p.content(p.until(end)) + end + p.end();
         }
-        return p.content(p.until(start)) + p.token(start) + p.content(p.until(end)) + p.token(end) + p.end();
+        return p.content(p.until(start)) + start + p.content(p.until(end)) + end + p.end();
     }
     return ctx.reasoning_parser + p.content(p.rest()) + p.end();
 }
@@ -188,7 +188,7 @@ common_peg_parser analyze_content::build_optional_wrapped(parser_build_context &
     auto & p = ctx.p;
 
     if (is_always_wrapped()) {
-        return p.optional(p.token(start) + p.content(p.until(end)) + p.token(end));
+        return p.optional(start + p.content(p.until(end)) + end);
     }
     return p.eps();
 }
@@ -257,7 +257,7 @@ common_peg_parser analyze_tools::build_func_parser(common_chat_peg_builder & p, 
                                                     const common_peg_parser & call_id_section, bool have_call_id,
                                                     const common_peg_parser & args,
                                                     std::optional<common_peg_parser> atomic_peek) const {
-    auto              open           = p.tool_open(p.token(function.name_prefix) + p.tool_name(p.literal(name)) + p.token(function.name_suffix));
+    auto              open           = p.tool_open(function.name_prefix + p.tool_name(p.literal(name)) + function.name_suffix);
     bool              matched_atomic = false;
     common_peg_parser func_parser    = p.eps();
 
@@ -275,13 +275,13 @@ common_peg_parser analyze_tools::build_func_parser(common_chat_peg_builder & p, 
     }
 
     if (!function.close.empty()) {
-        func_parser = func_parser + p.space() + p.tool_close(p.token(function.close));
+        func_parser = func_parser + p.space() + p.tool_close(p.literal(function.close));
     } else if (!format.per_call_end.empty()) {
         // When there's no func_close but there is a per_call_end marker, use peek() to ensure
         // we only emit tool_close when we can actually see the closing marker. This prevents
         // premature closing during partial parsing when we've seen e.g. "</" which could be
         // either "</tool_call>" (end) or "<arg_key>" prefix that failed to match.
-        func_parser = func_parser + p.tool_close(p.peek(p.token(format.per_call_end)));
+        func_parser = func_parser + p.tool_close(p.peek(p.literal(format.per_call_end)));
     } else {
         func_parser = func_parser + p.tool_close(p.space());  // force this to process tool closing callbacks in mapper
     }
@@ -308,21 +308,21 @@ common_peg_parser analyze_tools::build_tool_parser_tag_json(parser_build_context
         if (call_id.pos == call_id_position::BETWEEN_FUNC_AND_ARGS && !call_id.prefix.empty() &&
             (!call_id.suffix.empty() || !arguments.start.empty())) {
             if (!call_id.suffix.empty()) {
-                call_id_section = p.optional(p.token(call_id.prefix) + p.tool_id(p.until(call_id.suffix))) + p.token(call_id.suffix);
+                call_id_section = p.optional(call_id.prefix + p.tool_id(p.until(call_id.suffix))) + call_id.suffix;
             } else {
-                call_id_section = p.optional(p.token(call_id.prefix) + p.tool_id(p.until(arguments.start)));
+                call_id_section = p.optional(call_id.prefix + p.tool_id(p.until(arguments.start)));
             }
             have_call_id = true;
         }
         auto args_parser = p.tool_args(p.schema(p.json(), "tool-" + name + "-schema", schema));
         if (!arguments.start.empty()) {
-            args_parser = p.token(arguments.start) + args_parser;
+            args_parser = p.literal(arguments.start) + args_parser;
         }
         if (!arguments.end.empty()) {
-            args_parser = args_parser + p.token(arguments.end);
+            args_parser = args_parser + p.literal(arguments.end);
         }
 
-        auto atomic_peek = !arguments.start.empty() ? std::optional(p.peek(p.token(arguments.start))) : std::nullopt;
+        auto atomic_peek = !arguments.start.empty() ? std::optional(p.peek(p.literal(arguments.start))) : std::nullopt;
         auto func_parser = build_func_parser(p, name, call_id_section, have_call_id, args_parser, atomic_peek);
         tool_choice |= p.rule("tool-" + name, func_parser);
     });
@@ -332,7 +332,7 @@ common_peg_parser analyze_tools::build_tool_parser_tag_json(parser_build_context
     common_peg_parser tool_calls = p.eps();
 
     if (!format.per_call_start.empty()) {
-        auto wrapped_call = p.token(format.per_call_start) + tool_choice + p.token(format.per_call_end);
+        auto wrapped_call = format.per_call_start + tool_choice + format.per_call_end;
         if (inputs.parallel_tool_calls) {
             tool_calls = p.trigger_rule("tool-call", wrapped_call + p.zero_or_more(p.space() + wrapped_call));
         } else {
@@ -340,16 +340,16 @@ common_peg_parser analyze_tools::build_tool_parser_tag_json(parser_build_context
         }
         if (!format.section_start.empty()) {
             tool_calls = p.trigger_rule("tool-calls",
-                                        p.token(format.section_start) + p.space() + tool_calls + p.space() +
-                                            (format.section_end.empty() ? p.end() : p.token(format.section_end)));
+                                        p.literal(format.section_start) + p.space() + tool_calls + p.space() +
+                                            (format.section_end.empty() ? p.end() : p.literal(format.section_end)));
         }
     } else {
         std::string separator = ", ";  // Default
         if (inputs.parallel_tool_calls) {
-            tool_calls = p.trigger_rule("tool-call", p.token(format.section_start) + tool_choice +
-                                                         p.zero_or_more(separator + tool_choice) + p.token(format.section_end));
+            tool_calls = p.trigger_rule("tool-call", format.section_start + tool_choice +
+                                                         p.zero_or_more(separator + tool_choice) + format.section_end);
         } else {
-            tool_calls = p.trigger_rule("tool-call", p.token(format.section_start) + tool_choice + p.token(format.section_end));
+            tool_calls = p.trigger_rule("tool-call", format.section_start + tool_choice + format.section_end);
         }
     }
 
@@ -391,15 +391,15 @@ common_peg_parser analyze_tools::build_tool_parser_tag_tagged(parser_build_conte
             bool is_required = required.find(param_name) != required.end();
 
             auto arg =
-                p.tool_arg(p.tool_arg_open(p.token(arguments.name_prefix) + p.tool_arg_name(p.literal(param_name)) +
-                                           p.token(arguments.name_suffix)) +
-                           p.token(arguments.value_prefix) +
+                p.tool_arg(p.tool_arg_open(arguments.name_prefix + p.tool_arg_name(p.literal(param_name)) +
+                                           arguments.name_suffix) +
+                           arguments.value_prefix +
                            (schema_info.resolves_to_string(param_schema) ?
                                 p.ac(p.tool_arg_string_value(until_suffix) +
-                                    p.tool_arg_close(p.token(arguments.value_suffix)), arguments.value_suffix) :
+                                    p.tool_arg_close(p.literal(arguments.value_suffix)), arguments.value_suffix) :
                                 (p.tool_arg_json_value(p.schema(
                                     p.json(), "tool-" + name + "-arg-" + param_name + "-schema", param_schema, false)) +
-                                    p.tool_arg_close(p.token(arguments.value_suffix)))));
+                                    p.tool_arg_close(p.literal(arguments.value_suffix)))));
 
             auto named_arg = p.rule("tool-" + name + "-arg-" + param_name, arg);
             if (is_required) {
@@ -428,10 +428,10 @@ common_peg_parser analyze_tools::build_tool_parser_tag_tagged(parser_build_conte
         }
 
         if (!arguments.start.empty()) {
-            args_seq = p.token(arguments.start) + args_seq;
+            args_seq = p.literal(arguments.start) + args_seq;
         }
         if (!arguments.end.empty()) {
-            args_seq = args_seq + p.token(arguments.end);
+            args_seq = args_seq + p.literal(arguments.end);
         }
 
         // Build call_id parser based on position (if supported)
@@ -441,16 +441,16 @@ common_peg_parser analyze_tools::build_tool_parser_tag_tagged(parser_build_conte
             (!call_id.suffix.empty() || !arguments.start.empty())) {
             have_call_id = true;
             if (!call_id.suffix.empty()) {
-                call_id_section = p.optional(p.token(call_id.prefix) + p.tool_id(p.until(call_id.suffix)) + p.token(call_id.suffix));
+                call_id_section = p.optional(call_id.prefix + p.tool_id(p.until(call_id.suffix)) + call_id.suffix);
             } else {
-                call_id_section = p.optional(p.token(call_id.prefix) + p.tool_id(p.until(arguments.start)));
+                call_id_section = p.optional(call_id.prefix + p.tool_id(p.until(arguments.start)));
             }
         }
 
         // Only peek for an arg tag when there are required args that must follow.
         // When all args are optional, the model may emit no arg tags at all (#20650).
         auto atomic_peek = (!arguments.name_prefix.empty() && !required_parsers.empty()) ?
-            std::optional(p.peek(p.token(arguments.name_prefix))) : std::nullopt;
+            std::optional(p.peek(p.literal(arguments.name_prefix))) : std::nullopt;
         auto func_parser = build_func_parser(p, name, call_id_section, have_call_id, args_seq, atomic_peek);
         tool_choice |= p.rule("tool-" + name, func_parser);
     });
@@ -460,7 +460,7 @@ common_peg_parser analyze_tools::build_tool_parser_tag_tagged(parser_build_conte
     common_peg_parser tool_calls = p.eps();
 
     if (!format.per_call_start.empty()) {
-        auto wrapped_call = p.token(format.per_call_start) + p.space() + tool_choice + p.space() + p.token(format.per_call_end);
+        auto wrapped_call = format.per_call_start + p.space() + tool_choice + p.space() + format.per_call_end;
         if (inputs.parallel_tool_calls) {
             tool_calls = p.trigger_rule("tool-call", wrapped_call + p.zero_or_more(p.space() + wrapped_call) + p.space());
         } else {
@@ -468,19 +468,19 @@ common_peg_parser analyze_tools::build_tool_parser_tag_tagged(parser_build_conte
         }
         if (!format.section_start.empty()) {
             tool_calls = p.trigger_rule("tool-calls",
-                                        p.token(format.section_start) + p.space() + tool_calls + p.space() +
-                                            (format.section_end.empty() ? p.end() : p.token(format.section_end) + p.space()));
+                                        p.literal(format.section_start) + p.space() + tool_calls + p.space() +
+                                            (format.section_end.empty() ? p.end() : p.literal(format.section_end) + p.space()));
         }
     } else {
         std::string separator = ", ";  // Default
 
         if (inputs.parallel_tool_calls) {
-            tool_calls = p.trigger_rule("tool-call", p.token(format.section_start) + p.space() + tool_choice +
+            tool_calls = p.trigger_rule("tool-call", format.section_start + p.space() + tool_choice +
                                                          p.zero_or_more(separator + tool_choice) + p.space() +
-                                                         p.token(format.section_end));
+                                                         format.section_end);
         } else {
             tool_calls = p.trigger_rule(
-                "tool-call", p.token(format.section_start) + p.space() + tool_choice + p.space() + p.token(format.section_end));
+                "tool-call", format.section_start + p.space() + tool_choice + p.space() + format.section_end);
         }
     }
 

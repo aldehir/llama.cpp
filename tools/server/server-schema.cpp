@@ -319,6 +319,9 @@ std::vector<std::unique_ptr<field>> make_llama_cmpl_schema(const common_params &
             ctx.params.chat_parser_params.parser.load(data.at("chat_parser").get<std::string>());
         }));
 
+    add((new field_bool("token_markers", params.token_markers))
+        ->set_desc("Whether special tokens should be marked in the generated text for the chat parser"));
+
     add((new field_json("continue_final_message"))
         ->set_desc("Whether to continue the final message of the chat template")
         ->set_handler([&](field_eval_context & ctx, const json & data) {
@@ -544,7 +547,7 @@ task_params eval_llama_cmpl_schema(
 
         // mark the special tokens declared by the chat parser so it can
         // distinguish them from identical text in ordinary content
-        if (params_base.chat_token_markers && vocab != nullptr) {
+        if (params.token_markers && vocab != nullptr) {
             for (const auto & text : params.chat_parser_params.parser.collect_tokens()) {
                 auto ids = common_tokenize(vocab, text, false, true);
                 if (ids.size() != 1 || params.sampling.preserved_tokens.count(ids[0]) == 0) {

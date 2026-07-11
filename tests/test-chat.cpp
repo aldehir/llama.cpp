@@ -1154,7 +1154,7 @@ static void test_peg_parser(common_chat_templates *                      tmpls,
             marked_tokens.insert(text);
         }
     }
-    if (tc.test_marked_tokens && !marked_tokens.empty()) {
+    if (tc.test_marked_tokens && parser.params_.token_markers && !marked_tokens.empty()) {
         auto marked_input = common_peg_mark_tokens(tc.input, marked_tokens);
         try {
             auto msg_accum_marked = run_streaming(marked_input, [&](const std::string & prefix, bool is_partial) {
@@ -1485,6 +1485,11 @@ class peg_test_builder {
 
     peg_test_builder & expect_reconstruction(bool val = true) {
         tc_.expect_reconstruction = val;
+        return *this;
+    }
+
+    peg_test_builder & marked_tokens(bool val) {
+        tc_.test_marked_tokens = val;
         return *this;
     }
 
@@ -2627,6 +2632,8 @@ static void test_template_output_peg_parsers(bool detailed_debug) {
                 { "special_function", R"({"arg1": 1})", {} },
             })
             .expect_reconstruction()
+            // marker text inside reasoning is intentionally plain text here
+            .marked_tokens(false)
             .run();
 
         // Continuation tests
@@ -4544,6 +4551,8 @@ static void test_template_output_peg_parsers(bool detailed_debug) {
             .expect_tool_calls({
                 { "special_function", R"({"arg1": 1})", {} },
             })
+            // marker text inside reasoning is intentionally plain text here
+            .marked_tokens(false)
             .run();
 
         // enable_thinking=false still captures emitted reasoning
@@ -5737,6 +5746,8 @@ static void test_template_output_peg_parsers(bool detailed_debug) {
             .reasoning_format(COMMON_REASONING_FORMAT_AUTO)
             .tools({ html_tool })
             .expect_tool_calls({ { "html", R"#({"markup": "<a href=\"/x\">hi</a> </param>"})#", {} } })
+            // the </param> inside CDATA is intentionally plain text
+            .marked_tokens(false)
             .run();
 
         tst.test(R"(I'm thinking</think><function name="python"><param name="code">print('hey')</param></function>)")

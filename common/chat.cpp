@@ -1026,6 +1026,7 @@ static common_chat_params common_chat_params_init_ministral_3(const common_chat_
     data.prompt            = common_chat_template_direct_apply_impl(tmpl, inputs, /* messages_override = */ adjusted_messages);
     data.generation_prompt = common_chat_template_generation_prompt_impl(tmpl, inputs, /* messages_override = */ adjusted_messages);
     data.format            = COMMON_CHAT_FORMAT_PEG_NATIVE;
+    data.token_markers     = inputs.reasoning_format != COMMON_REASONING_FORMAT_NONE;
     data.preserved_tokens  = {
         "[THINK]",
         "[/THINK]",
@@ -1150,6 +1151,7 @@ static common_chat_params common_chat_params_init_gpt_oss(const common_chat_temp
 
     // These special tokens are required to parse properly, so we include them
     // even if parse_tool_calls is false.
+    data.token_markers     = inputs.reasoning_format != COMMON_REASONING_FORMAT_NONE;
     data.preserved_tokens = {
         "<|channel|>", "<|constrain|>", "<|message|>", "<|start|>", "<|end|>",
     };
@@ -1294,6 +1296,7 @@ static common_chat_params common_chat_params_init_gemma4(const common_chat_templ
     data.thinking_start_tag = "<|channel>thought";
     data.thinking_end_tag   = "<channel|>";
 
+    data.token_markers     = inputs.reasoning_format != COMMON_REASONING_FORMAT_NONE;
     data.preserved_tokens = {
         "<|channel>",
         "<channel|>",
@@ -1542,6 +1545,7 @@ static common_chat_params common_chat_params_init_kimi_k2(const common_chat_temp
     data.generation_prompt = common_chat_template_generation_prompt_impl(tmpl, inputs);
     data.format            = COMMON_CHAT_FORMAT_PEG_NATIVE;
     data.supports_thinking = true;
+    data.token_markers     = inputs.reasoning_format != COMMON_REASONING_FORMAT_NONE;
     data.preserved_tokens  = {
         "<|tool_calls_section_begin|>",
         "<|tool_calls_section_end|>",
@@ -1694,6 +1698,7 @@ static common_chat_params common_chat_params_init_lfm2(const common_chat_templat
     data.generation_prompt = common_chat_template_generation_prompt_impl(tmpl, inputs, adjusted_messages);
     data.format            = COMMON_CHAT_FORMAT_PEG_NATIVE;
     data.supports_thinking = true;
+    data.token_markers     = inputs.reasoning_format != COMMON_REASONING_FORMAT_NONE;
     data.preserved_tokens  = { TOOL_CALL_START, TOOL_CALL_END, THINK_START, THINK_END };
     if (tool_list_tokens) {
         data.preserved_tokens.push_back(TOOL_LIST_START);
@@ -1785,6 +1790,7 @@ static common_chat_params common_chat_params_init_gigachat_v3(
     data.generation_prompt = common_chat_template_generation_prompt_impl(tmpl, inputs);
     data.format            = COMMON_CHAT_FORMAT_PEG_NATIVE;
     data.supports_thinking = false;
+    data.token_markers     = true;
     data.preserved_tokens  = {
         "<|message_sep|>\n\n",
         "<|role_sep|>\n",
@@ -1866,6 +1872,7 @@ static common_chat_params common_chat_params_init_deepseek_v3_2(const common_cha
     data.supports_thinking  = true;
     data.thinking_start_tag = "<think>";
     data.thinking_end_tag   = "</think>";
+    data.token_markers     = inputs.reasoning_format != COMMON_REASONING_FORMAT_NONE;
     data.preserved_tokens   = {
         "｜DSML｜",
         "<think>",
@@ -2082,6 +2089,7 @@ static common_chat_params common_chat_params_init_cohere2moe(const common_chat_t
     data.supports_thinking  = true;
     data.thinking_start_tag = THINK_START;
     data.thinking_end_tag   = THINK_END;
+    data.token_markers     = inputs.reasoning_format != COMMON_REASONING_FORMAT_NONE;
     data.preserved_tokens   = {
         TURN_START, TURN_END, CHATBOT, USER, SYSTEM,
         THINK_START, THINK_END,
@@ -2412,6 +2420,7 @@ static common_chat_params common_chat_params_init_minicpm5(const common_chat_tem
     data.generation_prompt = common_chat_template_generation_prompt_impl(tmpl, inputs);
     data.format            = COMMON_CHAT_FORMAT_PEG_NATIVE;
     data.supports_thinking = true;
+    data.token_markers     = inputs.reasoning_format != COMMON_REASONING_FORMAT_NONE;
     data.preserved_tokens  = {
         "<function",
         "<param",

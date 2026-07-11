@@ -1704,13 +1704,13 @@ std::vector<llama_token> common_tokenize(
     return result;
 }
 
-std::string common_token_to_piece(const struct llama_context * ctx, llama_token token, bool special) {
+std::string common_token_to_piece(const struct llama_context * ctx, llama_token token, bool special, bool marked) {
     const llama_model * model = llama_get_model(ctx);
     const llama_vocab * vocab = llama_model_get_vocab(model);
-    return common_token_to_piece(vocab, token, special);
+    return common_token_to_piece(vocab, token, special, marked);
 }
 
-std::string common_token_to_piece(const struct llama_vocab * vocab, llama_token token, bool special) {
+std::string common_token_to_piece(const struct llama_vocab * vocab, llama_token token, bool special, bool marked) {
     std::string piece;
     piece.resize(piece.capacity());  // using string internal cache, 15 bytes + '\n'
     const int n_chars = llama_token_to_piece(vocab, token, &piece[0], piece.size(), 0, special);
@@ -1721,6 +1721,11 @@ std::string common_token_to_piece(const struct llama_vocab * vocab, llama_token 
     }
     else {
         piece.resize(n_chars);
+    }
+
+    if (marked && !piece.empty()) {
+        piece.insert(piece.begin(), COMMON_TOKEN_MARKER);
+        piece.push_back(COMMON_TOKEN_MARKER);
     }
 
     return piece;

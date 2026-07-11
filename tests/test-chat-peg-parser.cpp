@@ -985,7 +985,7 @@ static void test_tagged_peg_parser(testing & t) {
 }
 
 static void test_marked_tokens(testing & t) {
-    const std::string MARK(1, COMMON_PEG_TOKEN_MARKER);
+    const std::string MARK(1, COMMON_TOKEN_MARKER);
     auto marked = [&](const std::string & s) { return MARK + s + MARK; };
 
     t.test("mark tokens helper", [&](testing & t) {
@@ -1091,15 +1091,15 @@ static void test_marked_tokens(testing & t) {
         t.assert_true("bare mode still parses", !parse(arena, "<think>abc</think>after", false).fail());
     });
 
-    t.test("fused literal", [&](testing & t) {
-        // Literals fusing a token with plain text match the wrapped token in marked mode
+    t.test("literal ignores markers", [&](testing & t) {
+        // Literals never match marked tokens; grammars must use token() for special-token text
         auto arena = build_peg_parser([](common_peg_parser_builder & p) {
             return p.literal("<|channel|>analysis") + p.end();
         });
 
         t.assert_true("bare mode", parse(arena, "<|channel|>analysis", false).success());
-        t.assert_true("marked mode", parse(arena, marked("<|channel|>") + "analysis", true, { "<|channel|>" }).success());
-        t.assert_true("marked mode rejects bare", !parse(arena, "<|channel|>analysis", true, { "<|channel|>" }).success());
+        t.assert_true("marked mode still matches bare", parse(arena, "<|channel|>analysis", true, { "<|channel|>" }).success());
+        t.assert_true("marked mode rejects wrapped", !parse(arena, marked("<|channel|>") + "analysis", true, { "<|channel|>" }).success());
     });
 
     t.test("serialization round trip", [&](testing & t) {
@@ -1108,7 +1108,7 @@ static void test_marked_tokens(testing & t) {
         });
 
         auto data = arena.save();
-        t.assert_true("no marker bytes in serialized arena", data.find(COMMON_PEG_TOKEN_MARKER) == std::string::npos);
+        t.assert_true("no marker bytes in serialized arena", data.find(COMMON_TOKEN_MARKER) == std::string::npos);
 
         common_peg_arena loaded;
         loaded.load(data);
@@ -1134,11 +1134,12 @@ static void test_marked_tokens(testing & t) {
         }
 
         {
-            // Marker bytes are scrubbed from mapped fields
-            std::string input = marked("<think>") + "a " + marked("<tool>") + " b" + marked("</think>") + "c" + MARK + "d";
+            // A well-formed grammar consumes every marked token, so marker
+            // bytes never reach message fields; unexpected ones pass through raw
+            std::string input = marked("<think>") + "a " + marked("<tool>") + " b" + marked("</think>") + "hello";
             auto msg = common_chat_peg_parse(arena, input, false, params);
-            t.assert_equal("markers scrubbed from reasoning", "a <tool> b", msg.reasoning_content);
-            t.assert_equal("markers scrubbed from content", "cd", msg.content);
+            t.assert_equal("unexpected marked token passes through", "a " + marked("<tool>") + " b", msg.reasoning_content);
+            t.assert_equal("content", "hello", msg.content);
         }
 
         {

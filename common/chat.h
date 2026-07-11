@@ -280,6 +280,9 @@ struct common_chat_params {
     std::vector<std::string>            additional_stops;
     std::string                         parser;
     common_chat_msg_delimiters          message_delimiters;
+    // Whether special tokens should be marked in the generated text for this
+    // format (the parser declares them with token(), see the PEG builder)
+    bool                                token_markers        = false;
 };
 
 // per-message parsing syntax
@@ -295,7 +298,7 @@ struct common_chat_parser_params {
     bool                    echo                 = false;  // Include assistant prefilled msg in output
     bool                    debug                = false;  // Enable debug output for PEG parser
     common_peg_arena        parser               = {};
-    // Token strings that appear in the input wrapped in COMMON_PEG_TOKEN_MARKER
+    // Token strings that appear in the input wrapped in COMMON_TOKEN_MARKER
     // bytes (see token() in the PEG builder). Empty = markers disabled.
     std::set<std::string>   marked_tokens;
     common_chat_parser_params() = default;

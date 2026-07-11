@@ -36,22 +36,6 @@ static std::string_view trim(std::string_view sv) {
     return trim_trailing_space(trim_leading_space(sv, 1));
 }
 
-// Remove token marker bytes so they never leak into message fields. An
-// unexpected marked token in content keeps its text, only the markers are dropped.
-static std::string strip_token_markers(std::string_view sv) {
-    if (sv.find(COMMON_PEG_TOKEN_MARKER) == std::string_view::npos) {
-        return std::string(sv);
-    }
-    std::string result;
-    result.reserve(sv.size());
-    for (char c : sv) {
-        if (c != COMMON_PEG_TOKEN_MARKER) {
-            result += c;
-        }
-    }
-    return result;
-}
-
 // Count the number of unclosed '{' braces in a JSON-like string,
 // properly skipping braces inside quoted strings.
 static int json_brace_depth(const std::string & s) {
@@ -291,20 +275,18 @@ void common_chat_peg_mapper::from_ast(const common_peg_ast_arena &    arena,
 }
 
 void common_chat_peg_mapper::map(const common_peg_ast_node & node) {
-    const std::string node_text = strip_token_markers(node.text);
-
     // Handle reasoning/content tags
     bool is_reasoning = node.tag == common_chat_peg_builder::REASONING;
     bool is_content   = node.tag == common_chat_peg_builder::CONTENT;
 
     if (is_reasoning) { // GPT OSS can have more than 1 reasoning block, so concatenate here
-        result.reasoning_content += node_text;
+        result.reasoning_content += std::string(node.text);
     }
 
     if (is_content) {
         // Concatenate content from multiple content nodes (e.g., when reasoning markers
         // are preserved before content markers in reasoning_format=NONE mode)
-        result.content += node_text;
+        result.content += std::string(node.text);
     }
 
     // Handle tool-related tags (supporting both JSON and tagged formats)
@@ -328,7 +310,7 @@ void common_chat_peg_mapper::map(const common_peg_ast_node & node) {
     }
 
     if (is_tool_id && current_tool) {
-        auto text = trim_trailing_space(node_text);
+        auto text = trim_trailing_space(node.text);
         if (text.size() >= 2 && text.front() == '"' && text.back() == '"') {
             text = text.substr(1, text.size() - 2);
         }
@@ -336,7 +318,7 @@ void common_chat_peg_mapper::map(const common_peg_ast_node & node) {
     }
 
     if (is_tool_name && current_tool) {
-        current_tool->name = std::string(trim_trailing_space(node_text));
+        current_tool->name = std::string(trim_trailing_space(node.text));
         // Now that we have the name, populate the arguments from the buffer
         if (!args_buffer.empty()) {
             current_tool->arguments = args_buffer;
@@ -355,7 +337,7 @@ void common_chat_peg_mapper::map(const common_peg_ast_node & node) {
     if (is_tool_args && current_tool) {
         // For JSON format: arguments come as a complete JSON object
         // For tagged format: built up from individual arg_name/arg_value nodes
-        auto text = trim_trailing_space(node_text);
+        auto text = trim_trailing_space(node.text);
         if (!text.empty() && text.front() == '{') {
             args_target() = std::string(text);
         }
@@ -370,7 +352,7 @@ void common_chat_peg_mapper::map(const common_peg_ast_node & node) {
         if (arg_count > 0) {
             arg_entry = ",";
         }
-        arg_entry += ordered_json(trim(node_text)).dump() + ":";
+        arg_entry += ordered_json(trim(node.text)).dump() + ":";
         ++arg_count;
 
         auto & target = args_target();
@@ -381,7 +363,7 @@ void common_chat_peg_mapper::map(const common_peg_ast_node & node) {
     }
 
     if ((is_arg_value || is_arg_string_value) && current_tool) {
-        std::string value_content = node_text;
+        std::string value_content = std::string(node.text);
 
         std::string value_to_add;
         if (value_content.empty() && is_arg_string_value) {
@@ -877,7 +859,7 @@ common_peg_parser common_chat_peg_builder::optspace(const std::string & tag) {
     for (size_t i = 0; i < end_of_prefix_space; i++) {
         parser += optional(literal(std::string(1, tag[i])));
     }
-    parser += token(tag.substr(end_of_prefix_space, start_of_suffix_space - end_of_prefix_space));
+    parser += literal(tag.substr(end_of_prefix_space, start_of_suffix_space - end_of_prefix_space));
     for (size_t i = start_of_suffix_space; i < tag.size(); i++) {
         parser += optional(literal(std::string(1, tag[i])));
     }
@@ -953,7 +935,7 @@ static std::string gemma4_to_json(const common_peg_ast_arena & arena, common_peg
     }
 
     if (node.rule == "gemma4-string-content") {
-        return escape_json_string_inner(strip_token_markers(node.text));
+        return escape_json_string_inner(std::string(node.text));
     }
 
     if (node.rule == "gemma4-string") {
@@ -986,7 +968,7 @@ static std::string gemma4_to_json(const common_peg_ast_arena & arena, common_peg
     }
 
     if (node.rule == "gemma4-dict-key-name") {
-        return strip_token_markers(node.text);
+        return std::string(node.text);
     }
 
     if (node.rule == "gemma4-dict-key") {
@@ -1040,12 +1022,12 @@ void common_chat_peg_gemma4_mapper::visit(const common_peg_ast_arena & arena, co
     const auto & node = arena.get(id);
 
     if (node.tag == "reasoning") {
-        result.reasoning_content += strip_token_markers(node.text);
+        result.reasoning_content += std::string(node.text);
         return;
     }
 
     if (node.tag == "content") {
-        result.content += strip_token_markers(node.text);
+        result.content += std::string(node.text);
         return;
     }
 

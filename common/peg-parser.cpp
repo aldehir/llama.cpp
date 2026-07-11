@@ -32,13 +32,13 @@ static bool is_hex_digit(const char c) {
     return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
 }
 
-// Sentinel codepoint for COMMON_PEG_TOKEN_MARKER, above the Unicode maximum
+// Sentinel codepoint for COMMON_TOKEN_MARKER, above the Unicode maximum
 // (U+10FFFF) so it cannot collide with any real codepoint.
 static constexpr uint32_t PEG_TOKEN_MARKER_CODEPOINT = 0x110000;
 
 // Parse a single atom: either the token marker byte (0xff) or a UTF-8 codepoint.
 static utf8_parse_result peg_parse_atom(std::string_view sv, size_t pos) {
-    if (pos < sv.size() && static_cast<unsigned char>(sv[pos]) == static_cast<unsigned char>(COMMON_PEG_TOKEN_MARKER)) {
+    if (pos < sv.size() && static_cast<unsigned char>(sv[pos]) == static_cast<unsigned char>(COMMON_TOKEN_MARKER)) {
         return utf8_parse_result(utf8_parse_result::SUCCESS, PEG_TOKEN_MARKER_CODEPOINT, 1);
     }
     return common_parse_utf8_codepoint(sv, pos);
@@ -60,9 +60,9 @@ std::string common_peg_mark_tokens(const std::string & text, const std::set<std:
         bool matched = false;
         for (const auto & tok : sorted) {
             if (!tok.empty() && text.compare(pos, tok.size(), tok) == 0) {
-                result += COMMON_PEG_TOKEN_MARKER;
+                result += COMMON_TOKEN_MARKER;
                 result += tok;
-                result += COMMON_PEG_TOKEN_MARKER;
+                result += COMMON_TOKEN_MARKER;
                 pos += tok.size();
                 matched = true;
                 break;
@@ -467,15 +467,12 @@ struct parser_executor {
     }
 
     common_peg_parse_result operator()(const common_peg_literal_parser & p) {
-        if (ctx.is_marked_tokens()) {
-            return match_literal(common_peg_mark_tokens(p.literal, ctx.marked_tokens));
-        }
         return match_literal(p.literal);
     }
 
     common_peg_parse_result operator()(const common_peg_token_parser & p) {
-        if (ctx.is_marked_tokens()) {
-            return match_literal(common_peg_mark_tokens(p.text, ctx.marked_tokens));
+        if (ctx.is_marked_tokens() && ctx.marked_tokens.count(p.text) > 0) {
+            return match_literal(COMMON_TOKEN_MARKER + p.text + COMMON_TOKEN_MARKER);
         }
         return match_literal(p.text);
     }

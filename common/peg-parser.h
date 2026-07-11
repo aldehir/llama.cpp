@@ -149,12 +149,8 @@ enum common_peg_parse_flags {
     COMMON_PEG_PARSE_FLAG_MARKED_TOKENS = 1 << 2,
 };
 
-// Sentinel byte used to mark special tokens in generated text. It never
-// occurs in valid UTF-8, so marked tokens cannot collide with ordinary text.
-constexpr char COMMON_PEG_TOKEN_MARKER = '\xff';
-
 // Wrap every occurrence of any of the given token strings in
-// COMMON_PEG_TOKEN_MARKER bytes (longest match first, left to right).
+// COMMON_TOKEN_MARKER bytes (longest match first, left to right).
 std::string common_peg_mark_tokens(const std::string & text, const std::set<std::string> & tokens);
 
 inline common_peg_parse_flags operator|(common_peg_parse_flags a, common_peg_parse_flags b) {
@@ -178,7 +174,7 @@ struct common_peg_parse_context {
     common_peg_parse_flags flags;
     common_peg_ast_arena ast;
 
-    // Token strings that appear in the input wrapped in COMMON_PEG_TOKEN_MARKER
+    // Token strings that appear in the input wrapped in COMMON_TOKEN_MARKER
     // bytes. Only consulted when COMMON_PEG_PARSE_FLAG_MARKED_TOKENS is set.
     std::set<std::string> marked_tokens;
 
@@ -209,7 +205,7 @@ struct common_peg_literal_parser {
 };
 
 // Matches a special token's text. In marked-token mode the text matches only
-// in its COMMON_PEG_TOKEN_MARKER-wrapped form; otherwise it behaves exactly
+// in its COMMON_TOKEN_MARKER-wrapped form; otherwise it behaves exactly
 // like common_peg_literal_parser.
 struct common_peg_token_parser {
     std::string text;

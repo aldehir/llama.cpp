@@ -123,32 +123,38 @@ text that happens to spell it out (e.g. the model echoing part of the prompt).
 Token markers disambiguate the two.
 
 When enabled, the server wraps the text of each marked special token in
-`COMMON_PEG_TOKEN_MARKER` (`0xff`) bytes at detokenization time, e.g.
+`COMMON_TOKEN_MARKER` (`0xff`) bytes at detokenization time, e.g.
 `"\xff</think>\xff"`. Since `0xff` never occurs in valid UTF-8, the wrapped
 form cannot collide with ordinary text.
 
 On the parsing side, marked mode is active when the parse context has the
 `COMMON_PEG_PARSE_FLAG_MARKED_TOKENS` flag and a `marked_tokens` set. In this
-mode every text matcher (`literal`, `token`, and `until` delimiters) expects
-occurrences of marked token strings in their wrapped form
-(`common_peg_mark_tokens()` computes it), so bare marker text no longer
-matches and simply flows into content. Stray `0xff` bytes and unexpected
-wrapped tokens are consumed as content; the chat mappers strip the marker
-bytes from all message fields.
+mode `token()` matches only the wrapped form of a marked string, and `until`
+delimiters match with marked-token occurrences wrapped (this covers fused
+delimiters that embed a token inside plain text). `literal()` never applies
+token logic - it always matches its exact text, so grammars must use
+`token()` for special-token markers. Bare marker text no longer matches
+token rules and simply flows into content; stray `0xff` bytes and unexpected
+wrapped tokens are consumed as content by `until`/`any` - a well-formed
+grammar consumes every marked token, so marker bytes never reach message
+fields.
 
-Use `token(string)` instead of `literal(string)` for markers that are special
-tokens. Functionally it is identical to `literal()`, but it also *declares*
-the string: `common_peg_arena::collect_tokens()` returns all declared token
-strings, and the server marks exactly those that are preserved tokens and
-verify as a single special token in the model's vocab
-(`chat_parser_params.marked_tokens` / `task_params.marked_token_ids`). A
-declared string that does not verify (multi-token in this vocab, or not
-special) stays bare on both the emission and parsing side.
+Besides matching, `token(string)` *declares* the string:
+`common_peg_arena::collect_tokens()` returns all declared token strings, and
+the server marks exactly those that are preserved tokens and verify as a
+single special token in the model's vocab (`chat_parser_params.marked_tokens`
+/ `task_params.marked_token_ids`). A declared string that does not verify
+(multi-token in this vocab, or not special) stays bare on both the emission
+and parsing side.
 
 Serialized parsers (`save()`/`load()`) and generated GBNF grammars always
-contain the bare text; wrapped forms are computed at match time only. The
-feature is enabled by default in the server chat path and can be disabled
-with `--no-chat-token-markers`.
+contain the bare text; wrapped forms are computed at match time only. Marker
+injection is opted into per chat format via
+`common_chat_params::token_markers`, set by the hand-written
+`common_chat_params_init_*` builders whose grammars declare their markers
+with `token()`. Thinking formats only set it when reasoning extraction is
+enabled: with `reasoning_format=none` the reasoning markers are intentionally
+routed into content, which would carry raw marker bytes.
 
 ## GBNF Grammar Generation
 
