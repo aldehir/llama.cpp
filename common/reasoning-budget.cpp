@@ -4,6 +4,9 @@
 
 #include "log.h"
 
+#include "ggml.h"
+#include "ggml-backend.h"
+
 #include <cmath>
 #include <cstdint>
 #include <string>
@@ -50,6 +53,10 @@ struct common_reasoning_budget_ctx {
 
     // for forcing
     size_t force_pos;         // next position in forced_tokens to force
+
+    // backend sampling inputs
+    struct ggml_tensor * inp_idx;  // I32 [1], token to keep
+    struct ggml_tensor * inp_gate; // F32 [1], mask value (0 when passthrough)
 };
 
 static const char * common_reasoning_budget_name(const struct llama_sampler * /*smpl*/) {
@@ -162,6 +169,113 @@ static void common_reasoning_budget_apply(struct llama_sampler * smpl, llama_tok
     }
 }
 
+// The backend implementation adds an inverse mask to the logits: inp_gate
+// everywhere except inp_idx, which gets 0. While passthrough the gate is 0
+// and the logits are unchanged. When forcing, a large negative gate removes
+// every candidate but the forced token, whose logit keeps its original
+// small magnitude so the relative threshold math of downstream samplers
+// (e.g. min-p) is not affected by float rounding. The state machine itself
+// remains on the CPU, driven by accept(); only the per-step {token, gate}
+// pair is uploaded to the backend.
+static void common_reasoning_budget_backend_apply(
+        struct llama_sampler      * smpl,
+        struct ggml_context       * ctx,
+        struct ggml_cgraph        * gf,
+        struct llama_sampler_data * data) {
+    GGML_UNUSED(gf);
+
+    auto * sctx = (common_reasoning_budget_ctx *) smpl->ctx;
+
+    sctx->inp_gate = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, 1);
+    ggml_set_name (sctx->inp_gate, "rbudget_gate");
+    ggml_set_input(sctx->inp_gate);
+
+    sctx->inp_idx = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, 1);
+    ggml_set_name (sctx->inp_idx, "rbudget_idx");
+    ggml_set_input(sctx->inp_idx);
+
+    ggml_tensor * ones = ggml_scale_bias(ctx, data->logits, 0.0f, 1.0f);
+
+    ggml_tensor * mask = ggml_mul(ctx, ones, sctx->inp_gate);
+
+    ggml_tensor * zero = ggml_reshape_2d(ctx, ggml_scale(ctx, sctx->inp_gate, 0.0f), 1, 1);
+
+    mask = ggml_reshape_2d(ctx, mask, 1, ggml_nelements(mask));
+    mask = ggml_set_rows(ctx, mask, zero, sctx->inp_idx);
+    mask = ggml_reshape_1d(ctx, mask, ggml_nelements(mask));
+
+    data->logits = ggml_add(ctx, data->logits, mask);
+}
+
+static void common_reasoning_budget_backend_set_input(struct llama_sampler * smpl) {
+    auto * sctx = (common_reasoning_budget_ctx *) smpl->ctx;
+
+    GGML_ASSERT(sctx->inp_idx  != nullptr);
+    GGML_ASSERT(sctx->inp_gate != nullptr);
+
+    int32_t idx  = 0;
+    float   gate = 0.0f;
+
+    if (sctx->state == REASONING_BUDGET_FORCING && sctx->force_pos < sctx->forced_tokens.size()) {
+        idx  = sctx->forced_tokens[sctx->force_pos];
+        gate = -1e9f;
+    }
+
+    ggml_backend_tensor_set(sctx->inp_idx,  &idx,  0, sizeof(idx));
+    ggml_backend_tensor_set(sctx->inp_gate, &gate, 0, sizeof(gate));
+}
+
+static bool common_reasoning_budget_backend_init(
+        struct llama_sampler       * smpl,
+        ggml_backend_buffer_type_t   buft) {
+    auto * device = ggml_backend_buft_get_device(buft);
+    if (!device) {
+        // CPU backend always supported
+        return true;
+    }
+
+    ggml_init_params params = {
+        /*.mem_size   =*/ 128*ggml_tensor_overhead() + ggml_graph_overhead(),
+        /*.mem_buffer =*/ NULL,
+        /*.no_alloc   =*/ true,
+    };
+
+    ggml_context * ctx = ggml_init(params);
+    if (!ctx) {
+        return false;
+    }
+
+    llama_sampler_data data = {
+        /*.logits     =*/ ggml_new_tensor_1d(ctx, GGML_TYPE_F32, 1024*1024),
+        /*.probs      =*/ nullptr,
+        /*.sampled    =*/ nullptr,
+        /*.candidates =*/ nullptr,
+    };
+
+    ggml_cgraph * gf = ggml_new_graph(ctx);
+
+    common_reasoning_budget_backend_apply(smpl, ctx, gf, &data);
+
+    ggml_build_forward_expand(gf, data.logits);
+
+    bool res = true;
+    for (int i = 0; i < ggml_graph_n_nodes(gf); i++) {
+        struct ggml_tensor * op = ggml_graph_node(gf, i);
+
+        if (!ggml_backend_dev_supports_op(device, op)) {
+            LOG_WRN("%s: device '%s' does not have support for op %s needed for sampler 'reasoning-budget'\n",
+                    __func__, ggml_backend_dev_name(device), ggml_op_name(op->op));
+
+            res = false;
+            break;
+        }
+    }
+
+    ggml_free(ctx);
+
+    return res;
+}
+
 static void common_reasoning_budget_reset(struct llama_sampler * smpl) {
     auto * ctx = (common_reasoning_budget_ctx *) smpl->ctx;
     ctx->state = REASONING_BUDGET_IDLE;
@@ -189,18 +303,24 @@ static struct llama_sampler_i common_reasoning_budget_i = {
     /* .reset             = */ common_reasoning_budget_reset,
     /* .clone             = */ common_reasoning_budget_clone,
     /* .free              = */ common_reasoning_budget_free,
-    /* .backend_init      = */ nullptr,
+    /* .backend_init      = */ common_reasoning_budget_backend_init,
     /* .backend_accept    = */ nullptr,
-    /* .backend_apply     = */ nullptr,
-    /* .backend_set_input = */ nullptr,
+    /* .backend_apply     = */ common_reasoning_budget_backend_apply,
+    /* .backend_set_input = */ common_reasoning_budget_backend_set_input,
 };
 
 static struct llama_sampler * common_reasoning_budget_clone(const struct llama_sampler * smpl) {
     const auto * ctx = (const common_reasoning_budget_ctx *) smpl->ctx;
 
+    auto * ctx_clone = new common_reasoning_budget_ctx(*ctx);
+
+    // input tensors belong to the source sampler's graph
+    ctx_clone->inp_idx  = nullptr;
+    ctx_clone->inp_gate = nullptr;
+
     return llama_sampler_init(
         /* .iface = */ &common_reasoning_budget_i,
-        /* .ctx   = */ new common_reasoning_budget_ctx(*ctx)
+        /* .ctx   = */ ctx_clone
     );
 }
 
@@ -227,6 +347,8 @@ static struct llama_sampler * common_reasoning_budget_init_state(
             /* .remaining     = */ budget,
             /* .state         = */ initial_state,
             /* .force_pos     = */ 0,
+            /* .inp_idx       = */ nullptr,
+            /* .inp_gate      = */ nullptr,
         }
     );
 }

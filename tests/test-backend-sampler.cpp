@@ -3,6 +3,7 @@
 #include "llama-cpp.h"
 #include "get-model.h"
 #include "common.h"
+#include "reasoning-budget.h"
 
 #ifdef NDEBUG
 #undef NDEBUG
@@ -762,6 +763,60 @@ static void test_backend_logit_bias_sampling(const test_params & params) {
     printf("backend logit bias sampling test PASSED\n");
 }
 
+// Verifies that the reasoning budget sampler can force its token sequence when
+// running as part of a backend sampler chain. The nested chain mirrors how
+// common_sampler wraps [rbudget, chain] for backend sampling.
+static void test_backend_reasoning_budget_sampling(const test_params & params) {
+    const auto * model = params.model.get();
+    const auto * vocab = llama_model_get_vocab(model);
+
+    const int seq_id = 0;
+
+    const std::vector<llama_token> forced = { 5, 42, 7 };
+
+    struct llama_sampler_chain_params chain_params = llama_sampler_chain_default_params();
+
+    llama_sampler * rbudget = common_reasoning_budget_init(vocab, {}, {}, forced, 0, REASONING_BUDGET_FORCING);
+
+    llama_sampler * chain = llama_sampler_chain_init(chain_params);
+    llama_sampler_chain_add(chain, llama_sampler_init_greedy());
+
+    llama_sampler_ptr bchain(llama_sampler_chain_init(chain_params));
+    llama_sampler_chain_add(bchain.get(), rbudget);
+    llama_sampler_chain_add(bchain.get(), chain);
+
+    std::vector<llama_sampler_seq_config> backend_sampler_configs = {
+        { seq_id, bchain.get() },
+    };
+
+    test_context test_ctx(params, backend_sampler_configs);
+
+    if (!test_ctx.decode({{seq_id, "Hello"}})) {
+        GGML_ASSERT(false && "Failed to decode token");
+    }
+
+    for (size_t i = 0; i < forced.size(); i++) {
+        llama_token token = llama_get_sampled_token_ith(test_ctx.ctx.get(), test_ctx.idx_for_seq(seq_id));
+        printf("step %zu: sampled token = %d, expected = %d\n", i, token, forced[i]);
+        GGML_ASSERT(token == forced[i]);
+
+        llama_sampler_accept(rbudget, token);
+
+        if (!test_ctx.decode_token(token, seq_id)) {
+            GGML_ASSERT(false && "Failed to decode token");
+        }
+    }
+
+    GGML_ASSERT(common_reasoning_budget_get_state(rbudget) == REASONING_BUDGET_DONE);
+
+    // once the forced sequence completes, sampling proceeds unconstrained
+    llama_token token = llama_get_sampled_token_ith(test_ctx.ctx.get(), test_ctx.idx_for_seq(seq_id));
+    printf("post-forcing sampled token = %d\n", token);
+    GGML_ASSERT(token >= 0 && token < test_ctx.n_vocab);
+
+    printf("backend reasoning budget sampling test PASSED\n");
+}
+
 // This test verifies that it is possible to have two different backend samplers,
 // one that uses the backend dist sampler, and another that uses CPU dist sampler.
 static void test_backend_mixed_sampling(const test_params & params) {
@@ -1015,6 +1070,7 @@ struct backend_test_case {
 static const backend_test_case BACKEND_TESTS[] = {
     { "greedy",          test_backend_greedy_sampling,         true  },
     { "logit_bias",      test_backend_logit_bias_sampling,     true  },
+    { "reasoning_budget", test_backend_reasoning_budget_sampling, true },
     { "temp",            test_backend_temp_sampling,           true  },
     { "temp_ext",        test_backend_temp_ext_sampling,       true  },
     { "top_k",           test_backend_top_k_sampling,          true  },

@@ -115,6 +115,9 @@ struct common_sampler {
     struct llama_sampler * rbudget;
     struct llama_sampler * chain;
 
+    // wraps [rbudget, chain] for backend sampling; owns both when set
+    struct llama_sampler * bchain;
+
     ring_buffer<llama_token> prev;
 
     std::vector<llama_token_data> cur;
@@ -395,10 +398,14 @@ struct common_sampler * common_sampler_init(const struct llama_model * model, st
         params.backend_sampling = false;
     }
 
+    // the reasoning budget must be applied before the chain, so wrap both in an
+    // outer chain that can be offloaded to the backend as a whole
+    llama_sampler * bchain = nullptr;
     if (rbudget && params.backend_sampling) {
-        LOG_WRN("%s: backend sampling is not compatible with reasoning budget, disabling\n", __func__);
+        bchain = llama_sampler_chain_init(lparams);
 
-        params.backend_sampling = false;
+        llama_sampler_chain_add(bchain, rbudget);
+        llama_sampler_chain_add(bchain, chain);
     }
 
     auto * result = new common_sampler {
@@ -406,6 +413,7 @@ struct common_sampler * common_sampler_init(const struct llama_model * model, st
         /* .grmr    = */ grmr,
         /* .rbudget = */ rbudget,
         /* .chain   = */ chain,
+        /* .bchain  = */ bchain,
         /* .prev    = */ ring_buffer<llama_token>(std::max(32, params.n_prev)),
         /* .cur     = */ {},
         /* .cur_p   = */ {},
@@ -420,8 +428,13 @@ void common_sampler_free(struct common_sampler * gsmpl) {
     }
 
     llama_sampler_free(gsmpl->grmr);
-    llama_sampler_free(gsmpl->rbudget);
-    llama_sampler_free(gsmpl->chain);
+
+    if (gsmpl->bchain) {
+        llama_sampler_free(gsmpl->bchain);
+    } else {
+        llama_sampler_free(gsmpl->rbudget);
+        llama_sampler_free(gsmpl->chain);
+    }
 
     delete gsmpl;
 }
@@ -473,11 +486,25 @@ void common_sampler_reset(struct common_sampler * gsmpl) {
 }
 
 struct common_sampler * common_sampler_clone(common_sampler * gsmpl) {
+    llama_sampler * rbudget = nullptr;
+    llama_sampler * chain   = nullptr;
+    llama_sampler * bchain  = nullptr;
+
+    if (gsmpl->bchain) {
+        bchain  = llama_sampler_clone(gsmpl->bchain);
+        rbudget = llama_sampler_chain_get(bchain, 0);
+        chain   = llama_sampler_chain_get(bchain, 1);
+    } else {
+        rbudget = llama_sampler_clone(gsmpl->rbudget);
+        chain   = llama_sampler_clone(gsmpl->chain);
+    }
+
     return new common_sampler {
         /* .params  = */ gsmpl->params,
         /* .grmr    = */ llama_sampler_clone(gsmpl->grmr),
-        /* .rbudget = */ llama_sampler_clone(gsmpl->rbudget),
-        /* .chain   = */ llama_sampler_clone(gsmpl->chain),
+        /* .rbudget = */ rbudget,
+        /* .chain   = */ chain,
+        /* .bchain  = */ bchain,
         /* .prev    = */ gsmpl->prev,
         /* .cur     = */ gsmpl->cur,
         /* .cur_p   = */ gsmpl->cur_p,
@@ -534,7 +561,7 @@ struct llama_sampler * common_sampler_get(const struct common_sampler * gsmpl) {
         return nullptr;
     }
 
-    return gsmpl->chain;
+    return gsmpl->bchain ? gsmpl->bchain : gsmpl->chain;
 }
 
 llama_token common_sampler_sample(struct common_sampler * gsmpl, struct llama_context * ctx, int idx, bool grammar_first) {
@@ -560,8 +587,7 @@ llama_token common_sampler_sample(struct common_sampler * gsmpl, struct llama_co
         if (id != LLAMA_TOKEN_NULL) {
             LOG_DBG("%s: Backend sampler selected token: '%d'. Will not run any CPU samplers\n", __func__, id);
 
-            GGML_ASSERT(!gsmpl->grmr    && "using grammar in combination with backend sampling is not supported");
-            GGML_ASSERT(!gsmpl->rbudget && "using reasoning budget in combination with backend sampling is not supported");
+            GGML_ASSERT(!gsmpl->grmr && "using grammar in combination with backend sampling is not supported");
 
             for (size_t i = 0; i < cur_p.size; ++i) {
                 if (cur_p.data[i].id == id) {
