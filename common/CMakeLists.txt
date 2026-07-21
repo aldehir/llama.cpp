@@ -61,6 +61,18 @@ add_library(${TARGET}
     chat-auto-parser-helpers.cpp
     chat-auto-parser.h
     chat-diff-analyzer.cpp
+    chat-parsers/chat-parsers.cpp
+    chat-parsers/chat-parsers.h
+    chat-parsers/cohere.cpp
+    chat-parsers/deepseek.cpp
+    chat-parsers/functionary.cpp
+    chat-parsers/gemma.cpp
+    chat-parsers/gigachat.cpp
+    chat-parsers/gpt-oss.cpp
+    chat-parsers/kimi-k2.cpp
+    chat-parsers/lfm2.cpp
+    chat-parsers/minicpm.cpp
+    chat-parsers/ministral.cpp
     chat-peg-parser.cpp
     chat-peg-parser.h
     chat-render.h
