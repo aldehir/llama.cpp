@@ -76,6 +76,8 @@ add_library(${TARGET}
     chat-peg-parser.cpp
     chat-peg-parser.h
     chat-render.h
+    chat-session.cpp
+    chat-session.h
     chat.cpp
     chat.h
     common.cpp

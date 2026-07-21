@@ -70,7 +70,6 @@ common_chat_params peg_generator::generate_parser(const common_chat_template &  
     }
 
     auto parser = autoparser.build_parser(inputs, parser_generation_prompt);
-    data.parser = parser.save();
 
     // Build grammar if tools are present
     bool has_tools =
@@ -109,6 +108,8 @@ common_chat_params peg_generator::generate_parser(const common_chat_template &  
             }
         }
     }
+
+    data.parser = std::move(parser);
 
     return data;
 }

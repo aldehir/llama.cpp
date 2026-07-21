@@ -138,7 +138,6 @@ static common_chat_params common_chat_params_init_gpt_oss(const common_chat_temp
         return p.zero_or_more(start + any) + start + (final_msg | unsolicited);
     });
 
-    data.parser = parser.save();
 
     if (include_grammar) {
         data.grammar_lazy = !(has_response_format || (has_tools && inputs.tool_choice == COMMON_CHAT_TOOL_CHOICE_REQUIRED));
@@ -162,6 +161,8 @@ static common_chat_params common_chat_params_init_gpt_oss(const common_chat_temp
             { COMMON_GRAMMAR_TRIGGER_TYPE_PATTERN, "<\\|start\\|>assistant(<\\|channel\\|>(?:commentary|analysis)\\s+to)" }
         };
     }
+
+    data.parser = std::move(parser);
 
     return data;
 }

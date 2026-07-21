@@ -88,8 +88,8 @@ struct task_params {
     std::string        control_action;
     std::string        control_cmpl_id;
 
-    // per-request parameters for chat parsing
-    common_chat_parser_params chat_parser_params;
+    // per-request chat session (null for raw completions)
+    common_chat_session_ptr chat_session;
 
     // message spans for checkpointing
     common_chat_msg_spans message_spans;
@@ -105,7 +105,7 @@ struct task_params {
 struct task_result_state {
     // tracking diffs for partial tool calls
     std::vector<common_chat_msg_diff> diffs;
-    common_chat_parser_params chat_parser_params;
+    common_chat_session_ptr chat_session;
     common_chat_msg chat_msg;
     std::string generated_text; // append new chunks of generated text here
     std::vector<std::string> generated_tool_call_ids;
@@ -123,7 +123,7 @@ struct task_result_state {
     const std::string oai_resp_message_id;
     std::string oai_resp_fc_id; // function call ID for current args delta
 
-    task_result_state(const common_chat_parser_params & chat_parser_params);
+    task_result_state(common_chat_session_ptr chat_session);
 
     // parse partial tool calls and update the internal state
     common_chat_msg update_chat_msg(
@@ -247,7 +247,7 @@ struct server_task {
     // the task will be moved into queue, then onto slots
     // however, the state must be kept by caller (e.g., HTTP thread)
     task_result_state create_state() const {
-        return task_result_state(params.chat_parser_params);
+        return task_result_state(params.chat_session);
     }
 
     bool is_parent() const {

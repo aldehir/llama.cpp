@@ -4026,12 +4026,61 @@ void server_context::set_state_callback(server_state_callback_t callback) {
 // server_routes
 //
 
+// apply template-derived session params to a task, mirroring the JSON schema
+// handling of the equivalent public fields (grammar_triggers, preserved_tokens)
+static void apply_chat_session_params(const common_chat_session & session, const llama_vocab * vocab, task_params & params) {
+    const auto & cp      = session.params();
+    auto &       sparams = params.sampling;
+
+    if (!cp.grammar.empty()) {
+        sparams.grammar      = {COMMON_GRAMMAR_TYPE_TOOL_CALLS, cp.grammar};
+        sparams.grammar_lazy = cp.grammar_lazy;
+    }
+
+    for (const auto & t : cp.preserved_tokens) {
+        auto ids = common_tokenize(vocab, t, false, true);
+        if (ids.size() == 1) {
+            sparams.preserved_tokens.insert(ids[0]);
+        }
+    }
+
+    for (const auto & trigger : cp.grammar_triggers) {
+        if (trigger.type == COMMON_GRAMMAR_TRIGGER_TYPE_WORD) {
+            const auto & word = trigger.value;
+            auto ids = common_tokenize(vocab, word, false, true);
+            if (ids.size() == 1) {
+                auto token = ids[0];
+                if (sparams.preserved_tokens.find(token) == sparams.preserved_tokens.end()) {
+                    throw std::runtime_error("Grammar trigger word should be marked as preserved token: " + word);
+                }
+                common_grammar_trigger token_trigger;
+                token_trigger.type  = COMMON_GRAMMAR_TRIGGER_TYPE_TOKEN;
+                token_trigger.value = word;
+                token_trigger.token = token;
+                sparams.grammar_triggers.push_back(std::move(token_trigger));
+                continue;
+            }
+        }
+        sparams.grammar_triggers.push_back(trigger);
+    }
+    if (sparams.grammar_lazy && sparams.grammar_triggers.empty()) {
+        throw std::runtime_error("Error: no triggers set for lazy grammar!");
+    }
+
+    sparams.generation_prompt = cp.generation_prompt;
+
+    for (const auto & stop : cp.additional_stops) {
+        params.antiprompt.push_back(stop);
+    }
+}
+
 std::unique_ptr<server_res_generator> server_routes::handle_completions_impl(
             const server_http_req & req,
             server_task_type type,
             const json & data,
             const std::vector<raw_buffer> & files,
-            task_response_type res_type) {
+            task_response_type res_type,
+            common_chat_session_ptr chat_session) {
     GGML_ASSERT(type == SERVER_TASK_TYPE_COMPLETION || type == SERVER_TASK_TYPE_INFILL);
 
     auto res = create_response();
@@ -4072,8 +4121,11 @@ std::unique_ptr<server_res_generator> server_routes::handle_completions_impl(
         // tasks.reserve(inputs.size()); // TODO: this is inaccurate due to child tasks
 
         // message delimiters for checkpointing
-        auto delimiters = common_chat_msg_delimiters_parse(json_value(data, "message_delimiters", json::array()));
-        delimiters.tokenize(ctx_server.vocab);
+        common_chat_msg_delimiters delimiters;
+        if (chat_session) {
+            delimiters = chat_session->params().message_delimiters;
+            delimiters.tokenize(ctx_server.vocab);
+        }
 
         for (size_t i = 0; i < inputs.size(); i++) {
             server_task task = server_task(type);
@@ -4089,6 +4141,11 @@ std::unique_ptr<server_res_generator> server_routes::handle_completions_impl(
                     data);
 
             task.params.message_spans = task.tokens.find_message_spans(delimiters);
+
+            task.params.chat_session = chat_session;
+            if (chat_session) {
+                apply_chat_session_params(*chat_session, ctx_server.vocab, task.params);
+            }
 
             task.id_slot = json_value(data, "id_slot", -1);
             sse_ping_interval = task.params.sse_ping_interval;
@@ -4674,16 +4731,19 @@ void server_routes::init_routes() {
         auto res = create_response();
         std::vector<raw_buffer> files;
         json body = json::parse(req.body);
+        common_chat_session_ptr chat_session;
         json body_parsed = oaicompat_chat_params_parse(
             body,
             meta->chat_params,
-            files);
+            files,
+            chat_session);
         return handle_completions_impl(
             req,
             SERVER_TASK_TYPE_COMPLETION,
             body_parsed,
             files,
-            TASK_RESPONSE_TYPE_OAI_CHAT);
+            TASK_RESPONSE_TYPE_OAI_CHAT,
+            std::move(chat_session));
     };
 
     this->post_chat_completions_tok = [this](const server_http_req & req) {
@@ -4733,16 +4793,19 @@ void server_routes::init_routes() {
         json body = server_chat_convert_responses_to_chatcmpl(json::parse(req.body));
         SRV_DBG("%s\n", "Request converted: OpenAI Responses -> OpenAI Chat Completions");
         SRV_DBG("converted request: %s\n", body.dump().c_str());
+        common_chat_session_ptr chat_session;
         json body_parsed = oaicompat_chat_params_parse(
             body,
             meta->chat_params,
-            files);
+            files,
+            chat_session);
         return handle_completions_impl(
             req,
             SERVER_TASK_TYPE_COMPLETION,
             body_parsed,
             files,
-            TASK_RESPONSE_TYPE_OAI_RESP);
+            TASK_RESPONSE_TYPE_OAI_RESP,
+            std::move(chat_session));
     };
 
     this->post_responses_tok_oai = [this](const server_http_req & req) {
@@ -4765,16 +4828,19 @@ void server_routes::init_routes() {
             files);
         SRV_DBG("%s\n", "Request converted: OpenAI Transcriptions -> OpenAI Chat Completions");
         SRV_DBG("converted request: %s\n", body.dump().c_str());
+        common_chat_session_ptr chat_session;
         json body_parsed = oaicompat_chat_params_parse(
             body,
             meta->chat_params,
-            files);
+            files,
+            chat_session);
         return handle_completions_impl(
             req,
             SERVER_TASK_TYPE_COMPLETION,
             body_parsed,
             files,
-            TASK_RESPONSE_TYPE_OAI_ASR);
+            TASK_RESPONSE_TYPE_OAI_ASR,
+            std::move(chat_session));
     };
 
     this->post_anthropic_messages = [this](const server_http_req & req) {
@@ -4783,16 +4849,19 @@ void server_routes::init_routes() {
         json body = server_chat_convert_anthropic_to_oai(json::parse(req.body));
         SRV_DBG("%s\n", "Request converted: Anthropic -> OpenAI Chat Completions");
         SRV_DBG("converted request: %s\n", body.dump().c_str());
+        common_chat_session_ptr chat_session;
         json body_parsed = oaicompat_chat_params_parse(
             body,
             meta->chat_params,
-            files);
+            files,
+            chat_session);
         return handle_completions_impl(
             req,
             SERVER_TASK_TYPE_COMPLETION,
             body_parsed,
             files,
-            TASK_RESPONSE_TYPE_ANTHROPIC);
+            TASK_RESPONSE_TYPE_ANTHROPIC,
+            std::move(chat_session));
     };
 
     this->post_anthropic_count_tokens = [this](const server_http_req & req) {
@@ -4804,10 +4873,12 @@ void server_routes::init_routes() {
         auto res = create_response();
         std::vector<raw_buffer> files; // dummy, unused
         json body = json::parse(req.body);
+        common_chat_session_ptr chat_session;
         json data = oaicompat_chat_params_parse(
             body,
             meta->chat_params,
-            files);
+            files,
+            chat_session);
         res->ok({{ "prompt", std::move(data.at("prompt")) }});
         return res;
     };
@@ -5303,10 +5374,12 @@ std::unique_ptr<server_res_generator> server_routes::handle_count_tokens(const l
             return res;
     }
 
-    json body_parsed = oaicompat_chat_params_parse(
+    common_chat_session_ptr chat_session;
+        json body_parsed = oaicompat_chat_params_parse(
             body,
             meta->chat_params,
-            files);
+            files,
+            chat_session);
     json prompt = body_parsed.at("prompt");
     // SRV_DBG("prompt = %s\n", prompt.dump().c_str());
 

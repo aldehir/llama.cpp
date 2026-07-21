@@ -111,38 +111,6 @@ const char * common_chat_role_to_string(common_chat_role role) {
     return "";
 }
 
-json common_chat_msg_delimiters::to_json() const {
-    json result = json::array();
-    for (const auto & d : delimiters) {
-        result.push_back({
-            { "role",      common_chat_role_to_string(d.role) },
-            { "delimiter", d.delimiter                        },
-        });
-    }
-    return result;
-}
-
-common_chat_msg_delimiters common_chat_msg_delimiters_parse(const json & delimiters) {
-    common_chat_msg_delimiters result;
-
-    if (!delimiters.is_array()) {
-        return result;
-    }
-
-    result.delimiters.reserve(delimiters.size());
-    for (const auto & d : delimiters) {
-        if (!d.is_object()) {
-            continue;
-        }
-        result.delimiters.push_back({
-            common_chat_role_from_string(d.value("role", std::string())),
-            d.value("delimiter", std::string()),
-        });
-    }
-
-    return result;
-}
-
 void common_chat_msg_delimiters::tokenize(const llama_vocab * vocab) {
     for (auto & d : delimiters) {
         d.tokens = common_tokenize(vocab, d.delimiter, false, true);
@@ -1129,7 +1097,7 @@ static common_chat_params common_chat_templates_apply_jinja(const struct common_
         auto parser                    = build_chat_peg_parser([&data](common_chat_peg_builder &p) {
             return p.literal(data.generation_prompt) << p.content(p.rest());
         });
-        data.parser                    = parser.save();
+        data.parser                    = std::move(parser);
         return data;
     }
 
@@ -1158,9 +1126,8 @@ static common_chat_params common_chat_templates_apply_jinja(const struct common_
             auto_params.thinking_start_tag = trim_whitespace(autoparser.reasoning.start);
             auto_params.thinking_end_tag   = trim_whitespace(autoparser.reasoning.end);
         }
-        common_peg_arena arena;
-        arena.load(auto_params.parser);
-        LOG_DBG("%s: generated parser:\n%s\n\nparser generation prompt: %s\n", __func__, arena.dump(arena.root()).c_str(), auto_params.generation_prompt.c_str());
+        LOG_DBG("%s: generated parser:\n%s\n\nparser generation prompt: %s\n", __func__,
+                auto_params.parser.dump(auto_params.parser.root()).c_str(), auto_params.generation_prompt.c_str());
         return auto_params;
     } catch (const std::exception & e) {
         throw std::invalid_argument(std::string("Unable to generate parser for this template. Automatic parser generation failed: ") + e.what());

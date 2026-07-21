@@ -428,8 +428,7 @@ int main(int argc, char ** argv) {
             }
 
             LOG_ERR("\n=== Generated Parser ===\n");
-            common_peg_arena arena;
-            arena.load(parser_data.parser);
+            const common_peg_arena & arena = parser_data.parser;
             LOG_ERR("%s\n", arena.dump(arena.root()).c_str());
 
             LOG_ERR("\n=== Generated Grammar ===\n");

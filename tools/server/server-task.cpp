@@ -39,6 +39,9 @@ json task_params::to_json(bool only_metrics) const {
         lora.push_back({{"id", it.first}, {"scale", it.second}});
     }
 
+    static const common_chat_parser_params parser_params_default;
+    const common_chat_parser_params & parser_params = chat_session ? chat_session->parser_params() : parser_params_default;
+
     if (only_metrics) {
         return json {
             {"seed",                      sampling.seed},
@@ -71,10 +74,10 @@ json task_params::to_json(bool only_metrics) const {
             {"stream",                    stream},
             {"n_probs",                   sampling.n_probs},
             {"min_keep",                  sampling.min_keep},
-            {"chat_format",               common_chat_format_name(chat_parser_params.format)},
-            {"reasoning_format",          common_reasoning_format_name(chat_parser_params.reasoning_format)},
-            {"reasoning_in_content",      chat_parser_params.reasoning_in_content},
-            {"generation_prompt",         chat_parser_params.generation_prompt},
+            {"chat_format",               common_chat_format_name(parser_params.format)},
+            {"reasoning_format",          common_reasoning_format_name(parser_params.reasoning_format)},
+            {"reasoning_in_content",      parser_params.reasoning_in_content},
+            {"generation_prompt",         parser_params.generation_prompt},
             {"samplers",                  samplers},
             {"speculative.types",         common_speculative_type_name_str(speculative.types)},
             {"timings_per_token",         timings_per_token},
@@ -128,10 +131,10 @@ json task_params::to_json(bool only_metrics) const {
         {"grammar_lazy",              sampling.grammar_lazy},
         {"grammar_triggers",          grammar_triggers},
         {"preserved_tokens",          sampling.preserved_tokens},
-        {"chat_format",               common_chat_format_name(chat_parser_params.format)},
-        {"reasoning_format",          common_reasoning_format_name(chat_parser_params.reasoning_format)},
-        {"reasoning_in_content",      chat_parser_params.reasoning_in_content},
-        {"generation_prompt",         chat_parser_params.generation_prompt},
+        {"chat_format",               common_chat_format_name(parser_params.format)},
+        {"reasoning_format",          common_reasoning_format_name(parser_params.reasoning_format)},
+        {"reasoning_in_content",      parser_params.reasoning_in_content},
+        {"generation_prompt",         parser_params.generation_prompt},
         {"samplers",                  samplers},
         {"speculative.types",         common_speculative_type_name_str(speculative.types)},
         {"timings_per_token",         timings_per_token},
@@ -144,14 +147,17 @@ json task_params::to_json(bool only_metrics) const {
 //
 // task_result_state
 //
-task_result_state::task_result_state(const common_chat_parser_params & chat_parser_params)
-    : chat_parser_params(chat_parser_params)
+task_result_state::task_result_state(common_chat_session_ptr chat_session)
+    : chat_session(std::move(chat_session))
     , oai_resp_id("resp_" + random_string())
     , oai_resp_reasoning_id("rs_" + random_string())
     , oai_resp_message_id("msg_" + random_string()) {
-    if (chat_parser_params.is_continuation && !chat_parser_params.echo) {
-        // initialize chat_msg to avoid emitting a delta containing the assistant prefill
-        chat_msg = common_chat_parse("", true, chat_parser_params);
+    if (this->chat_session) {
+        const auto & parser_params = this->chat_session->parser_params();
+        if (parser_params.is_continuation && !parser_params.echo) {
+            // initialize chat_msg to avoid emitting a delta containing the assistant prefill
+            chat_msg = this->chat_session->parse("", true);
+        }
     }
 }
 
@@ -163,10 +169,9 @@ common_chat_msg task_result_state::update_chat_msg(
     generated_text += text_added;
     auto msg_prv_copy = chat_msg;
     //SRV_DBG("Parsing chat message: %s\n", generated_text.c_str());
-    auto new_msg = common_chat_parse(
-        generated_text,
-        is_partial,
-        chat_parser_params);
+    auto new_msg = chat_session
+        ? chat_session->parse(generated_text, is_partial)
+        : common_chat_parse(generated_text, is_partial, {});
     if (!new_msg.empty()) {
         new_msg.set_tool_call_ids(generated_tool_call_ids, gen_tool_call_id);
         chat_msg = new_msg;

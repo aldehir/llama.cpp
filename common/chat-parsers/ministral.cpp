@@ -111,7 +111,6 @@ static common_chat_params common_chat_params_init_ministral_3(const common_chat_
         return generation_prompt + (reasoning << p.content(p.rest()));
     });
 
-    data.parser = parser.save();
 
     if (include_grammar) {
         data.grammar_lazy = has_tools && inputs.tool_choice == COMMON_CHAT_TOOL_CHOICE_AUTO;
@@ -133,6 +132,8 @@ static common_chat_params common_chat_params_init_ministral_3(const common_chat_
             { COMMON_GRAMMAR_TRIGGER_TYPE_WORD, "[TOOL_CALLS]" }
         };
     }
+
+    data.parser = std::move(parser);
 
     return data;
 }

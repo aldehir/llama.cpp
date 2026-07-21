@@ -1000,7 +1000,7 @@ struct make_peg_parser {
                     bool                                 detailed_debug = false) {
         detailed_debug_ = detailed_debug;
         params_         = common_chat_templates_apply(tmpls, inputs);
-        arena_.load(params_.parser);
+        arena_          = params_.parser;
     }
 
     common_chat_msg parse(const std::string & msg, bool is_partial) const {
@@ -4158,8 +4158,7 @@ static void test_template_output_peg_parsers(bool detailed_debug) {
             inputs.messages = { msg };
 
             auto params = common_chat_templates_apply(tmpls.get(), inputs);
-            common_peg_arena arena;
-            arena.load(params.parser);
+            common_peg_arena arena = params.parser;
             common_chat_parser_params pp(params);
 
             // generation_prompt is non-empty for thinking models, so result.end

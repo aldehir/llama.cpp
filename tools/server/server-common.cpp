@@ -904,7 +904,8 @@ static void handle_media(
 json oaicompat_chat_params_parse(
     json & body, /* openai api json semantics */
     const server_chat_params & opt,
-    std::vector<raw_buffer> & out_files)
+    std::vector<raw_buffer> & out_files,
+    common_chat_session_ptr & out_session)
 {
     json llama_params;
 
@@ -1065,7 +1066,6 @@ json oaicompat_chat_params_parse(
         if (body.contains("grammar")) {
             throw std::invalid_argument("Cannot use custom grammar constraints with tools.");
         }
-        llama_params["parse_tool_calls"] = true;
     }
 
     // merge the template args provided from command line with the args provided in the user request
@@ -1090,29 +1090,7 @@ json oaicompat_chat_params_parse(
     // Apply chat template to the list of messages
     auto chat_params = common_chat_templates_apply(opt.tmpls.get(), inputs);
 
-    llama_params["chat_format"] = static_cast<int>(chat_params.format);
-    llama_params["prompt"]      = chat_params.prompt;
-    if (!chat_params.grammar.empty()) {
-        llama_params["grammar"]      = chat_params.grammar;
-        llama_params["grammar_type"] = std::string("tool_calls");
-    }
-    llama_params["grammar_lazy"] = chat_params.grammar_lazy;
-    auto grammar_triggers        = json::array();
-    for (const auto & trigger : chat_params.grammar_triggers) {
-        server_grammar_trigger ct(trigger);
-        grammar_triggers.push_back(ct.to_json());
-    }
-    llama_params["grammar_triggers"]  = grammar_triggers;
-    llama_params["preserved_tokens"]  = chat_params.preserved_tokens;
-    llama_params["generation_prompt"] = chat_params.generation_prompt;
-    for (const auto & stop : chat_params.additional_stops) {
-        llama_params["stop"].push_back(stop);
-    }
-    if (!chat_params.parser.empty()) {
-        llama_params["chat_parser"] = chat_params.parser;
-    }
-
-    llama_params["message_delimiters"] = chat_params.message_delimiters.to_json();
+    llama_params["prompt"] = chat_params.prompt;
 
     // Reasoning budget: pass parameters through to sampling layer
     {
@@ -1128,6 +1106,18 @@ json oaicompat_chat_params_parse(
             llama_params["reasoning_budget_message"] = opt.reasoning_budget_message;
             llama_params["reasoning_control"] = json_value(body, "reasoning_control", false);
         }
+    }
+
+    // Everything else derived from the template lives in the session, carried
+    // alongside the task instead of being serialized through the request json
+    {
+        common_chat_session_opts session_opts;
+        session_opts.reasoning_format     = inputs.reasoning_format;
+        session_opts.reasoning_in_content = stream && (inputs.reasoning_format == COMMON_REASONING_FORMAT_DEEPSEEK_LEGACY);
+        session_opts.is_continuation      = inputs.continue_final_message != COMMON_CHAT_CONTINUATION_NONE;
+        session_opts.echo                 = json_value(body, "echo", false);
+
+        out_session = std::make_shared<common_chat_session>(std::move(chat_params), session_opts);
     }
 
     // Handle "logprobs" field

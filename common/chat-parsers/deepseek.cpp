@@ -158,7 +158,6 @@ static common_chat_params common_chat_params_init_deepseek_v3_2(const common_cha
         return generation_prompt + reasoning + content_before_tools + tool_calls + end;
     });
 
-    data.parser = parser.save();
 
     if (include_grammar) {
         data.grammar_lazy = !(has_response_format || (has_tools && inputs.tool_choice == COMMON_CHAT_TOOL_CHOICE_REQUIRED));
@@ -179,6 +178,8 @@ static common_chat_params common_chat_params_init_deepseek_v3_2(const common_cha
             { COMMON_GRAMMAR_TRIGGER_TYPE_WORD, FC_START },
         };
     }
+
+    data.parser = std::move(parser);
 
     return data;
 }

@@ -294,7 +294,6 @@ static common_chat_params common_chat_params_init_gemma4(const common_chat_templ
         return start + p.one_or_more(message);
     });
 
-    data.parser = parser.save();
 
     if (include_grammar) {
         data.grammar_lazy = !(has_response_format || (has_tools && inputs.tool_choice == COMMON_CHAT_TOOL_CHOICE_REQUIRED));
@@ -315,6 +314,8 @@ static common_chat_params common_chat_params_init_gemma4(const common_chat_templ
             { COMMON_GRAMMAR_TRIGGER_TYPE_WORD, "<|tool_call>" },
         };
     }
+
+    data.parser = std::move(parser);
 
     return data;
 }

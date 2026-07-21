@@ -96,7 +96,6 @@ static common_chat_params common_chat_params_init_lfm2(const common_chat_templat
         return generation_prompt + reasoning + content + tool_calls + end;
     });
 
-    data.parser = parser.save();
 
     if (include_grammar) {
         data.grammar_lazy = !(has_response_format || (has_tools && inputs.tool_choice == COMMON_CHAT_TOOL_CHOICE_REQUIRED));
@@ -117,6 +116,8 @@ static common_chat_params common_chat_params_init_lfm2(const common_chat_templat
             { COMMON_GRAMMAR_TRIGGER_TYPE_WORD, TOOL_CALL_START }
         };
     }
+
+    data.parser = std::move(parser);
 
     return data;
 }

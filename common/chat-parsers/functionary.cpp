@@ -79,7 +79,6 @@ static common_chat_params common_chat_params_init_functionary_v3_2(const common_
         return generation_prompt + ret;
     });
 
-    data.parser = parser.save();
 
     if (include_grammar) {
         data.grammar_lazy = inputs.tool_choice == COMMON_CHAT_TOOL_CHOICE_AUTO;
@@ -99,6 +98,8 @@ static common_chat_params common_chat_params_init_functionary_v3_2(const common_
             { COMMON_GRAMMAR_TRIGGER_TYPE_PATTERN, ">>>(?!all)" }
         };
     }
+
+    data.parser = std::move(parser);
 
     return data;
 }

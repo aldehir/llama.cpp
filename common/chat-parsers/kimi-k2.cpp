@@ -114,7 +114,6 @@ static common_chat_params common_chat_params_init_kimi_k2(const common_chat_temp
         return generation_prompt + reasoning + content_before_tools + tool_calls + end;
     });
 
-    data.parser = parser.save();
 
     if (include_grammar) {
         data.grammar_lazy = inputs.tool_choice == COMMON_CHAT_TOOL_CHOICE_AUTO;
@@ -131,6 +130,8 @@ static common_chat_params common_chat_params_init_kimi_k2(const common_chat_temp
             { COMMON_GRAMMAR_TRIGGER_TYPE_WORD, "<|tool_call_begin|>" }
         };
     }
+
+    data.parser = std::move(parser);
 
     return data;
 }

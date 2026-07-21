@@ -62,7 +62,6 @@ static common_chat_params common_chat_params_init_gigachat_v3(
         return p.literal("assistant<|role_sep|>\n") + ret;
     });
 
-    data.parser = parser.save();
 
     if (include_grammar) {
         data.grammar_lazy = has_tools && inputs.tool_choice == COMMON_CHAT_TOOL_CHOICE_AUTO;
@@ -80,6 +79,8 @@ static common_chat_params common_chat_params_init_gigachat_v3(
             {COMMON_GRAMMAR_TRIGGER_TYPE_WORD, tool_call_start_prefix}
         };
     }
+    data.parser = std::move(parser);
+
     return data;
 }
 

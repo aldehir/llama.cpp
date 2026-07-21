@@ -206,8 +206,6 @@ struct common_chat_msg_delimiters {
 
     // split tokens into message spans. skips maps a start index to a length of a region to jump over without matching
     common_chat_msg_spans split(const llama_tokens & tokens, const std::map<size_t, size_t> & skips = {}) const;
-
-    nlohmann::ordered_json to_json() const;
 };
 
 struct common_chat_tool {
@@ -274,7 +272,7 @@ struct common_chat_params {
     std::vector<common_grammar_trigger> grammar_triggers;
     std::vector<std::string>            preserved_tokens;
     std::vector<std::string>            additional_stops;
-    std::string                         parser;
+    common_peg_arena                    parser;
     common_chat_msg_delimiters          message_delimiters;
 };
 
@@ -295,6 +293,7 @@ struct common_chat_parser_params {
     common_chat_parser_params(const common_chat_params & chat_params) {
         format  = chat_params.format;
         generation_prompt = chat_params.generation_prompt;
+        parser  = chat_params.parser;
     }
 };
 
@@ -367,4 +366,3 @@ struct common_chat_prompt_preset {
 
 common_chat_prompt_preset common_chat_get_asr_prompt(const common_chat_templates * chat_templates);
 
-common_chat_msg_delimiters common_chat_msg_delimiters_parse(const nlohmann::ordered_json & delimiters);

@@ -4,6 +4,7 @@
 #include "log.h"
 #include "llama.h"
 #include "chat.h"
+#include "chat-session.h"
 #include "mtmd.h"
 
 #define JSON_ASSERT GGML_ASSERT
@@ -307,7 +308,8 @@ json oaicompat_completion_params_parse(const json & body);
 json oaicompat_chat_params_parse(
     json & body, /* openai api json semantics */
     const server_chat_params & opt,
-    std::vector<raw_buffer> & out_files);
+    std::vector<raw_buffer> & out_files,
+    common_chat_session_ptr & out_session);
 
 // TODO: move it to server-task.cpp
 json format_embeddings_response_oaicompat(

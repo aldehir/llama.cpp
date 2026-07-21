@@ -122,7 +122,6 @@ static common_chat_params common_chat_params_init_cohere2moe(const common_chat_t
         return generation_prompt + reasoning + body + p.optional(p.literal(TURN_END)) + end;
     });
 
-    data.parser = parser.save();
 
     if (include_grammar) {
         data.grammar_lazy = inputs.tool_choice == COMMON_CHAT_TOOL_CHOICE_AUTO;
@@ -139,6 +138,8 @@ static common_chat_params common_chat_params_init_cohere2moe(const common_chat_t
             { COMMON_GRAMMAR_TRIGGER_TYPE_WORD, ACTION_START }
         };
     }
+
+    data.parser = std::move(parser);
 
     return data;
 }
