@@ -1114,7 +1114,11 @@ json oaicompat_chat_params_parse(
         common_chat_session_opts session_opts;
         session_opts.reasoning_format     = inputs.reasoning_format;
         session_opts.reasoning_in_content = stream && (inputs.reasoning_format == COMMON_REASONING_FORMAT_DEEPSEEK_LEGACY);
-        session_opts.is_continuation      = inputs.continue_final_message != COMMON_CHAT_CONTINUATION_NONE;
+        // matches the previous behavior: only an explicit continue_final_message
+        // from the client marks the parse as a continuation, the prefill_assistant
+        // auto-continuation does not
+        session_opts.is_continuation      = body.contains("continue_final_message") &&
+                                            inputs.continue_final_message != COMMON_CHAT_CONTINUATION_NONE;
         session_opts.echo                 = json_value(body, "echo", false);
 
         out_session = std::make_shared<common_chat_session>(std::move(chat_params), session_opts);

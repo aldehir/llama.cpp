@@ -5375,11 +5375,11 @@ std::unique_ptr<server_res_generator> server_routes::handle_count_tokens(const l
     }
 
     common_chat_session_ptr chat_session;
-        json body_parsed = oaicompat_chat_params_parse(
-            body,
-            meta->chat_params,
-            files,
-            chat_session);
+    json body_parsed = oaicompat_chat_params_parse(
+        body,
+        meta->chat_params,
+        files,
+        chat_session);
     json prompt = body_parsed.at("prompt");
     // SRV_DBG("prompt = %s\n", prompt.dump().c_str());
 
