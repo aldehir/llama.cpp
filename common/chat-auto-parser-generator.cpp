@@ -25,22 +25,22 @@ static void foreach_function(const json & tools, const std::function<void(const 
 
 namespace autoparser {
 
-parser_build_context::parser_build_context(common_chat_peg_builder & p, const generation_params & inputs) :
+parser_build_context::parser_build_context(common_chat_peg_builder & p, const common_chat_render_inputs & inputs) :
     p(p),
     inputs(inputs),
     reasoning_parser(p.eps()) {}
 
-common_chat_params peg_generator::generate_parser(const common_chat_template &    tmpl,
-                                                  const struct generation_params & inputs) {
+common_chat_params peg_generator::generate_parser(const common_chat_template &      tmpl,
+                                                  const common_chat_render_inputs & inputs) {
     // Run differential analysis to extract template structure
     struct autoparser autoparser;
     autoparser.analyze_template(tmpl);
     return generate_parser(tmpl, inputs, autoparser);
 }
 
-common_chat_params peg_generator::generate_parser(const common_chat_template &    tmpl,
-                                                  const struct generation_params & inputs,
-                                                  const autoparser &              autoparser) {
+common_chat_params peg_generator::generate_parser(const common_chat_template &      tmpl,
+                                                  const common_chat_render_inputs & inputs,
+                                                  const autoparser &                autoparser) {
     // Create the result structure
     common_chat_params data;
     data.prompt            = common_chat_template_direct_apply(tmpl, inputs);
@@ -113,7 +113,7 @@ common_chat_params peg_generator::generate_parser(const common_chat_template &  
     return data;
 }
 
-common_peg_arena autoparser::build_parser(const generation_params & inputs, const std::string & generation_prompt) const {
+common_peg_arena autoparser::build_parser(const common_chat_render_inputs & inputs, const std::string & generation_prompt) const {
     if (!analysis_complete) {
         throw std::invalid_argument("Cannot call build_parser on autoparser without performing analysis first, call analyze_template(...)");
     }

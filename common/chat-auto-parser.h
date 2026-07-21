@@ -1,6 +1,7 @@
 #pragma once
 
 #include "chat.h"
+#include "chat-render.h"
 #include "common.h"
 #include "jinja/caps.h"
 #include "peg-parser.h"
@@ -46,36 +47,6 @@ struct compare_variants_result {
 };
 
 namespace autoparser {
-
-// ============================================================================
-// High-level params for parser generation
-// ============================================================================
-
-struct generation_params {
-    json                                  messages;
-    json                                  tools;
-    common_chat_tool_choice               tool_choice = COMMON_CHAT_TOOL_CHOICE_AUTO;
-    json                                  json_schema;
-    bool                                  parallel_tool_calls = true;
-    common_reasoning_format               reasoning_format    = COMMON_REASONING_FORMAT_AUTO;
-    bool                                  stream              = true;
-    std::string                           grammar;
-    bool                                  add_generation_prompt  = false;
-    common_chat_continuation              continue_final_message = COMMON_CHAT_CONTINUATION_NONE;
-    common_chat_msg                       continue_msg;
-    bool                                  enable_thinking        = true;
-    std::chrono::system_clock::time_point now                    = std::chrono::system_clock::now();
-    json                                  extra_context;
-    bool                                  add_bos       = false;
-    bool                                  add_eos       = false;
-    bool                                  is_inference  = true;
-    bool                                  add_inference = false;
-    bool                                  mark_input    = true;  // whether to mark input strings in the jinja context
-
-    bool has_continuation() const {
-        return continue_final_message != COMMON_CHAT_CONTINUATION_NONE && !continue_msg.empty();
-    }
-};
 
 // ============================================================================
 // Analysis Result Enums
@@ -222,14 +193,14 @@ struct analyze_content;
 struct analyze_reasoning;
 
 struct parser_build_context {
-    common_chat_peg_builder & p;
-    const generation_params &         inputs;
+    common_chat_peg_builder &         p;
+    const common_chat_render_inputs & inputs;
     common_peg_parser                 reasoning_parser;
     bool                              extracting_reasoning = false;
     const analyze_reasoning *         reasoning            = nullptr;
     const analyze_content *           content              = nullptr;
 
-    parser_build_context(common_chat_peg_builder & p, const generation_params & inputs);
+    parser_build_context(common_chat_peg_builder & p, const common_chat_render_inputs & inputs);
 };
 
 // ============================================================================
@@ -398,7 +369,7 @@ struct autoparser {
     void analyze_template(const common_chat_template & tmpl);
 
     // Build the PEG parser for this template
-    common_peg_arena build_parser(const generation_params & inputs, const std::string & generation_prompt) const;
+    common_peg_arena build_parser(const common_chat_render_inputs & inputs, const std::string & generation_prompt) const;
 
   private:
     // Collect tokens from entire analysis to preserve
@@ -411,12 +382,12 @@ struct autoparser {
 
 class peg_generator {
   public:
-    static common_chat_params generate_parser(const common_chat_template &    tmpl,
-                                              const struct generation_params & inputs);
+    static common_chat_params generate_parser(const common_chat_template &      tmpl,
+                                              const common_chat_render_inputs & inputs);
 
-    static common_chat_params generate_parser(const common_chat_template &    tmpl,
-                                              const struct generation_params & inputs,
-                                              const autoparser &              autoparser);
+    static common_chat_params generate_parser(const common_chat_template &      tmpl,
+                                              const common_chat_render_inputs & inputs,
+                                              const autoparser &                autoparser);
 };
 
 }  // namespace autoparser

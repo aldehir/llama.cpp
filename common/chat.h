@@ -21,10 +21,6 @@ using json = nlohmann::ordered_json;
 
 struct common_chat_templates;
 
-namespace autoparser {
-struct generation_params;
-}  // namespace autoparser
-
 struct common_chat_tool_call {
     std::string name;
     std::string arguments;
@@ -362,20 +358,6 @@ nlohmann::ordered_json common_chat_tools_to_json_oaicompat(const std::vector<com
 
 // get template caps, useful for reporting to server /props endpoint
 std::map<std::string, bool> common_chat_templates_get_caps(const common_chat_templates * chat_templates);
-
-std::string common_chat_template_direct_apply(
-    const common_chat_template & tmpl,
-    const autoparser::generation_params & inputs);
-
-std::string common_chat_template_generation_prompt(
-    const common_chat_template &          tmpl,
-    const autoparser::generation_params & inputs);
-
-std::optional<common_chat_params> common_chat_try_specialized_template(
-        const common_chat_template &          tmpl,
-        const std::string &                   src,
-        autoparser::generation_params & params);
-
 
 // specialized per-task preset
 struct common_chat_prompt_preset {

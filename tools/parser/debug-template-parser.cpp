@@ -286,7 +286,7 @@ static void render_scenario(const common_chat_template & tmpl,
     LOG_ERR("Messages:\n%s\n", final_messages.dump(2).c_str());
 
     try {
-        autoparser::generation_params inputs;
+        common_chat_render_inputs inputs;
         inputs.messages                         = final_messages;
         inputs.add_generation_prompt            = add_generation_prompt;
         inputs.extra_context["enable_thinking"] = enable_thinking;
@@ -339,8 +339,8 @@ static void render_all_scenarios(const common_chat_template & tmpl,
     }
 }
 
-static autoparser::generation_params prepare_params(const debug_options & opts, const json & tools) {
-    autoparser::generation_params params;
+static common_chat_render_inputs prepare_params(const debug_options & opts, const json & tools) {
+    common_chat_render_inputs params;
     params.messages         = json::array({ build_user_message() });
     params.reasoning_format = opts.enable_reasoning ? COMMON_REASONING_FORMAT_DEEPSEEK : COMMON_REASONING_FORMAT_NONE;
     params.enable_thinking  = opts.enable_reasoning;
@@ -393,7 +393,7 @@ int main(int argc, char ** argv) {
 
         json tools = opts.with_tools ? build_tools_definition() : json();
 
-        autoparser::generation_params params = prepare_params(opts, tools);
+        common_chat_render_inputs params = prepare_params(opts, tools);
         common_chat_params            parser_data;
         if (std::optional<common_chat_params> spec_tmpl =
                 common_chat_try_specialized_template(chat_template, template_source, params)) {

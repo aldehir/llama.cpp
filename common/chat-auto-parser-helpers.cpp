@@ -313,7 +313,7 @@ namespace autoparser {
 static const std::string ERR_TMPL = "#**ERROR**#";
 
 std::string apply_template(const common_chat_template & tmpl, const template_params & params) {
-    generation_params tmpl_params;
+    common_chat_render_inputs tmpl_params;
     tmpl_params.messages              = params.messages;
     tmpl_params.tools                 = params.tools;
     tmpl_params.add_generation_prompt = params.add_generation_prompt;
