@@ -789,6 +789,27 @@ static void test_quantifiers() {
         }
     );
     test_grammar(
+        "excessive max repetition upgrades to unbounded",
+        // Grammar
+        R"""(
+            root ::= "a" [b]{2,100000}
+        )""",
+        // Passing strings
+        {
+            "abb",
+            "abbb",
+            // above MAX_REPETITION_THRESHOLD: the upper bound was upgraded to unbounded
+            "a" + std::string(2500, 'b'),
+        },
+        // Failing strings
+        {
+            "a",
+            // the lower bound is still enforced
+            "ab",
+            "abc",
+        }
+    );
+    test_grammar(
         "segfault",
         // Grammar
         R"""(
@@ -878,6 +899,20 @@ static void test_failure_left_recursion() {
         foo ::= "c" | empty asdf "d" | "e"
         empty ::= "blah" | )""";
     assert(test_build_grammar_fails(hardest_str));
+
+    fprintf(stderr, "  ✅︎ Passed\n");
+}
+
+static void test_failure_excessive_min_repetition() {
+    fprintf(stderr, "⚫ Testing excessive min repetition:\n");
+
+    // Unlike an excessive upper bound (which is upgraded to an unbounded
+    // repetition), the lower bound cannot be relaxed and remains a hard limit
+    assert(test_build_grammar_fails(R"""(root ::= [a]{2001,})"""));
+    assert(test_build_grammar_fails(R"""(root ::= [a]{2001,100000})"""));
+
+    // Exact repetitions are never relaxed to unbounded
+    assert(test_build_grammar_fails(R"""(root ::= [a]{5000})"""));
 
     fprintf(stderr, "  ✅︎ Passed\n");
 }
@@ -1485,6 +1520,7 @@ int main() {
     test_failure_missing_root();
     test_failure_missing_reference();
     test_failure_left_recursion();
+    test_failure_excessive_min_repetition();
     test_failure_missing_root_symbol();
     test_custom_root_symbol_check();
     test_json_schema();

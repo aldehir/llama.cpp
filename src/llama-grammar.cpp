@@ -491,6 +491,22 @@ const char * llama_grammar_parser::parse_sequence(
             total_rules = min_times;
         }
 
+        // A bounded repetition expands into one rule per allowed count. When that
+        // expansion would exceed sane limits, upgrade to an unbounded repetition
+        // (S{m,n} -> S{m,}) instead of failing: the lower bound is still enforced,
+        // and exact repetitions (m == n) are never relaxed. This keeps grammars
+        // generated from schemas with huge maxLength/maxItems usable.
+        // Note: the max_times comparison also guards the multiplication below
+        // against overflow for absurdly large upper bounds.
+        if (!no_max && max_times > min_times &&
+            (max_times >= MAX_REPETITION_THRESHOLD || n_prev_rules * total_rules >= MAX_REPETITION_THRESHOLD)) {
+            LLAMA_LOG_WARN("parse_sequence: repetition upper bound %llu in rule '%s' exceeds sane defaults, upgrading to an unbounded repetition\n",
+                    (unsigned long long) max_times, rule_name.c_str());
+            no_max      = true;
+            max_times   = UINT64_MAX;
+            total_rules = min_times > 0 ? min_times : 1;
+        }
+
         if (n_prev_rules * total_rules >= MAX_REPETITION_THRESHOLD) {
             throw std::runtime_error("number of rules that are going to be repeated multiplied by the new repetition exceeds sane defaults, please reduce the number of repetitions or rule complexity");
         }
@@ -648,8 +664,10 @@ const char * llama_grammar_parser::parse_sequence(
             } else {
                 throw std::runtime_error(std::string("expecting ',' at ") + pos);
             }
-            bool has_max = max_times != UINT64_MAX;
-            if (min_times > MAX_REPETITION_THRESHOLD || (has_max && max_times > MAX_REPETITION_THRESHOLD)) {
+            // Only the lower bound is a hard limit - it cannot be relaxed without
+            // changing what the grammar requires. An excessive upper bound is
+            // upgraded to an unbounded repetition in handle_repetitions.
+            if (min_times > MAX_REPETITION_THRESHOLD) {
                 throw std::runtime_error(std::string("number of repetitions exceeds sane defaults, please reduce the number of repetitions"));
             }
             handle_repetitions(min_times, max_times);

@@ -139,14 +139,28 @@ static void verify_failure(const char * grammar_bytes) {
     assert(result.rules.empty() && "should have failed");
 }
 
+static void verify_success(const char * grammar_bytes) {
+    fprintf(stderr, "Testing expected success:%s\n", grammar_bytes);
+    llama_grammar_parser result;
+    result.parse(grammar_bytes);
+    assert(!result.rules.empty() && "should have parsed");
+}
+
 int main()
 {
     verify_failure(R"""(
         root ::= "a"{,}"
     )""");
 
-    verify_failure(R"""(
+    // excessive repetition upper bounds are upgraded to unbounded repetitions,
+    // so the nested expansion below stays bounded and parses successfully
+    verify_success(R"""(
         root ::= (((((([^x]*){0,99}){0,99}){0,99}){0,99}){0,99}){0,99}
+    )""");
+
+    // lower bounds cannot be relaxed and remain a hard limit
+    verify_failure(R"""(
+        root ::= [x]{2001,}
     )""");
 
     verify_failure(R"""(

@@ -12,6 +12,10 @@
 //      in src/llama-grammar.cpp, so parsing throws "number of repetitions
 //      exceeds sane defaults" and the server returns "failed to parse grammar".
 //
+// Update: llama-grammar now upgrades excessive repetition upper bounds to
+// unbounded repetitions instead of failing, so all phases (including
+// agent_manager alone) report parse=OK with a warning logged.
+//
 // Build (after building llama-common):
 //   g++ -std=c++17 -Icommon -Iinclude -Iggml/include -Ivendor -Isrc \
 //       tests/test-issue-25967-repro.cpp -Lbuild/bin -lllama-common -lllama \
