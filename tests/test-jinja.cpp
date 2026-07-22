@@ -1749,6 +1749,19 @@ static void test_object_methods(testing & t) {
         "x=1 y=2 "
     );
 
+    // ggml-org/llama.cpp#25916: a key named "items" must not shadow the built-in method
+    test_template(t, "object.items() with key named items",
+        "{% for k, v in obj.items() %}{{ k }}={{ v.type }} {% endfor %}",
+        {{"obj", {{"items", {{"type", "string"}}}}}},
+        "items=string "
+    );
+
+    test_template(t, "object['items'] with key named items",
+        "{{ obj['items']['type'] }}",
+        {{"obj", {{"items", {{"type", "string"}}}}}},
+        "string"
+    );
+
     test_template(t, "object.keys()",
         "{% for k in obj.keys() %}{{ k }} {% endfor %}",
         {{"obj", {{"a", 1}, {"b", 2}}}},
