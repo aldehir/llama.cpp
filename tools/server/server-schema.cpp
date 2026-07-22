@@ -314,6 +314,7 @@ std::vector<std::unique_ptr<field>> make_llama_cmpl_schema(const common_params &
         ->set_desc("Whether to parse tool calls from the generated output"));
 
     add((new field_str("chat_parser"))
+        ->set_internal()
         ->set_desc("Chat parser configuration string")
         ->set_handler([&](field_eval_context & ctx, const json & data) {
             ctx.params.chat_parser_params.parser.load(data.at("chat_parser").get<std::string>());
@@ -554,6 +555,27 @@ task_params eval_llama_cmpl_schema(
     }
 
     return params;
+}
+
+void validate_user_fields(const json & data) {
+    // build the schema once with dummy params, only the field names are used
+    static const std::vector<std::string> internal_names = [] {
+        common_params params_base;
+        task_params   params;
+        std::vector<std::string> names;
+        for (const auto & f : make_llama_cmpl_schema(params_base, params)) {
+            if (f->internal) {
+                names.insert(names.end(), f->name.begin(), f->name.end());
+            }
+        }
+        return names;
+    }();
+
+    for (const auto & name : internal_names) {
+        if (data.contains(name)) {
+            throw std::invalid_argument(string_format("\"%s\" is reserved for internal use and cannot be set in the request", name.c_str()));
+        }
+    }
 }
 
 //

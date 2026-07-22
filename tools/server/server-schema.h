@@ -27,12 +27,17 @@ using field_handler = std::function<void(field_eval_context &, const json &)>;
 struct field {
     std::vector<const char *> name;
     const char * desc = "";
+    bool internal = false; // set by the server, not allowed in user requests
     field_handler custom_handler;
     field() = default;
     field(const char * n) : name({n}) {}
     virtual ~field() = default;
     field * set_desc(const char * s) {
         desc = s;
+        return this;
+    }
+    field * set_internal() {
+        internal = true;
         return this;
     }
     // if 'name' is present, use it, otherwise look for aliases following the order they were added
@@ -101,5 +106,9 @@ task_params eval_llama_cmpl_schema(
                     const int n_ctx_slot,
                     const std::vector<llama_logit_bias> & logit_bias_eog,
                     const json & data);
+
+// throw if the user-provided request body contains internal fields
+// must be called before the server merges its own fields into the request
+void validate_user_fields(const json & data);
 
 } // namespace server_schema

@@ -235,6 +235,17 @@ def test_nocache_long_input_prompt():
     })
     assert res.status_code == 400
 
+def test_completion_reject_internal_field():
+    global server
+    server.start()
+    res = server.make_request("POST", "/completion", data={
+        "prompt": "I believe the meaning of life is",
+        "n_predict": 8,
+        "chat_parser": "invalid",
+    })
+    assert res.status_code == 400
+    assert "chat_parser" in res.body["error"]["message"]
+
 def test_json_prompt_no_mtmd():
     global server
     server.start()

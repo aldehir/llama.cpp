@@ -8,6 +8,7 @@
 #include "base64.hpp"
 
 #include "server-common.h"
+#include "server-schema.h"
 
 #include <random>
 #include <sstream>
@@ -906,6 +907,8 @@ json oaicompat_chat_params_parse(
     const server_chat_params & opt,
     std::vector<raw_buffer> & out_files)
 {
+    server_schema::validate_user_fields(body);
+
     json llama_params;
 
     auto tools = json_value(body, "tools", json());

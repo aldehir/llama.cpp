@@ -321,6 +321,20 @@ def test_completion_with_invalid_grammar():
     assert "error" in res.body
 
 
+def test_completion_reject_internal_field():
+    global server
+    server.start()
+    res = server.make_request("POST", "/chat/completions", data={
+        "max_tokens": 8,
+        "messages": [
+            {"role": "user", "content": "Hi"},
+        ],
+        "chat_parser": "invalid",
+    })
+    assert res.status_code == 400, res.body
+    assert "chat_parser" in res.body["error"]["message"]
+
+
 @pytest.mark.parametrize("messages", [
     None,
     "string",

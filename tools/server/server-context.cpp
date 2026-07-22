@@ -4588,6 +4588,7 @@ void server_routes::init_routes() {
 
         // validate input
         json data = json::parse(req.body);
+        server_schema::validate_user_fields(data);
         if (data.contains("prompt") && !data.at("prompt").is_string()) {
             // prompt is optional
             res->error(format_error_response("\"prompt\" must be a string", ERROR_TYPE_INVALID_REQUEST));
@@ -4650,6 +4651,7 @@ void server_routes::init_routes() {
         auto res = create_response();
         std::vector<raw_buffer> files; // dummy
         const json body = json::parse(req.body);
+        server_schema::validate_user_fields(body);
         return handle_completions_impl(
             req,
             SERVER_TASK_TYPE_COMPLETION,
@@ -4662,6 +4664,7 @@ void server_routes::init_routes() {
         auto res = create_response();
         std::vector<raw_buffer> files; // dummy
         const json body = json::parse(req.body);
+        server_schema::validate_user_fields(body);
         return handle_completions_impl(
             req,
             SERVER_TASK_TYPE_COMPLETION,
