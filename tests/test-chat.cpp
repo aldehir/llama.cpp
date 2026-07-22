@@ -5307,6 +5307,35 @@ static void test_template_output_peg_parsers(bool detailed_debug) {
             })
             .run();
 
+        // ggml-org/llama.cpp#25916: tool schema with a property named "items"
+        // must not break template rendering (upstream minja resolved
+        // properties.items to the key instead of the built-in method)
+        tst.test(
+            " to=functions.t<|channel|>commentary json"
+            "<|message|>{\"items\": \"x\"}"
+            )
+            .reasoning_format(COMMON_REASONING_FORMAT_AUTO)
+            .tools({
+                {
+                    /* .name = */ "t",
+                    /* .description = */ "x",
+                    /* .parameters = */ R"({
+                        "type": "object",
+                        "properties": {
+                            "items": {
+                                "type": "string"
+                            }
+                        },
+                        "required": ["items"]
+                    })",
+                }
+            })
+            .expect_tool_calls({
+                { "t", R"({"items": "x"})", {} }
+            })
+            .expect_reconstruction()
+            .run();
+
         // Structured output
         tst.test(
             "<|channel|>analysis<|message|>I need to output the invoice details in JSON<|end|>"
