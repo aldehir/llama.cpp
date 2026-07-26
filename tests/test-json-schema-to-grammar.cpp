@@ -1619,11 +1619,47 @@ int main() {
         });
 
         run({
-            FAILURE,
-            "regexp negated shorthand inside brackets",
+            SUCCESS,
+            "regexp any-char idiom",
             R"""({
                 "type": "string",
-                "pattern": "^[\\D]$"
+                "pattern": "^[\\s\\S]*$"
+            })""",
+            R"""(
+                root ::= "\"" ([\U00000000-\U0010FFFF]*) "\""
+                space ::= | " " | "\n"{1,2} [ \t]{0,20}
+            )""",
+        });
+
+        run({
+            SUCCESS,
+            "regexp negated shorthand as sole class member",
+            R"""({
+                "type": "string",
+                "pattern": "^[\\D][^\\S][^\\W]$"
+            })""",
+            R"""(
+                root ::= "\"" ([^0-9] [ \t\n\x0B\x0C\r] [0-9A-Za-z_]) "\""
+                space ::= | " " | "\n"{1,2} [ \t]{0,20}
+            )""",
+        });
+
+        run({
+            FAILURE,
+            "regexp negated shorthand mixed inside class",
+            R"""({
+                "type": "string",
+                "pattern": "^[a\\D]$"
+            })""",
+            ""
+        });
+
+        run({
+            FAILURE,
+            "regexp complementary pair in negated class",
+            R"""({
+                "type": "string",
+                "pattern": "^[^\\s\\S]$"
             })""",
             ""
         });

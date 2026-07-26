@@ -454,22 +454,33 @@ private:
                 } else if (c == '[') {
                     std::string square_brackets = std::string(1, c);
                     i++;
+                    bool class_neg = i < length && sub_pattern[i] == '^';
+                    if (class_neg) {
+                        square_brackets += '^';
+                        i++;
+                    }
+                    std::string pos_sh;
+                    std::string neg_sh;
+                    bool other = false;
                     while (i < length && sub_pattern[i] != ']') {
                         if (sub_pattern[i] == '\\') {
                             char next = i + 1 < length ? sub_pattern[i + 1] : '\0';
                             auto it = PCRE_SHORTHAND_SETS.find(std::tolower((unsigned char) next));
                             if (it != PCRE_SHORTHAND_SETS.end()) {
                                 if (std::isupper((unsigned char) next)) {
-                                    _errors.push_back("Negated shorthand class inside character class is not supported");
+                                    neg_sh += it->first;
                                 } else {
+                                    pos_sh += it->first;
                                     square_brackets += it->second;
                                 }
                                 i += 2;
                                 continue;
                             }
+                            other = true;
                             square_brackets += sub_pattern.substr(i, 2);
                             i += 2;
                         } else {
+                            other = true;
                             square_brackets += sub_pattern[i];
                             i++;
                         }
@@ -479,6 +490,22 @@ private:
                     }
                     square_brackets += ']';
                     i++;
+                    if (!neg_sh.empty()) {
+                        bool any_char = false;
+                        if (!class_neg) {
+                            for (char n : neg_sh) {
+                                any_char |= pos_sh.find(n) != std::string::npos;
+                            }
+                        }
+                        if (any_char) {
+                            // a set and its complement together match any character
+                            square_brackets = "[\\U00000000-\\U0010FFFF]";
+                        } else if (neg_sh.size() == 1 && pos_sh.empty() && !other) {
+                            square_brackets = std::string("[") + (class_neg ? "" : "^") + PCRE_SHORTHAND_SETS.at(neg_sh[0]) + "]";
+                        } else {
+                            _errors.push_back("Negated shorthand class inside character class is not supported");
+                        }
+                    }
                     seq.emplace_back(square_brackets, false);
                 } else if (c == '|') {
                     seq.emplace_back("|", false);
