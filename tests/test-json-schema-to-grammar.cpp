@@ -824,6 +824,98 @@ static void test_all(const std::string & lang, std::function<void(const TestCase
 
     test({
         SUCCESS,
+        "regexp shorthand classes",
+        R"""({
+            "type": "string",
+            "pattern": "^\\d\\w\\s$"
+        })""",
+        R"""(
+            root ::= "\"" ([0-9] [0-9A-Z_a-z] [\x09-\x0D\x20]) "\""
+            space ::= | " " | "\n"{1,2} [ \t]{0,20}
+        )"""
+    });
+
+    test({
+        SUCCESS,
+        "regexp negated shorthand classes",
+        R"""({
+            "type": "string",
+            "pattern": "^\\D\\W\\S$"
+        })""",
+        R"""(
+            root ::= "\"" ([^0-9] [^0-9A-Z_a-z] [^\x09-\x0D\x20]) "\""
+            space ::= | " " | "\n"{1,2} [ \t]{0,20}
+        )"""
+    });
+
+    test({
+        SUCCESS,
+        "regexp shorthand classes with literals and repetition",
+        R"""({
+            "type": "string",
+            "pattern": "^a\\d{3}b\\w+$"
+        })""",
+        R"""(
+            root ::= "\"" ("a" root-1{3,3} "b" [0-9A-Z_a-z]+) "\""
+            root-1 ::= [0-9]
+            space ::= | " " | "\n"{1,2} [ \t]{0,20}
+        )"""
+    });
+
+    test({
+        SUCCESS,
+        "regexp shorthand classes inside character classes",
+        R"""({
+            "type": "string",
+            "pattern": "^[\\d_]+[\\s\\w]$"
+        })""",
+        R"""(
+            root ::= "\"" ([0-9_]+ [\x09-\x0D\x200-9A-Z_a-z]) "\""
+            space ::= | " " | "\n"{1,2} [ \t]{0,20}
+        )"""
+    });
+
+    test({
+        SUCCESS,
+        "regexp shorthand classes inside negated character classes",
+        R"""({
+            "type": "string",
+            "pattern": "^[^\\d\\s]+$"
+        })""",
+        R"""(
+            root ::= "\"" ([^0-9\x09-\x0D\x20]+) "\""
+            space ::= | " " | "\n"{1,2} [ \t]{0,20}
+        )"""
+    });
+
+    test({
+        SUCCESS,
+        "regexp negated shorthand classes inside character classes",
+        R"""({
+            "type": "string",
+            "pattern": "^[\\D]$"
+        })""",
+        R"""(
+            root ::= "\"" ([\x00-\x2F\x3A-\U0010FFFF]) "\""
+            space ::= | " " | "\n"{1,2} [ \t]{0,20}
+        )"""
+    });
+
+    test({
+        SUCCESS,
+        "regexp zero-width assertions are ignored",
+        R"""({
+            "type": "string",
+            "pattern": "^\\bfoo\\b\\Bbar\\B$"
+        })""",
+        R"""(
+            root ::= "\"" ("foobar") "\""
+            space ::= | " " | "\n"{1,2} [ \t]{0,20}
+        )"""
+    });
+
+    test({
+        SUCCESS,
         "required props in original order",
         R"""({
             "type": "object",

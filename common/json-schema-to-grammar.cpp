@@ -278,6 +278,20 @@ static std::unordered_map<char, std::string> GRAMMAR_LITERAL_ESCAPES = {
     {'\r', "\\r"}, {'\n', "\\n"}, {'"', "\\\""}, {'-', "\\-"}, {']', "\\]"}, {'\\', "\\\\"}
 };
 
+// PCRE shorthand character classes, as the contents of a grammar char class.
+// The negated forms are spelled out as complement ranges so that they also work inside [...] and [^...].
+static std::unordered_map<char, std::string> PCRE_SHORTHAND_CLASSES = {
+    {'d', "0-9"},
+    {'D', "\\x00-\\x2F\\x3A-\\U0010FFFF"},
+    {'w', "0-9A-Z_a-z"},
+    {'W', "\\x00-\\x2F\\x3A-\\x40\\x5B-\\x5E\\x60\\x7B-\\U0010FFFF"},
+    {'s', "\\x09-\\x0D\\x20"},
+    {'S', "\\x00-\\x08\\x0E-\\x1F\\x21-\\U0010FFFF"},
+};
+
+// zero-width assertions, matched by the empty string
+static std::unordered_set<char> PCRE_ZERO_WIDTH_ASSERTIONS = {'b', 'B', 'A', 'z', 'Z', 'G'};
+
 static std::unordered_set<char> NON_LITERAL_SET = {'|', '.', '(', ')', '[', ']', '{', '}', '*', '+', '?'};
 static std::unordered_set<char> ESCAPED_IN_REGEXPS_BUT_NOT_IN_LITERALS = {'^', '$', '.', '[', ']', '(', ')', '|', '{', '}', '*', '+', '?'};
 
@@ -443,12 +457,25 @@ private:
                         _errors.push_back("Unbalanced parentheses");
                     }
                     return join_seq();
+                } else if (c == '\\' && i + 1 < length && PCRE_SHORTHAND_CLASSES.find(sub_pattern[i + 1]) != PCRE_SHORTHAND_CLASSES.end()) {
+                    char kind = sub_pattern[i + 1];
+                    bool negated = kind >= 'A' && kind <= 'Z';
+                    seq.emplace_back("[" + std::string(negated ? "^" : "") +
+                        PCRE_SHORTHAND_CLASSES.at(negated ? (char) (kind + ('a' - 'A')) : kind) + "]", false);
+                    i += 2;
+                } else if (c == '\\' && i + 1 < length && PCRE_ZERO_WIDTH_ASSERTIONS.find(sub_pattern[i + 1]) != PCRE_ZERO_WIDTH_ASSERTIONS.end()) {
+                    i += 2;
                 } else if (c == '[') {
                     std::string square_brackets = std::string(1, c);
                     i++;
                     while (i < length && sub_pattern[i] != ']') {
                         if (sub_pattern[i] == '\\') {
-                            square_brackets += sub_pattern.substr(i, 2);
+                            auto shorthand = i + 1 < length ? PCRE_SHORTHAND_CLASSES.find(sub_pattern[i + 1]) : PCRE_SHORTHAND_CLASSES.end();
+                            if (shorthand != PCRE_SHORTHAND_CLASSES.end()) {
+                                square_brackets += shorthand->second;
+                            } else {
+                                square_brackets += sub_pattern.substr(i, 2);
+                            }
                             i += 2;
                         } else {
                             square_brackets += sub_pattern[i];
@@ -525,6 +552,10 @@ private:
                     while (i < length) {
                         if (sub_pattern[i] == '\\' && i < length - 1) {
                             char next = sub_pattern[i + 1];
+                            if (PCRE_SHORTHAND_CLASSES.find(next) != PCRE_SHORTHAND_CLASSES.end() ||
+                                    PCRE_ZERO_WIDTH_ASSERTIONS.find(next) != PCRE_ZERO_WIDTH_ASSERTIONS.end()) {
+                                break;
+                            }
                             if (ESCAPED_IN_REGEXPS_BUT_NOT_IN_LITERALS.find(next) != ESCAPED_IN_REGEXPS_BUT_NOT_IN_LITERALS.end()) {
                                 i++;
                                 literal += sub_pattern[i];

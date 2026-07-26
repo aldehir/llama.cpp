@@ -232,6 +232,20 @@ GRAMMAR_LITERAL_ESCAPE_RE = re.compile(r'[\r\n"\\]')
 GRAMMAR_RANGE_LITERAL_ESCAPE_RE = re.compile(r'[\r\n"\]\-\\]')
 GRAMMAR_LITERAL_ESCAPES = {'\r': '\\r', '\n': '\\n', '"': '\\"', '-': '\\-', ']': '\\]', '\\': '\\\\'}
 
+# PCRE shorthand character classes, as the contents of a grammar char class.
+# The negated forms are spelled out as complement ranges so that they also work inside [...] and [^...].
+PCRE_SHORTHAND_CLASSES = {
+    'd': '0-9',
+    'D': '\\x00-\\x2F\\x3A-\\U0010FFFF',
+    'w': '0-9A-Z_a-z',
+    'W': '\\x00-\\x2F\\x3A-\\x40\\x5B-\\x5E\\x60\\x7B-\\U0010FFFF',
+    's': '\\x09-\\x0D\\x20',
+    'S': '\\x00-\\x08\\x0E-\\x1F\\x21-\\U0010FFFF',
+}
+
+# zero-width assertions, matched by the empty string
+PCRE_ZERO_WIDTH_ASSERTIONS = set('bBAzZG')
+
 NON_LITERAL_SET = set('|.()[]{}*+?')
 ESCAPED_IN_REGEXPS_BUT_NOT_IN_LITERALS = set('^$.[]()|{}*+?')
 
@@ -467,12 +481,22 @@ class SchemaConverter:
                     i += 1
                     assert start > 0 and pattern[start-1] == '(', f'Unbalanced parentheses; start = {start}, i = {i}, pattern = {pattern}'
                     return join_seq()
+                elif c == '\\' and i + 1 < length and pattern[i+1] in PCRE_SHORTHAND_CLASSES:
+                    kind = pattern[i+1]
+                    negated = kind.isupper()
+                    seq.append((f'[{"^" if negated else ""}{PCRE_SHORTHAND_CLASSES[kind.lower()]}]', False))
+                    i += 2
+                elif c == '\\' and i + 1 < length and pattern[i+1] in PCRE_ZERO_WIDTH_ASSERTIONS:
+                    i += 2
                 elif c == '[':
                     square_brackets = c
                     i += 1
                     while i < length and pattern[i] != ']':
                         if pattern[i] == '\\':
-                            square_brackets += pattern[i:i+2]
+                            if i + 1 < length and pattern[i+1] in PCRE_SHORTHAND_CLASSES:
+                                square_brackets += PCRE_SHORTHAND_CLASSES[pattern[i+1]]
+                            else:
+                                square_brackets += pattern[i:i+2]
                             i += 2
                         else:
                             square_brackets += pattern[i]
@@ -525,6 +549,8 @@ class SchemaConverter:
                     while i < length:
                         if pattern[i] == '\\' and i < length - 1:
                             next = pattern[i + 1]
+                            if next in PCRE_SHORTHAND_CLASSES or next in PCRE_ZERO_WIDTH_ASSERTIONS:
+                                break
                             if next in ESCAPED_IN_REGEXPS_BUT_NOT_IN_LITERALS:
                                 i += 1
                                 literal += pattern[i]
