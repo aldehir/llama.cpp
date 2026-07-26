@@ -4,6 +4,7 @@
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
+#include <cctype>
 #include <map>
 #include <regex>
 #include <sstream>
@@ -279,6 +280,13 @@ static std::unordered_map<char, std::string> GRAMMAR_LITERAL_ESCAPES = {
 };
 
 static std::unordered_set<char> NON_LITERAL_SET = {'|', '.', '(', ')', '[', ']', '{', '}', '*', '+', '?'};
+// contents of the equivalent character class for \d, \s, \w (uppercase variants negate)
+static const std::unordered_map<char, std::string> PCRE_SHORTHAND_SETS = {
+    {'d', "0-9"},
+    {'s', " \\t\\n\\x0B\\x0C\\r"},
+    {'w', "0-9A-Za-z_"},
+};
+static const std::string PCRE_ZERO_WIDTH = "bBAZz";
 static std::unordered_set<char> ESCAPED_IN_REGEXPS_BUT_NOT_IN_LITERALS = {'^', '$', '.', '[', ']', '(', ')', '|', '{', '}', '*', '+', '?'};
 
 static std::string replacePattern(const std::string & input, const std::regex & regex, const std::function<std::string(const std::smatch  &)> & replacement) {
@@ -448,6 +456,17 @@ private:
                     i++;
                     while (i < length && sub_pattern[i] != ']') {
                         if (sub_pattern[i] == '\\') {
+                            char next = i + 1 < length ? sub_pattern[i + 1] : '\0';
+                            auto it = PCRE_SHORTHAND_SETS.find(std::tolower((unsigned char) next));
+                            if (it != PCRE_SHORTHAND_SETS.end()) {
+                                if (std::isupper((unsigned char) next)) {
+                                    _errors.push_back("Negated shorthand class inside character class is not supported");
+                                } else {
+                                    square_brackets += it->second;
+                                }
+                                i += 2;
+                                continue;
+                            }
                             square_brackets += sub_pattern.substr(i, 2);
                             i += 2;
                         } else {
@@ -517,6 +536,12 @@ private:
                         ""
                     );
                     seq.back().second = false;
+                } else if (c == '\\' && i + 1 < length && PCRE_SHORTHAND_SETS.count(std::tolower((unsigned char) sub_pattern[i + 1]))) {
+                    char sh = sub_pattern[i + 1];
+                    seq.emplace_back(std::string("[") + (std::isupper((unsigned char) sh) ? "^" : "") + PCRE_SHORTHAND_SETS.at(std::tolower((unsigned char) sh)) + "]", false);
+                    i += 2;
+                } else if (c == '\\' && i + 1 < length && PCRE_ZERO_WIDTH.find(sub_pattern[i + 1]) != std::string::npos) {
+                    i += 2; // zero-width assertion, ignore
                 } else {
                     std::string literal;
                     auto is_non_literal = [&](char c) {
@@ -525,6 +550,9 @@ private:
                     while (i < length) {
                         if (sub_pattern[i] == '\\' && i < length - 1) {
                             char next = sub_pattern[i + 1];
+                            if (PCRE_SHORTHAND_SETS.count(std::tolower((unsigned char) next)) || PCRE_ZERO_WIDTH.find(next) != std::string::npos) {
+                                break; // handled by the outer loop
+                            }
                             if (ESCAPED_IN_REGEXPS_BUT_NOT_IN_LITERALS.find(next) != ESCAPED_IN_REGEXPS_BUT_NOT_IN_LITERALS.end()) {
                                 i++;
                                 literal += sub_pattern[i];

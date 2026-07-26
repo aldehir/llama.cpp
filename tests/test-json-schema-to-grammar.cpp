@@ -1564,6 +1564,69 @@ int main() {
                 space ::= | " " | "\n"{1,2} [ \t]{0,20}
             )""",
         });
+
+        run({
+            SUCCESS,
+            "regexp shorthand classes",
+            R"""({
+                "type": "string",
+                "pattern": "^\\d\\D\\w\\W\\s\\S$"
+            })""",
+            R"""(
+                root ::= "\"" ([0-9] [^0-9] [0-9A-Za-z_] [^0-9A-Za-z_] [ \t\n\x0B\x0C\r] [^ \t\n\x0B\x0C\r]) "\""
+                space ::= | " " | "\n"{1,2} [ \t]{0,20}
+            )""",
+        });
+
+        run({
+            SUCCESS,
+            "regexp shorthand classes with quantifiers",
+            R"""({
+                "type": "string",
+                "pattern": "^\\d{3}-\\d{4}$"
+            })""",
+            R"""(
+                root ::= "\"" (root-1{3,3} "-" root-1{4,4}) "\""
+                root-1 ::= [0-9]
+                space ::= | " " | "\n"{1,2} [ \t]{0,20}
+            )""",
+        });
+
+        run({
+            SUCCESS,
+            "regexp shorthand classes inside brackets",
+            R"""({
+                "type": "string",
+                "pattern": "^[\\d.]+ [\\w-]* [^\\d\\s]?$"
+            })""",
+            R"""(
+                root ::= "\"" ([0-9.]+ " " [0-9A-Za-z_-]* " " [^0-9 \t\n\x0B\x0C\r]?) "\""
+                space ::= | " " | "\n"{1,2} [ \t]{0,20}
+            )""",
+        });
+
+        run({
+            SUCCESS,
+            "regexp ignores zero-width assertions",
+            R"""({
+                "type": "string",
+                "pattern": "^\\A\\bfoo\\Bbar\\b\\z$"
+            })""",
+            R"""(
+                root ::= "\"" ("foobar") "\""
+                space ::= | " " | "\n"{1,2} [ \t]{0,20}
+            )""",
+        });
+
+        run({
+            FAILURE,
+            "regexp negated shorthand inside brackets",
+            R"""({
+                "type": "string",
+                "pattern": "^[\\D]$"
+            })""",
+            ""
+        });
     }
 
     if (getenv("LLAMA_SKIP_TESTS_SLOW_ON_EMULATOR")) {
