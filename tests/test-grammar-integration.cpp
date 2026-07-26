@@ -625,6 +625,58 @@ static void test_special_chars() {
     );
 }
 
+static void test_pcre_shorthand_classes() {
+    test_schema(
+        "shorthand classes",
+        R"""({"type": "string", "pattern": "^\\d\\w\\s$"})""",
+        { "\"1a \"", "\"9_\t\"", "\"11 \"" },
+        { "\"a1 \"", "\"1a-\"", "\"1  \"" }
+    );
+
+    test_schema(
+        "negated shorthand classes",
+        R"""({"type": "string", "pattern": "^\\D\\W\\S$"})""",
+        { "\"a-b\"", "\"-.-\"" },
+        { "\"1-b\"", "\"aab\"", "\"a- \"" }
+    );
+
+    test_schema(
+        "shorthand classes inside character classes",
+        R"""({"type": "string", "pattern": "^[\\d_]+$"})""",
+        { "\"1\"", "\"_\"", "\"12_34\"" },
+        { "\"\"", "\"1a\"", "\"-\"" }
+    );
+
+    test_schema(
+        "shorthand classes inside negated character classes",
+        R"""({"type": "string", "pattern": "^[^\\d\\s]+$"})""",
+        { "\"a\"", "\"abc-\"" },
+        { "\"\"", "\"a1\"", "\"a b\"" }
+    );
+
+    // a negated shorthand inside a negated class negates back
+    test_schema(
+        "negated shorthand classes inside negated character classes",
+        R"""({"type": "string", "pattern": "^[^\\D]+$"})""",
+        { "\"1\"", "\"1234\"" },
+        { "\"\"", "\"a\"", "\"12a\"" }
+    );
+
+    test_schema(
+        "negated shorthand classes inside character classes",
+        R"""({"type": "string", "pattern": "^[\\D]+$"})""",
+        { "\"a\"", "\"a-b \"" },
+        { "\"\"", "\"1\"", "\"a1\"" }
+    );
+
+    test_schema(
+        "zero-width assertions are ignored",
+        R"""({"type": "string", "pattern": "^\\bfoo\\b\\Bbar\\B$"})""",
+        { "\"foobar\"" },
+        { "\"foo\"", "\"bar\"", "\"foo bar\"" }
+    );
+}
+
 static void test_quantifiers() {
     // A collection of tests to exercise * + and ? quantifiers
 
@@ -1481,6 +1533,7 @@ int main() {
     test_simple_grammar();
     test_complex_grammar();
     test_special_chars();
+    test_pcre_shorthand_classes();
     test_quantifiers();
     test_failure_missing_root();
     test_failure_missing_reference();
