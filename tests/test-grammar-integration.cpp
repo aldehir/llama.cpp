@@ -669,6 +669,21 @@ static void test_pcre_shorthand_classes() {
         { "\"\"", "\"1\"", "\"a1\"" }
     );
 
+    // [\s\S] and friends are the usual "any character" idiom
+    test_schema(
+        "complementary shorthand classes match anything",
+        R"""({"type": "string", "pattern": "^[\\s\\S]+$"})""",
+        { "\"a\"", "\"1\"", "\" \"", "\"a 1_-\"", "\"\xf0\x9f\x94\xb5\"" },
+        { "\"\"" }
+    );
+
+    test_schema(
+        "complementary shorthand classes in a negated class match nothing",
+        R"""({"type": "string", "pattern": "^[^\\s\\S]$"})""",
+        { },
+        { "\"\"", "\"a\"", "\" \"" }
+    );
+
     test_schema(
         "zero-width assertions are ignored",
         R"""({"type": "string", "pattern": "^\\bfoo\\b\\Bbar\\B$"})""",
