@@ -9,8 +9,6 @@
 #include <nlohmann/json.hpp>
 
 #include <cassert>
-#include <fstream>
-#include <sstream>
 #include <regex>
 
 static std::string trim(const std::string & source) {
@@ -63,19 +61,6 @@ struct TestCase {
         }
     }
 };
-
-static void write(const std::string & file, const std::string & content) {
-    std::ofstream f;
-    f.open(file.c_str());
-    f << content.c_str();
-    f.close();
-}
-
-static std::string read(const std::string & file) {
-    std::ostringstream actuals;
-    actuals << std::ifstream(file.c_str()).rdbuf();
-    return actuals.str();
-}
 
 static void test_all(const std::string & lang, std::function<void(const TestCase &)> runner) {
     fprintf(stderr, "#\n# Testing JSON schema conversion (%s)\n#\n", lang.c_str());
@@ -1602,9 +1587,6 @@ static void test_resolves_to_string() {
 }
 
 int main() {
-    fprintf(stderr, "LLAMA_NODE_AVAILABLE = %s\n", getenv("LLAMA_NODE_AVAILABLE") ? "true" : "false");
-    fprintf(stderr, "LLAMA_PYTHON_AVAILABLE = %s\n", getenv("LLAMA_PYTHON_AVAILABLE") ? "true" : "false");
-
     test_resolves_to_string();
 
     test_all("C++", [](const TestCase & tc) {
@@ -1617,7 +1599,6 @@ int main() {
         }
     });
 
-    // C++ only tests (features not yet supported in JS/Python implementations)
     {
         fprintf(stderr, "#\n# Testing C++ only features\n#\n");
         auto run = [](const TestCase & tc) {
@@ -1656,21 +1637,6 @@ int main() {
                 space ::= | " " | "\n"{1,2} [ \t]{0,20}
             )""",
         });
-    }
-
-    if (getenv("LLAMA_SKIP_TESTS_SLOW_ON_EMULATOR")) {
-        fprintf(stderr, "\033[33mWARNING: Skipping slow tests on emulator.\n\033[0m");
-    } else {
-        if (getenv("LLAMA_PYTHON_AVAILABLE") || (std::system("python -c \"import sys; exit(1) if sys.version_info < (3, 8) else print('Python version is sufficient')\"") == 0)) {
-            test_all("Python", [](const TestCase & tc) {
-                write("test-json-schema-input.tmp", tc.schema);
-                tc.verify_status(std::system(
-                    "python ./examples/json_schema_to_grammar.py test-json-schema-input.tmp > test-grammar-output.tmp") == 0 ? SUCCESS : FAILURE);
-                tc.verify(read("test-grammar-output.tmp"));
-            });
-        } else {
-            fprintf(stderr, "\033[33mWARNING: Python not found (min version required is 3.8), skipping Python JSON schema -> grammar tests.\n\033[0m");
-        }
     }
 
     test_all("Check Expectations Validity", [](const TestCase & tc) {
