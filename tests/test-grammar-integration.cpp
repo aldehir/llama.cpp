@@ -1201,6 +1201,116 @@ static void test_json_schema() {
     );
 
     test_schema(
+        "pattern with shorthand classes",
+        // Schema
+        R"""({
+            "pattern": "^\\w+\\s\\d+\\S$"
+        })""",
+        // Passing strings
+        {
+            R"""("a_9 42x")""",
+            "\"Z\t70-\"",
+        },
+        // Failing strings
+        {
+            R"""("a 42 ")""",
+            R"""("! 42x")""",
+            R"""("a 4")""",
+        }
+    );
+
+    test_schema(
+        "pattern with negated shorthand classes",
+        // Schema
+        R"""({
+            "pattern": "^\\D\\W\\S$"
+        })""",
+        // Passing strings
+        {
+            R"""("a a")""",
+            R"""(" -a")""",
+        },
+        // Failing strings
+        {
+            R"""("1 a")""",
+            R"""("aaa")""",
+            R"""("a  ")""",
+        }
+    );
+
+    test_schema(
+        "pattern with shorthand classes in character classes",
+        // Schema
+        R"""({
+            "pattern": "^[\\d\\s]+[^\\w-]$"
+        })""",
+        // Passing strings
+        {
+            R"""("1 2!")""",
+            R"""(" 9,")""",
+        },
+        // Failing strings
+        {
+            R"""("1 2a")""",
+            R"""("1 2-")""",
+            R"""("a!")""",
+        }
+    );
+
+    test_schema(
+        "pattern matching any character",
+        // Schema
+        R"""({
+            "pattern": "^x[\\s\\S]{2}$"
+        })""",
+        // Passing strings
+        {
+            R"""("xab")""",
+            "\"x\n \"",
+        },
+        // Failing strings
+        {
+            R"""("xa")""",
+            R"""("xabc")""",
+        }
+    );
+
+    test_schema(
+        "pattern with negated whitespace complement",
+        // Schema
+        R"""({
+            "pattern": "^a[^\\S]b$"
+        })""",
+        // Passing strings
+        {
+            R"""("a b")""",
+            "\"a\tb\"",
+        },
+        // Failing strings
+        {
+            R"""("axb")""",
+            R"""("ab")""",
+        }
+    );
+
+    test_schema(
+        "pattern with zero-width assertions",
+        // Schema
+        R"""({
+            "pattern": "^\\bfoo\\B\\d\\b$"
+        })""",
+        // Passing strings
+        {
+            R"""("foo1")""",
+        },
+        // Failing strings
+        {
+            R"""("foo")""",
+            R"""("fooa")""",
+        }
+    );
+
+    test_schema(
         "",
         // Schema
         R"""(

@@ -1,9 +1,13 @@
 #include "json-schema-to-grammar.h"
 #include "common.h"
+#include "unicode.h"
 
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
+#include <cctype>
+#include <cstdint>
+#include <cstdio>
 #include <map>
 #include <regex>
 #include <sstream>
@@ -280,6 +284,137 @@ static std::unordered_map<char, std::string> GRAMMAR_LITERAL_ESCAPES = {
 
 static std::unordered_set<char> NON_LITERAL_SET = {'|', '.', '(', ')', '[', ']', '{', '}', '*', '+', '?'};
 static std::unordered_set<char> ESCAPED_IN_REGEXPS_BUT_NOT_IN_LITERALS = {'^', '$', '.', '[', ']', '(', ')', '|', '{', '}', '*', '+', '?'};
+static std::unordered_set<char> PCRE_SHORTHAND_CLASSES = {'d', 'D', 'w', 'W', 's', 'S'};
+static std::unordered_set<char> PCRE_ZERO_WIDTH_ASSERTIONS = {'b', 'B', 'A', 'Z', 'z', 'G'};
+
+static const uint32_t MAX_CODEPOINT = 0x10FFFF;
+
+static std::string format_range_char(uint32_t cpt) {
+    switch (cpt) {
+        // GBNF has no escape for these, and they are meaningful inside a char range
+        case '-': return "\\x2D";
+        case '^': return "\\x5E";
+        case ']': return "\\]";
+        case '\\': return "\\\\";
+        default: break;
+    }
+    if (cpt >= 0x20 && cpt < 0x7F) {
+        return std::string(1, (char) cpt);
+    }
+    char buf[16];
+    if (cpt <= 0xFF) {
+        snprintf(buf, sizeof(buf), "\\x%02X", (unsigned) cpt);
+    } else if (cpt <= 0xFFFF) {
+        snprintf(buf, sizeof(buf), "\\u%04X", (unsigned) cpt);
+    } else {
+        snprintf(buf, sizeof(buf), "\\U%08X", (unsigned) cpt);
+    }
+    return buf;
+}
+
+struct char_range {
+    uint32_t lo;
+    uint32_t hi;
+};
+
+// set of code point ranges, kept sorted, non-overlapping and non-adjacent
+class char_ranges {
+public:
+    void add(uint32_t lo, uint32_t hi) {
+        _ranges.push_back({lo, hi});
+        std::sort(_ranges.begin(), _ranges.end(), [](const char_range & a, const char_range & b) {
+            return a.lo < b.lo;
+        });
+        std::vector<char_range> merged;
+        for (const auto & range : _ranges) {
+            if (!merged.empty() && range.lo <= merged.back().hi + 1) {
+                merged.back().hi = std::max(merged.back().hi, range.hi);
+            } else {
+                merged.push_back(range);
+            }
+        }
+        _ranges = std::move(merged);
+    }
+
+    void add(const char_ranges & other) {
+        for (const auto & range : other._ranges) {
+            add(range.lo, range.hi);
+        }
+    }
+
+    bool empty() const {
+        return _ranges.empty();
+    }
+
+    char_ranges complement() const {
+        char_ranges out;
+        uint32_t next = 0;
+        for (const auto & range : _ranges) {
+            if (range.lo > next) {
+                out.add(next, range.lo - 1);
+            }
+            if (range.hi >= MAX_CODEPOINT) {
+                return out;
+            }
+            next = range.hi + 1;
+        }
+        out.add(next, MAX_CODEPOINT);
+        return out;
+    }
+
+    // renders as a GBNF char range, negated if that spells the set out more compactly
+    std::string to_grammar() const {
+        auto inverted = complement();
+        if (empty()) {
+            return "[^" + inverted._body() + "]";
+        }
+        if (inverted.empty()) {
+            return "[" + _body() + "]";
+        }
+        auto positive = "[" + _body() + "]";
+        auto negative = "[^" + inverted._body() + "]";
+        return negative.length() < positive.length() ? negative : positive;
+    }
+
+private:
+    std::string _body() const {
+        std::string out;
+        for (const auto & range : _ranges) {
+            out += format_range_char(range.lo);
+            if (range.hi != range.lo) {
+                out += '-';
+                out += format_range_char(range.hi);
+            }
+        }
+        return out;
+    }
+
+    std::vector<char_range> _ranges;
+};
+
+// \d \w \s and their negated counterparts, with the ASCII semantics PCRE uses by default
+static bool pcre_shorthand_class(char c, char_ranges & out) {
+    char_ranges ranges;
+    switch (c) {
+        case 'd': case 'D':
+            ranges.add('0', '9');
+            break;
+        case 'w': case 'W':
+            ranges.add('0', '9');
+            ranges.add('A', 'Z');
+            ranges.add('_', '_');
+            ranges.add('a', 'z');
+            break;
+        case 's': case 'S':
+            ranges.add(0x09, 0x0D);
+            ranges.add(' ', ' ');
+            break;
+        default:
+            return false;
+    }
+    out = c >= 'A' && c <= 'Z' ? ranges.complement() : ranges;
+    return true;
+}
 
 static std::string replacePattern(const std::string & input, const std::regex & regex, const std::function<std::string(const std::smatch  &)> & replacement) {
     std::smatch match;
@@ -362,6 +497,61 @@ private:
             auto s = ls.first;
             return is_literal ? "\"" + s + "\"" : s;
         };
+        auto parse_hex_escape = [&](size_t digits) {
+            uint32_t value = 0;
+            size_t consumed = 0;
+            while (consumed < digits && i < length && std::isxdigit((unsigned char) sub_pattern[i])) {
+                char digit = sub_pattern[i];
+                value = value * 16 + (uint32_t) (digit <= '9' ? digit - '0' : (std::tolower(digit) - 'a' + 10));
+                i++;
+                consumed++;
+            }
+            if (consumed != digits) {
+                _errors.push_back("Invalid hex escape in pattern");
+            }
+            return value;
+        };
+
+        // reads one character class atom, returning true if it expanded to a shorthand class
+        auto next_class_atom = [&](char_ranges & cls, uint32_t & cpt) {
+            if (sub_pattern[i] != '\\') {
+                auto parsed = common_parse_utf8_codepoint(sub_pattern, i);
+                if (parsed.status == utf8_parse_result::SUCCESS) {
+                    cpt = parsed.codepoint;
+                    i += parsed.bytes_consumed;
+                } else {
+                    cpt = (unsigned char) sub_pattern[i];
+                    i++;
+                }
+                return false;
+            }
+            if (i + 1 >= length) {
+                _errors.push_back("Trailing backslash in pattern");
+                cpt = '\\';
+                i++;
+                return false;
+            }
+            char escaped = sub_pattern[i + 1];
+            if (pcre_shorthand_class(escaped, cls)) {
+                i += 2;
+                return true;
+            }
+            i += 2;
+            switch (escaped) {
+                case '0': cpt = 0x00; break;
+                case 'b': cpt = 0x08; break; // backspace, not a word boundary, inside a class
+                case 't': cpt = 0x09; break;
+                case 'n': cpt = 0x0A; break;
+                case 'v': cpt = 0x0B; break;
+                case 'f': cpt = 0x0C; break;
+                case 'r': cpt = 0x0D; break;
+                case 'x': cpt = parse_hex_escape(2); break;
+                case 'u': cpt = parse_hex_escape(4); break;
+                default:  cpt = (unsigned char) escaped; break;
+            }
+            return false;
+        };
+
         std::function<literal_or_rule()> transform = [&]() -> literal_or_rule {
             size_t start = i;
             std::vector<literal_or_rule> seq;
@@ -444,30 +634,68 @@ private:
                     }
                     return join_seq();
                 } else if (c == '[') {
-                    std::string square_brackets = std::string(1, c);
                     i++;
+                    bool negated = false;
+                    if (i < length && sub_pattern[i] == '^') {
+                        negated = true;
+                        i++;
+                    }
+                    char_ranges ranges;
                     while (i < length && sub_pattern[i] != ']') {
-                        if (sub_pattern[i] == '\\') {
-                            square_brackets += sub_pattern.substr(i, 2);
-                            i += 2;
-                        } else {
-                            square_brackets += sub_pattern[i];
-                            i++;
+                        char_ranges cls;
+                        uint32_t lo = 0;
+                        if (next_class_atom(cls, lo)) {
+                            ranges.add(cls);
+                            continue;
                         }
+                        if (i + 1 < length && sub_pattern[i] == '-' && sub_pattern[i + 1] != ']') {
+                            i++;
+                            char_ranges hi_cls;
+                            uint32_t hi = 0;
+                            if (next_class_atom(hi_cls, hi)) {
+                                // a shorthand class cannot bound a range, so the dash is a literal
+                                ranges.add(lo, lo);
+                                ranges.add('-', '-');
+                                ranges.add(hi_cls);
+                                continue;
+                            }
+                            if (hi < lo) {
+                                _errors.push_back("Inverted character range in pattern");
+                                return std::make_pair("", false);
+                            }
+                            ranges.add(lo, hi);
+                            continue;
+                        }
+                        ranges.add(lo, lo);
                     }
                     if (i >= length) {
                         _errors.push_back("Unbalanced square brackets");
                     }
-                    square_brackets += ']';
                     i++;
-                    seq.emplace_back(square_brackets, false);
+                    seq.emplace_back((negated ? ranges.complement() : ranges).to_grammar(), false);
+                } else if (c == '\\' && i + 1 < length &&
+                        PCRE_ZERO_WIDTH_ASSERTIONS.find(sub_pattern[i + 1]) != PCRE_ZERO_WIDTH_ASSERTIONS.end()) {
+                    i += 2;
+                } else if (c == '\\' && i + 1 < length && PCRE_SHORTHAND_CLASSES.find(sub_pattern[i + 1]) != PCRE_SHORTHAND_CLASSES.end()) {
+                    char_ranges ranges;
+                    pcre_shorthand_class(sub_pattern[i + 1], ranges);
+                    i += 2;
+                    seq.emplace_back(ranges.to_grammar(), false);
                 } else if (c == '|') {
                     seq.emplace_back("|", false);
                     i++;
                 } else if (c == '*' || c == '+' || c == '?') {
+                    if (seq.empty()) {
+                        _errors.push_back("Nothing to repeat in pattern");
+                        return std::make_pair("", false);
+                    }
                     seq.back() = std::make_pair(to_rule(seq.back()) + c, false);
                     i++;
                 } else if (c == '{') {
+                    if (seq.empty()) {
+                        _errors.push_back("Nothing to repeat in pattern");
+                        return std::make_pair("", false);
+                    }
                     std::string curly_brackets = std::string(1, c);
                     i++;
                     while (i < length && sub_pattern[i] != '}') {
@@ -525,6 +753,10 @@ private:
                     while (i < length) {
                         if (sub_pattern[i] == '\\' && i < length - 1) {
                             char next = sub_pattern[i + 1];
+                            if (PCRE_SHORTHAND_CLASSES.find(next) != PCRE_SHORTHAND_CLASSES.end() ||
+                                    PCRE_ZERO_WIDTH_ASSERTIONS.find(next) != PCRE_ZERO_WIDTH_ASSERTIONS.end()) {
+                                break;
+                            }
                             if (ESCAPED_IN_REGEXPS_BUT_NOT_IN_LITERALS.find(next) != ESCAPED_IN_REGEXPS_BUT_NOT_IN_LITERALS.end()) {
                                 i++;
                                 literal += sub_pattern[i];

@@ -1537,6 +1537,9 @@ int main() {
                 fprintf(stderr, "Error: %s\n", ex.what());
                 tc.verify_status(FAILURE);
             }
+            if (tc.expected_status == SUCCESS) {
+                tc.verify_expectation_parseable();
+            }
         };
 
         run({
@@ -1561,6 +1564,163 @@ int main() {
             })""",
             R"""(
                 root ::= "\"" ((("ab")+ "c")? "d") "\""
+                space ::= | " " | "\n"{1,2} [ \t]{0,20}
+            )""",
+        });
+
+        run({
+            SUCCESS,
+            "regexp with digit shorthand",
+            R"""({
+                "type": "string",
+                "pattern": "^\\d{3}-\\d{4}$"
+            })""",
+            R"""(
+                root ::= "\"" (root-1{3,3} "-" root-1{4,4}) "\""
+                root-1 ::= [0-9]
+                space ::= | " " | "\n"{1,2} [ \t]{0,20}
+            )""",
+        });
+
+        run({
+            SUCCESS,
+            "regexp with word and whitespace shorthand",
+            R"""({
+                "type": "string",
+                "pattern": "^\\w+\\s\\w+$"
+            })""",
+            R"""(
+                root ::= "\"" ([0-9A-Z_a-z]+ [\x09-\x0D ] [0-9A-Z_a-z]+) "\""
+                space ::= | " " | "\n"{1,2} [ \t]{0,20}
+            )""",
+        });
+
+        run({
+            SUCCESS,
+            "regexp with negated shorthand",
+            R"""({
+                "type": "string",
+                "pattern": "^\\D\\W\\S$"
+            })""",
+            R"""(
+                root ::= "\"" ([^0-9] [^0-9A-Z_a-z] [^\x09-\x0D ]) "\""
+                space ::= | " " | "\n"{1,2} [ \t]{0,20}
+            )""",
+        });
+
+        run({
+            SUCCESS,
+            "regexp with shorthand inside character class",
+            R"""({
+                "type": "string",
+                "pattern": "^[\\d\\s]+$"
+            })""",
+            R"""(
+                root ::= "\"" ([\x09-\x0D 0-9]+) "\""
+                space ::= | " " | "\n"{1,2} [ \t]{0,20}
+            )""",
+        });
+
+        run({
+            SUCCESS,
+            "regexp with shorthand and ranges inside character class",
+            R"""({
+                "type": "string",
+                "pattern": "^[a-fA-F\\d]+$"
+            })""",
+            R"""(
+                root ::= "\"" ([0-9A-Fa-f]+) "\""
+                space ::= | " " | "\n"{1,2} [ \t]{0,20}
+            )""",
+        });
+
+        run({
+            SUCCESS,
+            "regexp with any character class",
+            R"""({
+                "type": "string",
+                "pattern": "^[\\s\\S]*$"
+            })""",
+            R"""(
+                root ::= "\"" ([\x00-\U0010FFFF]*) "\""
+                space ::= | " " | "\n"{1,2} [ \t]{0,20}
+            )""",
+        });
+
+        run({
+            SUCCESS,
+            "regexp with negated shorthand character class",
+            R"""({
+                "type": "string",
+                "pattern": "^[^\\S]+$"
+            })""",
+            R"""(
+                root ::= "\"" ([\x09-\x0D ]+) "\""
+                space ::= | " " | "\n"{1,2} [ \t]{0,20}
+            )""",
+        });
+
+        run({
+            SUCCESS,
+            "regexp with negated character class",
+            R"""({
+                "type": "string",
+                "pattern": "^[^\\d\\s]$"
+            })""",
+            R"""(
+                root ::= "\"" ([^\x09-\x0D 0-9]) "\""
+                space ::= | " " | "\n"{1,2} [ \t]{0,20}
+            )""",
+        });
+
+        run({
+            SUCCESS,
+            "regexp with unsatisfiable character class",
+            R"""({
+                "type": "string",
+                "pattern": "^[^\\s\\S]$"
+            })""",
+            R"""(
+                root ::= "\"" ([^\x00-\U0010FFFF]) "\""
+                space ::= | " " | "\n"{1,2} [ \t]{0,20}
+            )""",
+        });
+
+        run({
+            SUCCESS,
+            "regexp with escapes inside character class",
+            R"""({
+                "type": "string",
+                "pattern": "^[\\t\\x41-\\x43\\-]$"
+            })""",
+            R"""(
+                root ::= "\"" ([\x09\x2DA-C]) "\""
+                space ::= | " " | "\n"{1,2} [ \t]{0,20}
+            )""",
+        });
+
+        run({
+            SUCCESS,
+            "regexp with unicode escapes inside character class",
+            R"""({
+                "type": "string",
+                "pattern": "^[\\u00e9-\\u017f]$"
+            })""",
+            R"""(
+                root ::= "\"" ([\xE9-\u017F]) "\""
+                space ::= | " " | "\n"{1,2} [ \t]{0,20}
+            )""",
+        });
+
+        run({
+            SUCCESS,
+            "regexp with zero-width assertions",
+            R"""({
+                "type": "string",
+                "pattern": "^\\bfoo\\B\\d\\b$"
+            })""",
+            R"""(
+                root ::= "\"" ("foo" [0-9]) "\""
                 space ::= | " " | "\n"{1,2} [ \t]{0,20}
             )""",
         });
