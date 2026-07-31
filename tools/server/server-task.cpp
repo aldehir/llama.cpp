@@ -348,8 +348,17 @@ std::vector<unsigned char> completion_token_output::str_to_bytes(const std::stri
 json server_task_result_cmpl_final::to_json() {
     GGML_ASSERT(is_updated && "update() must be called before to_json()");
     switch (res_type) {
-        case TASK_RESPONSE_TYPE_NONE:
-            return to_json_non_oaicompat();
+        case TASK_RESPONSE_TYPE_NONE: {
+            json res = to_json_non_oaicompat();
+            // extra fields for debugging purposes
+            if (verbose && stream) {
+                res["__verbose"] = json {
+                    {"content", verbose_content},
+                    {"tokens",  verbose_tokens},
+                };
+            }
+            return res;
+        }
         case TASK_RESPONSE_TYPE_OAI_CMPL:
             return to_json_oaicompat();
         case TASK_RESPONSE_TYPE_OAI_CHAT:
@@ -388,6 +397,21 @@ json server_task_result_cmpl_final::to_json_non_oaicompat() {
         res["completion_probabilities"] = completion_token_output::probs_vector_to_json(probs_output, post_sampling_probs);
     }
     return response_fields.empty() ? res : json_get_nested_values(response_fields, res);
+}
+
+json server_task_result_cmpl_final::to_json_verbose() {
+    json res = to_json_non_oaicompat();
+    // in stream mode, content and tokens were already sent in the partial chunks,
+    // put the whole generation back so that it shows up in the logs
+    if (stream) {
+        if (res.contains("content")) {
+            res["content"] = verbose_content;
+        }
+        if (res.contains("tokens")) {
+            res["tokens"] = verbose_tokens;
+        }
+    }
+    return res;
 }
 
 json server_task_result_cmpl_final::usage_json_oaicompat() {
@@ -430,7 +454,7 @@ json server_task_result_cmpl_final::to_json_oaicompat() {
 
     // extra fields for debugging purposes
     if (verbose) {
-        res["__verbose"] = to_json_non_oaicompat();
+        res["__verbose"] = to_json_verbose();
     }
     if (timings.prompt_n >= 0) {
         res.push_back({"timings", timings.to_json()});
@@ -478,7 +502,7 @@ json server_task_result_cmpl_final::to_json_oaicompat_chat() {
 
     // extra fields for debugging purposes
     if (verbose) {
-        res["__verbose"] = to_json_non_oaicompat();
+        res["__verbose"] = to_json_verbose();
     }
     if (timings.prompt_n >= 0) {
         res.push_back({"timings", timings.to_json()});
@@ -547,7 +571,7 @@ json server_task_result_cmpl_final::to_json_oaicompat_chat_stream() {
 
     // extra fields for debugging purposes
     if (verbose && !deltas.empty()) {
-        deltas.front()["__verbose"] = to_json_non_oaicompat();
+        deltas.front()["__verbose"] = to_json_verbose();
     }
 
     return deltas;

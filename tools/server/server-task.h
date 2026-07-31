@@ -341,6 +341,11 @@ struct server_task_result_cmpl_final : server_task_result {
     std::string content;
     llama_tokens tokens;
 
+    // in stream mode the fields above are empty, these hold the whole generation
+    // for the verbose payload
+    std::string  verbose_content;
+    llama_tokens verbose_tokens;
+
     bool stream;
     bool include_usage;
     result_timings timings;
@@ -392,6 +397,8 @@ struct server_task_result_cmpl_final : server_task_result {
     }
 
     json to_json_non_oaicompat();
+
+    json to_json_verbose();
 
     json usage_json_oaicompat();
 

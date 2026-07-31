@@ -2088,6 +2088,10 @@ private:
         if (slot.task->params.stream) {
             res->content     = "";
             res->tokens      = llama_tokens{};
+            if (slot.task->params.verbose) {
+                res->verbose_content = slot.generated_text;
+                res->verbose_tokens  = slot.generated_tokens;
+            }
         } else {
             res->content     = std::move(slot.generated_text);
             res->tokens      = std::move(slot.generated_tokens);
