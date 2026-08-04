@@ -1,0 +1,235 @@
+# C99 grammar, following the phrase structure grammar of ISO/IEC 9899 Annex A.
+#
+# Deviations from the standard grammar:
+# - left recursion is rewritten with repetition, GBNF is matched top-down
+# - a typedef-name cannot be told apart from an ordinary identifier without a
+#   symbol table, so typedef-name is any identifier (the classic C ambiguity)
+# - identifiers are not checked against the keyword list
+# - whitespace after a keyword is optional, so "intx" also parses as "int x"
+# - this is the language after preprocessing: directives are matched as raw lines
+#   wherever whitespace is allowed, but macros are never expanded, so a macro in
+#   declarator position ("int * RESTRICT p") does not parse
+# - no GNU extensions (__attribute__, typeof, statement expressions, ...)
+
+root ::= ws external-declaration*
+
+external-declaration ::= function-definition | declaration
+
+function-definition ::= declaration-specifiers declarator declaration* compound-statement
+
+# A.2.2 Declarations
+
+declaration ::= declaration-specifiers init-declarator-list? ";" ws | static-assert-declaration
+
+declaration-specifiers ::= declaration-specifier+
+
+declaration-specifier ::=
+    storage-class-specifier |
+    type-specifier |
+    type-qualifier |
+    function-specifier |
+    alignment-specifier
+
+init-declarator-list ::= init-declarator ("," ws init-declarator)*
+init-declarator ::= declarator ("=" ws initializer)?
+
+storage-class-specifier ::= ("typedef" | "extern" | "static" | "_Thread_local" | "auto" | "register") ws
+
+type-specifier ::=
+    ("void" | "char" | "short" | "int" | "long" | "float" | "double" | "signed" | "unsigned" | "_Bool" | "_Complex") ws |
+    atomic-type-specifier |
+    struct-or-union-specifier |
+    enum-specifier |
+    typedef-name
+
+type-qualifier ::= ("const" | "restrict" | "volatile" | "_Atomic") ws
+function-specifier ::= ("inline" | "_Noreturn") ws
+alignment-specifier ::= "_Alignas" ws "(" ws (type-name | constant-expression) ")" ws
+atomic-type-specifier ::= "_Atomic" ws "(" ws type-name ")" ws
+
+typedef-name ::= identifier
+
+struct-or-union-specifier ::= ("struct" | "union") ws (identifier? "{" ws struct-declaration+ "}" ws | identifier)
+
+struct-declaration ::= specifier-qualifier-list struct-declarator-list? ";" ws | static-assert-declaration
+
+specifier-qualifier-list ::= (type-specifier | type-qualifier)+
+
+struct-declarator-list ::= struct-declarator ("," ws struct-declarator)*
+struct-declarator ::= declarator? ":" ws constant-expression | declarator
+
+enum-specifier ::= "enum" ws (identifier? "{" ws enumerator-list ("," ws)? "}" ws | identifier)
+enumerator-list ::= enumerator ("," ws enumerator)*
+enumerator ::= identifier ("=" ws constant-expression)?
+
+declarator ::= pointer? direct-declarator
+pointer ::= ("*" ws type-qualifier*)+
+
+direct-declarator ::= (identifier | "(" ws declarator ")" ws) direct-declarator-suffix*
+
+direct-declarator-suffix ::=
+    array-suffix |
+    "(" ws parameter-type-list ")" ws |
+    "(" ws identifier-list? ")" ws
+
+array-suffix ::= "[" ws ("static" ws)? type-qualifier* ("static" ws)? (assignment-expression | "*" ws)? "]" ws
+
+parameter-type-list ::= parameter-declaration ("," ws parameter-declaration)* ("," ws "..." ws)?
+parameter-declaration ::= declaration-specifiers (declarator | abstract-declarator)?
+
+identifier-list ::= identifier ("," ws identifier)*
+
+type-name ::= specifier-qualifier-list abstract-declarator?
+
+abstract-declarator ::= pointer direct-abstract-declarator? | direct-abstract-declarator
+
+direct-abstract-declarator ::=
+    "(" ws abstract-declarator ")" ws direct-abstract-suffix* |
+    direct-abstract-suffix+
+
+direct-abstract-suffix ::= array-suffix | "(" ws parameter-type-list? ")" ws
+
+initializer ::= assignment-expression | "{" ws initializer-list ("," ws)? "}" ws
+initializer-list ::= designation? initializer ("," ws designation? initializer)*
+designation ::= designator+ "=" ws
+designator ::= "[" ws constant-expression "]" ws | "." ws identifier
+
+static-assert-declaration ::= "_Static_assert" ws "(" ws constant-expression "," ws string-literal ")" ws ";" ws
+
+# A.2.3 Statements
+
+statement ::=
+    labeled-statement |
+    compound-statement |
+    expression-statement |
+    selection-statement |
+    iteration-statement |
+    jump-statement
+
+labeled-statement ::=
+    identifier ":" ws statement |
+    "case" ws constant-expression ":" ws statement |
+    "default" ws ":" ws statement
+
+compound-statement ::= "{" ws block-item* "}" ws
+block-item ::= declaration | statement
+
+expression-statement ::= expression? ";" ws
+
+selection-statement ::=
+    "if" ws "(" ws expression ")" ws statement ("else" ws statement)? |
+    "switch" ws "(" ws expression ")" ws statement
+
+iteration-statement ::=
+    "while" ws "(" ws expression ")" ws statement |
+    "do" ws statement "while" ws "(" ws expression ")" ws ";" ws |
+    "for" ws "(" ws (expression? ";" ws | declaration) expression? ";" ws expression? ")" ws statement
+
+jump-statement ::=
+    "goto" ws identifier ";" ws |
+    "continue" ws ";" ws |
+    "break" ws ";" ws |
+    "return" ws expression? ";" ws
+
+# A.2.1 Expressions
+
+primary-expression ::=
+    identifier |
+    constant |
+    string-literal+ |
+    "(" ws expression ")" ws |
+    generic-selection
+
+generic-selection ::= "_Generic" ws "(" ws assignment-expression "," ws generic-association ("," ws generic-association)* ")" ws
+generic-association ::= (type-name | "default" ws) ":" ws assignment-expression
+
+postfix-expression ::= (primary-expression | compound-literal) postfix-suffix*
+
+compound-literal ::= "(" ws type-name ")" ws "{" ws initializer-list ("," ws)? "}" ws
+
+postfix-suffix ::=
+    "[" ws expression "]" ws |
+    "(" ws argument-expression-list? ")" ws |
+    "." ws identifier |
+    "->" ws identifier |
+    ("++" | "--") ws
+
+argument-expression-list ::= assignment-expression ("," ws assignment-expression)*
+
+unary-expression ::=
+    postfix-expression |
+    ("++" | "--") ws unary-expression |
+    unary-operator cast-expression |
+    "sizeof" ws unary-expression |
+    "sizeof" ws "(" ws type-name ")" ws |
+    "_Alignof" ws "(" ws type-name ")" ws
+
+unary-operator ::= [&*+~!-] ws
+
+cast-expression ::= ("(" ws type-name ")" ws)* unary-expression
+
+multiplicative-expression ::= cast-expression ([*/%] ws cast-expression)*
+additive-expression ::= multiplicative-expression ([+-] ws multiplicative-expression)*
+shift-expression ::= additive-expression (("<<" | ">>") ws additive-expression)*
+relational-expression ::= shift-expression (("<=" | ">=" | "<" | ">") ws shift-expression)*
+equality-expression ::= relational-expression (("==" | "!=") ws relational-expression)*
+and-expression ::= equality-expression ("&" ws equality-expression)*
+exclusive-or-expression ::= and-expression ("^" ws and-expression)*
+inclusive-or-expression ::= exclusive-or-expression ("|" ws exclusive-or-expression)*
+logical-and-expression ::= inclusive-or-expression ("&&" ws inclusive-or-expression)*
+logical-or-expression ::= logical-and-expression ("||" ws logical-and-expression)*
+conditional-expression ::= logical-or-expression ("?" ws expression ":" ws conditional-expression)?
+
+assignment-expression ::= (unary-expression assignment-operator)* conditional-expression
+assignment-operator ::= ("*=" | "/=" | "%=" | "+=" | "-=" | "<<=" | ">>=" | "&=" | "^=" | "|=" | "=") ws
+
+expression ::= assignment-expression ("," ws assignment-expression)*
+constant-expression ::= conditional-expression
+
+# A.1 Lexical elements
+
+identifier ::= ident-nondigit (ident-nondigit | [0-9])* ws
+ident-nondigit ::= [a-zA-Z_] | universal-character-name
+universal-character-name ::= "\\u" hex-quad | "\\U" hex-quad hex-quad
+hex-quad ::= [0-9a-fA-F]{4}
+
+constant ::= floating-constant | integer-constant | character-constant
+
+integer-constant ::= (hexadecimal-constant | octal-constant | decimal-constant) integer-suffix? ws
+decimal-constant ::= [1-9] [0-9]*
+octal-constant ::= "0" [0-7]*
+hexadecimal-constant ::= "0" [xX] [0-9a-fA-F]+
+integer-suffix ::= [uU] long-suffix? | long-suffix [uU]?
+long-suffix ::= "ll" | "LL" | [lL]
+
+floating-constant ::= (decimal-floating-constant | hexadecimal-floating-constant) floating-suffix? ws
+decimal-floating-constant ::= fractional-constant exponent-part? | [0-9]+ exponent-part
+fractional-constant ::= [0-9]* "." [0-9]+ | [0-9]+ "."
+exponent-part ::= [eE] [+-]? [0-9]+
+hexadecimal-floating-constant ::= "0" [xX] hex-fractional-constant binary-exponent-part
+hex-fractional-constant ::= [0-9a-fA-F]* "." [0-9a-fA-F]+ | [0-9a-fA-F]+ "."?
+binary-exponent-part ::= [pP] [+-]? [0-9]+
+floating-suffix ::= [flFL]
+
+character-constant ::= ("L" | "u" | "U")? "'" c-char+ "'" ws
+c-char ::= [^'\\\n] | escape-sequence
+
+string-literal ::= encoding-prefix? "\"" s-char* "\"" ws
+encoding-prefix ::= "u8" | [uUL]
+s-char ::= [^"\\\n] | escape-sequence
+
+escape-sequence ::=
+    "\\" ['\"?\\abfnrtv] |
+    "\\" [0-7]{1,3} |
+    "\\x" [0-9a-fA-F]+ |
+    universal-character-name
+
+# whitespace, comments and directives, matched after every token
+
+ws ::= ([ \t\r\n] | comment | pp-directive)*
+comment ::= "/*" ([^*] | "*"+ [^*/])* "*"+ "/" | "//" ([^\n\\] | "\\" .)* [\n]?
+
+# directives are line based, they may appear between any two tokens, so they are
+# matched as raw lines here (with line splicing) rather than in the phrase grammar
+
+pp-directive ::= "#" ([^\n\\] | "\\" .)* [\n]?
