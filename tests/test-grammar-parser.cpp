@@ -18,6 +18,9 @@ static const char * type_str(llama_gretype type) {
         case LLAMA_GRETYPE_RULE_REF: return "LLAMA_GRETYPE_RULE_REF";
         case LLAMA_GRETYPE_ALT: return "LLAMA_GRETYPE_ALT";
         case LLAMA_GRETYPE_END: return "LLAMA_GRETYPE_END";
+        case LLAMA_GRETYPE_REPEAT: return "LLAMA_GRETYPE_REPEAT";
+        case LLAMA_GRETYPE_REPEAT_MIN: return "LLAMA_GRETYPE_REPEAT_MIN";
+        case LLAMA_GRETYPE_REPEAT_MAX: return "LLAMA_GRETYPE_REPEAT_MAX";
         default: return "?";
     }
 }
@@ -58,7 +61,7 @@ static void verify_parsing(const char *grammar_bytes, const std::vector<std::pai
                     } else {
                         fprintf(stderr, "'%c'", c);
                     }
-                } else if (rule[i].type == LLAMA_GRETYPE_RULE_REF) {
+                } else if (rule[i].type == LLAMA_GRETYPE_RULE_REF || rule[i].type == LLAMA_GRETYPE_REPEAT) {
                     fprintf(stderr, "/* %s */ %u", symbol_names[rule[i].value].c_str(), rule[i].value);
                 } else {
                     fprintf(stderr, "%u", rule[i].value);
@@ -143,10 +146,6 @@ int main()
 {
     verify_failure(R"""(
         root ::= "a"{,}"
-    )""");
-
-    verify_failure(R"""(
-        root ::= (((((([^x]*){0,99}){0,99}){0,99}){0,99}){0,99}){0,99}
     )""");
 
     verify_failure(R"""(
@@ -296,9 +295,14 @@ int main()
         root  ::= "a"{2}
     )""", {
         {"root", 0},
+        {"root_1", 1},
     }, {
         // root (index 0)
-        {LLAMA_GRETYPE_CHAR, 'a'},
+        {LLAMA_GRETYPE_REPEAT, /* root_1 */ 1},
+        {LLAMA_GRETYPE_REPEAT_MIN, 2},
+        {LLAMA_GRETYPE_REPEAT_MAX, 2},
+        {LLAMA_GRETYPE_END, 0},
+        // root_1 (index 1)
         {LLAMA_GRETYPE_CHAR, 'a'},
         {LLAMA_GRETYPE_END, 0},
     });
@@ -308,15 +312,20 @@ int main()
     )""", {
         {"root", 0},
         {"root_1", 1},
+        {"root_2", 2},
     }, {
         // root (index 0)
-        {LLAMA_GRETYPE_CHAR, 'a'},
-        {LLAMA_GRETYPE_CHAR, 'a'},
-        {LLAMA_GRETYPE_RULE_REF, /* root_1 */ 1},
+        {LLAMA_GRETYPE_REPEAT, /* root_1 */ 1},
+        {LLAMA_GRETYPE_REPEAT_MIN, 2},
+        {LLAMA_GRETYPE_REPEAT_MAX, 2},
+        {LLAMA_GRETYPE_RULE_REF, /* root_2 */ 2},
         {LLAMA_GRETYPE_END, 0},
         // root_1 (index 1)
         {LLAMA_GRETYPE_CHAR, 'a'},
+        {LLAMA_GRETYPE_END, 0},
+        // root_2 (index 2)
         {LLAMA_GRETYPE_RULE_REF, /* root_1 */ 1},
+        {LLAMA_GRETYPE_RULE_REF, /* root_2 */ 2},
         {LLAMA_GRETYPE_ALT, 0},
         {LLAMA_GRETYPE_END, 0},
     });
@@ -325,11 +334,14 @@ int main()
         root  ::= "a"{ 4}
     )""", {
         {"root", 0},
+        {"root_1", 1},
     }, {
         // root (index 0)
-        {LLAMA_GRETYPE_CHAR, 'a'},
-        {LLAMA_GRETYPE_CHAR, 'a'},
-        {LLAMA_GRETYPE_CHAR, 'a'},
+        {LLAMA_GRETYPE_REPEAT, /* root_1 */ 1},
+        {LLAMA_GRETYPE_REPEAT_MIN, 4},
+        {LLAMA_GRETYPE_REPEAT_MAX, 4},
+        {LLAMA_GRETYPE_END, 0},
+        // root_1 (index 1)
         {LLAMA_GRETYPE_CHAR, 'a'},
         {LLAMA_GRETYPE_END, 0},
     });
@@ -339,21 +351,14 @@ int main()
     )""", {
         {"root", 0},
         {"root_1", 1},
-        {"root_2", 2},
     }, {
         // root (index 0)
-        {LLAMA_GRETYPE_CHAR, 'a'},
-        {LLAMA_GRETYPE_CHAR, 'a'},
-        {LLAMA_GRETYPE_RULE_REF, /* root_2 */ 2},
+        {LLAMA_GRETYPE_REPEAT, /* root_1 */ 1},
+        {LLAMA_GRETYPE_REPEAT_MIN, 2},
+        {LLAMA_GRETYPE_REPEAT_MAX, 4},
         {LLAMA_GRETYPE_END, 0},
         // root_1 (index 1)
         {LLAMA_GRETYPE_CHAR, 'a'},
-        {LLAMA_GRETYPE_ALT, 0},
-        {LLAMA_GRETYPE_END, 0},
-        // root_2 (index 2)
-        {LLAMA_GRETYPE_CHAR, 'a'},
-        {LLAMA_GRETYPE_RULE_REF, /* root_1 */ 1},
-        {LLAMA_GRETYPE_ALT, 0},
         {LLAMA_GRETYPE_END, 0},
     });
 

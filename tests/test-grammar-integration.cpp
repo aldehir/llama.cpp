@@ -808,6 +808,77 @@ static void test_quantifiers() {
     );
 }
 
+static void test_counted_repetitions() {
+    // repetitions with a bounded count are tracked by a counter at runtime rather than unrolled
+    // into the grammar, so counts far above what unrolling could handle stay cheap
+
+    test_grammar(
+        "large exact repetition",
+        // Grammar
+        R"""(root ::= [ab]{500})""",
+        // Passing strings
+        { std::string(500, 'a'), std::string(250, 'a') + std::string(250, 'b') },
+        // Failing strings
+        { "", std::string(499, 'a'), std::string(501, 'a') }
+    );
+
+    test_grammar(
+        "large bounded repetition",
+        // Grammar
+        R"""(root ::= [ab]{100,5000})""",
+        // Passing strings
+        { std::string(100, 'a'), std::string(5000, 'b') },
+        // Failing strings
+        { "", std::string(99, 'a'), std::string(5001, 'a') }
+    );
+
+    test_grammar(
+        "large open-ended repetition",
+        // Grammar
+        R"""(root ::= [ab]{3000,})""",
+        // Passing strings
+        { std::string(3000, 'a'), std::string(6000, 'a') },
+        // Failing strings
+        { "", std::string(2999, 'a') }
+    );
+
+    test_grammar(
+        "nested repetitions",
+        // Grammar
+        R"""(root ::= ("ab"{20}){20})""",
+        // Passing strings
+        { [] { std::string s; for (int i = 0; i < 400; i++) s += "ab"; return s; }() },
+        // Failing strings
+        { "", "ab", [] { std::string s; for (int i = 0; i < 399; i++) s += "ab"; return s; }() }
+    );
+
+    // a repetition whose body can match the empty string cannot be counted (an iteration that
+    // consumes nothing would not make progress), so it falls back to being unrolled
+    test_grammar(
+        "repetition of a possibly empty rule",
+        // Grammar
+        R"""(root ::= ("a"?){2,4})""",
+        // Passing strings
+        { "", "a", "aa", "aaa", "aaaa" },
+        // Failing strings
+        { "aaaaa", "b" }
+    );
+}
+
+static void test_failure_repetition_limits() {
+    fprintf(stderr, "\u26ab Testing repetition limits:\n");
+
+    // beyond the counter limit
+    assert(test_build_grammar_fails(R"""(root ::= "a"{2000000})"""));
+
+    // unrolled repetitions of possibly empty rules keep their much lower limit
+    assert(test_build_grammar_fails(R"""(root ::= ("a"?){0,5000})"""));
+
+    // nesting them multiplies the number of states tracked per token
+    assert(test_build_grammar_fails(
+        R"""(root ::= (((((([^x]*){0,99}){0,99}){0,99}){0,99}){0,99}){0,99})"""));
+}
+
 static void test_failure_missing_root() {
     fprintf(stderr, "⚫ Testing missing root node:\n");
     // Test case for a grammar that is missing a root rule
@@ -1482,6 +1553,8 @@ int main() {
     test_complex_grammar();
     test_special_chars();
     test_quantifiers();
+    test_counted_repetitions();
+    test_failure_repetition_limits();
     test_failure_missing_root();
     test_failure_missing_reference();
     test_failure_left_recursion();

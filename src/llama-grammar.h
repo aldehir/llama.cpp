@@ -42,7 +42,25 @@ enum llama_gretype {
 
     // inverse token (!<[token-id]>)
     LLAMA_GRETYPE_TOKEN_NOT      = 9,
+
+    // bounded repetition of a rule (S{m,n}), encoded as three consecutive elements:
+    //   { LLAMA_GRETYPE_REPEAT,     <id of the rule holding S> }
+    //   { LLAMA_GRETYPE_REPEAT_MIN, m }
+    //   { LLAMA_GRETYPE_REPEAT_MAX, n }
+    // the number of iterations taken so far is tracked at runtime on the stack entry pointing
+    // at the LLAMA_GRETYPE_REPEAT element, so the grammar stays O(1) in n instead of being
+    // unrolled into n copies of S at parse time
+    LLAMA_GRETYPE_REPEAT         = 10,
+
+    // modifies a preceding LLAMA_GRETYPE_REPEAT, minimum number of iterations
+    LLAMA_GRETYPE_REPEAT_MIN     = 11,
+
+    // modifies a preceding LLAMA_GRETYPE_REPEAT_MIN, maximum number of iterations
+    LLAMA_GRETYPE_REPEAT_MAX     = 12,
 };
+
+// number of elements a LLAMA_GRETYPE_REPEAT occupies in a rule (the element plus its modifiers)
+#define LLAMA_GRAMMAR_REPEAT_SIZE 3
 
 typedef struct llama_grammar_element {
     enum llama_gretype type;
@@ -61,8 +79,26 @@ struct llama_grammar_candidate {
     llama_token          id;
 };
 
-using llama_grammar_rule  = std::vector<      llama_grammar_element>;
-using llama_grammar_stack = std::vector<const llama_grammar_element *>;
+// a position in a rule, together with the number of iterations already taken if that position is
+// a LLAMA_GRETYPE_REPEAT element (the count is meaningless, and always 0, for every other type).
+// the count lives on the stack entry rather than being indexed by rule id because it belongs to a
+// single activation of the repetition: `( "a"{2,3} "," ){5}` needs a fresh inner counter for every
+// iteration of the outer one
+struct llama_grammar_pos {
+    const llama_grammar_element * pos;
+    uint32_t                      count;
+
+    bool operator==(const llama_grammar_pos & other) const {
+        return pos == other.pos && count == other.count;
+    }
+
+    bool operator<(const llama_grammar_pos & other) const {
+        return pos != other.pos ? pos < other.pos : count < other.count;
+    }
+};
+
+using llama_grammar_rule  = std::vector<llama_grammar_element>;
+using llama_grammar_stack = std::vector<llama_grammar_pos>;
 
 using llama_grammar_rules      = std::vector<llama_grammar_rule>;
 using llama_grammar_stacks     = std::vector<llama_grammar_stack>;
@@ -91,7 +127,7 @@ struct llama_grammar_parser {
 
     llama_grammar_parser(const struct llama_vocab * vocab = nullptr) : vocab(vocab) {}
 
-    llama_grammar_stack c_rules() const;
+    std::vector<const llama_grammar_element *> c_rules() const;
 
     uint32_t get_symbol_id(const char * src, size_t len);
     uint32_t generate_symbol_id(const std::string & base_name);

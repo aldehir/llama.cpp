@@ -130,6 +130,11 @@ A common pattern is to allow repetitions of a pattern `x` up to N times.
 
 While semantically correct, the syntax `x? x? x?.... x?` (with N repetitions) may result in extremely slow sampling. Instead, you can write `x{0,N}` (or `(x (x (x ... (x)?...)?)?)?` w/ N-deep nesting in earlier llama.cpp versions).
 
+Repetitions written as `x{m,n}` are counted by the sampler at run time rather than expanded into the
+grammar, so the count itself costs nothing: `x{0,10}` and `x{0,100000}` build the same number of
+rules. The one exception is a repetition whose body can match the empty string (`("a"?){2,4}`),
+which has to be expanded and is therefore limited to 2000 iterations and cannot be nested.
+
 ## Using GBNF grammars
 
 You can use GBNF grammars:

@@ -177,7 +177,7 @@ int main()
         // compare stack to expected_stack
         for (uint32_t i = 0; i < stack.size(); i++)
         {
-            const llama_grammar_element * element = stack[i];
+            const llama_grammar_element * element = stack[i].pos;
             const llama_grammar_element & expected_element = expected_stacks[index][i];
 
             // pretty print error message before asserting

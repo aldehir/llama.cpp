@@ -263,7 +263,7 @@ static std::string get_expected_description(const llama_grammar_rules & rules, c
             continue;
         }
 
-        const llama_grammar_element * elem = stack.back();
+        const llama_grammar_element * elem = stack.back().pos;
         std::string                   desc = format_expected_element(rules, elem);
         if (seen.insert(desc).second) {
             if (!result.empty()) {
