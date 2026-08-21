@@ -716,7 +716,7 @@ jobs:
           key: release-windows-2025-vs2026-${{ matrix.arch }}-cpu
 
   windows-rocm:
-    needs: [check-release]
+    needs: [check-release, ui-build]
     if: ${{ needs.check-release.outputs.should_release == 'true' }}
 
     runs-on: windows-2022
@@ -734,6 +734,12 @@ jobs:
         uses: actions/checkout@v6
         with:
           fetch-depth: 0
+
+      - name: Download UI
+        uses: actions/download-artifact@v7
+        with:
+          name: ui-build
+          path: tools/ui/dist
 
       - name: ccache
         uses: ggml-org/ccache-action@v1.2.21
@@ -1139,7 +1145,7 @@ jobs:
           key: release-windows-2022-x64-sycl
 
   ubuntu-24-sycl:
-    needs: [check-release]
+    needs: [check-release, ui-build]
     if: ${{ needs.check-release.outputs.should_release == 'true' }}
 
     strategy:
@@ -1165,6 +1171,12 @@ jobs:
         uses: actions/checkout@v6
         with:
           fetch-depth: 0
+
+      - name: Download UI
+        uses: actions/download-artifact@v7
+        with:
+          name: ui-build
+          path: tools/ui/dist
 
       - name: Download & Install oneAPI
         shell: bash
