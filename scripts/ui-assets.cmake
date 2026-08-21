@@ -2,20 +2,20 @@
 #
 # Asset provisioning priority:
 #   1. Pre-built assets in SRC_DIST_DIR (manually built by user)
-#   2. If HF_ENABLED=ON: HF Bucket download of the resolved version
-#      (dist.tar.gz, verified against dist.tar.gz.sha256)
+#   2. If GH_ENABLED=ON: GitHub release download of the resolved version
+#      (llama-<version>-ui.tar.gz)
 #   3. If the above did not produce assets:
 #        - BUILD_UI=ON:  npm build (npm ci runs as needed in the staged copy)
-#        - BUILD_UI=OFF: HF Bucket download of "latest"
+#        - BUILD_UI=OFF: GitHub release download of the latest release
 
-cmake_minimum_required(VERSION 3.18)
+cmake_minimum_required(VERSION 3.19)
 
 set(UI_SOURCE_DIR     "" CACHE STRING "UI source directory (to run npm build)")
 set(UI_BINARY_DIR     "" CACHE STRING "UI binary directory (to store generated files)")
 set(LLAMA_SOURCE_DIR  "" CACHE STRING "Project source root (to resolve version from git)")
-set(HF_BUCKET         "" CACHE STRING "Hugging Face bucket name")
-set(HF_VERSION        "" CACHE STRING "Version to download (empty = resolve from git)")
-set(HF_ENABLED        "" CACHE STRING "Whether to allow HF Bucket download (ON/OFF)")
+set(GH_REPO           "" CACHE STRING "GitHub repository (owner/repo) with UI release assets")
+set(UI_VERSION        "" CACHE STRING "Release tag to download (empty = resolve from git)")
+set(GH_ENABLED        "" CACHE STRING "Whether to allow GitHub release download (ON/OFF)")
 set(BUILD_UI          "" CACHE STRING "Build UI via npm (ON/OFF)")
 set(LLAMA_UI_EMBED    "" CACHE STRING "Path to llama-ui-embed helper")
 set(LLAMA_UI_GZIP     "" CACHE STRING "Apply gzip compress to assets to save bandwidth")
@@ -143,7 +143,7 @@ function(npm_build out_var)
 
     message(STATUS "UI: running npm run build, output -> ${DIST_DIR}")
     execute_process(
-        COMMAND ${CMAKE_COMMAND} -E env "LLAMA_UI_OUT_DIR=${DIST_DIR}" "LLAMA_UI_VERSION=${HF_VERSION}" "LLAMA_BUILD_NUMBER=${LLAMA_BUILD_NUMBER}"
+        COMMAND ${CMAKE_COMMAND} -E env "LLAMA_UI_OUT_DIR=${DIST_DIR}" "LLAMA_UI_VERSION=${UI_VERSION}" "LLAMA_BUILD_NUMBER=${LLAMA_BUILD_NUMBER}"
                 ${NPM_EXECUTABLE} run build
         WORKING_DIRECTORY "${WORK_DIR}"
         RESULT_VARIABLE rc
@@ -166,8 +166,8 @@ function(npm_build out_var)
 endfunction()
 
 function(resolve_version out_var)
-    if(NOT "${HF_VERSION}" STREQUAL "")
-        set(${out_var} "${HF_VERSION}" PARENT_SCOPE)
+    if(NOT "${UI_VERSION}" STREQUAL "")
+        set(${out_var} "${UI_VERSION}" PARENT_SCOPE)
         return()
     endif()
 
@@ -182,115 +182,117 @@ function(resolve_version out_var)
     set(${out_var} "" PARENT_SCOPE)
 endfunction()
 
-function(hf_download version out_var)
-    set(${out_var} FALSE PARENT_SCOPE)
-
-    set(archive "${UI_BINARY_DIR}/dist.tar.gz")
-    set(base "https://huggingface.co/buckets/${HF_BUCKET}/resolve/${version}")
-
-    # Use HF_TOKEN to benefit from higher rate limits
-    set(auth_headers "")
-    if(DEFINED ENV{HF_TOKEN} AND NOT "$ENV{HF_TOKEN}" STREQUAL "")
-        list(APPEND auth_headers "HTTPHEADER" "Authorization: Bearer $ENV{HF_TOKEN}")
+# Use GH_TOKEN to benefit from higher rate limits
+function(gh_auth_headers out_var)
+    set(${out_var} "" PARENT_SCOPE)
+    if(DEFINED ENV{GH_TOKEN} AND NOT "$ENV{GH_TOKEN}" STREQUAL "")
+        set(${out_var} "HTTPHEADER" "Authorization: Bearer $ENV{GH_TOKEN}" PARENT_SCOPE)
     endif()
+endfunction()
 
-    message(STATUS "UI: downloading from ${version}: ${base}/dist.tar.gz")
+function(gh_resolve_latest out_var)
+    set(${out_var} "" PARENT_SCOPE)
 
-    file(DOWNLOAD "${base}/dist.tar.gz?download=true" "${archive}"
-        STATUS status TIMEOUT 300 ${auth_headers}
+    # The latest release may point to a nightly build
+    set(tmp "${UI_BINARY_DIR}/nightly-tag.txt")
+    file(DOWNLOAD "https://github.com/${GH_REPO}/releases/latest/download/nightly-tag.txt" "${tmp}"
+        STATUS status TIMEOUT 30
     )
     list(GET status 0 rc)
-    if(NOT rc EQUAL 0)
-        list(GET status 1 errmsg)
-        message(STATUS "UI: download dist.tar.gz from ${version} failed: ${errmsg}")
+    if(rc EQUAL 0)
+        file(READ "${tmp}" tag)
+        string(STRIP "${tag}" tag)
+        set(${out_var} "${tag}" PARENT_SCOPE)
         return()
     endif()
 
-    file(DOWNLOAD "${base}/dist.tar.gz.sha256?download=true" "${archive}.sha256"
+    # Use the GitHub API
+    set(tmp "${UI_BINARY_DIR}/latest-release.json")
+    gh_auth_headers(auth_headers)
+
+    file(DOWNLOAD "https://api.github.com/repos/${GH_REPO}/releases/latest" "${tmp}"
         STATUS status TIMEOUT 30 ${auth_headers}
     )
     list(GET status 0 rc)
     if(NOT rc EQUAL 0)
         list(GET status 1 errmsg)
-        message(STATUS "UI: download dist.tar.gz.sha256 from ${version} failed: ${errmsg}")
+        message(STATUS "UI: failed to resolve latest release: ${errmsg}")
         return()
     endif()
 
-    # Validate sha256 checkums
-    file(READ "${archive}.sha256" expected)
-    string(REGEX MATCH "^[0-9a-fA-F]+" expected "${expected}")
-    string(TOLOWER "${expected}" expected)
-    file(SHA256 "${archive}" actual)
-    if("${expected}" STREQUAL "" OR NOT "${actual}" STREQUAL "${expected}")
-        message(STATUS "UI: checksum mismatch for dist.tar.gz from ${version}")
+    file(READ "${tmp}" json)
+    string(JSON tag ERROR_VARIABLE err GET "${json}" tag_name)
+    if(NOT "${err}" STREQUAL "NOTFOUND" OR "${tag}" STREQUAL "")
+        message(STATUS "UI: no tag_name in latest release response")
+        return()
+    endif()
+    set(${out_var} "${tag}" PARENT_SCOPE)
+endfunction()
+
+function(gh_download version out_var)
+    set(${out_var} FALSE PARENT_SCOPE)
+
+    set(archive "${UI_BINARY_DIR}/ui.tar.gz")
+    set(url "https://github.com/${GH_REPO}/releases/download/${version}/llama-${version}-ui.tar.gz")
+    gh_auth_headers(auth_headers)
+
+    message(STATUS "UI: downloading ${url}")
+
+    file(DOWNLOAD "${url}" "${archive}"
+        STATUS status TIMEOUT 300 ${auth_headers}
+    )
+    list(GET status 0 rc)
+    if(NOT rc EQUAL 0)
+        list(GET status 1 errmsg)
+        message(STATUS "UI: download from ${version} failed: ${errmsg}")
+        return()
+    endif()
+
+    # Release archives nest assets in a llama-<version>/ directory
+    set(extract_dir "${UI_BINARY_DIR}/ui-extract")
+    file(REMOVE_RECURSE "${extract_dir}")
+    file(ARCHIVE_EXTRACT INPUT "${archive}" DESTINATION "${extract_dir}")
+
+    set(asset_dir "${extract_dir}")
+    file(GLOB nested "${extract_dir}/*/index.html")
+    get_filename_component(asset_dir "${nested}" DIRECTORY)
+
+    if(NOT EXISTS "${asset_dir}/index.html")
+        message(STATUS "UI: archive from ${version} is missing required assets")
         return()
     endif()
 
     # Clear DIST_DIR to remove stale files first
     file(REMOVE_RECURSE "${DIST_DIR}")
+    file(RENAME "${asset_dir}" "${DIST_DIR}")
 
-    file(ARCHIVE_EXTRACT INPUT "${archive}" DESTINATION "${DIST_DIR}")
-
-    if(NOT EXISTS "${DIST_DIR}/index.html")
-        message(STATUS "UI: archive from ${version} is missing required assets")
-        return()
-    endif()
-
-    message(STATUS "UI: archive verified and extracted")
+    message(STATUS "UI: archive extracted")
     set(${out_var} TRUE PARENT_SCOPE)
 endfunction()
 
-function(hf_remote_sha version out_var)
-    set(${out_var} "" PARENT_SCOPE)
-
-    set(base "https://huggingface.co/buckets/${HF_BUCKET}/resolve/${version}")
-    set(tmp  "${UI_BINARY_DIR}/dist.tar.gz.sha256.remote")
-
-    file(DOWNLOAD "${base}/dist.tar.gz.sha256?download=true" "${tmp}"
-        STATUS status TIMEOUT 30
-    )
-    list(GET status 0 rc)
-    if(NOT rc EQUAL 0)
-        return()
-    endif()
-
-    file(READ "${tmp}" sha)
-    string(REGEX MATCH "^[0-9a-fA-F]+" sha "${sha}")
-    string(TOLOWER "${sha}" sha)
-    string(LENGTH "${sha}" len)
-    if(NOT len EQUAL 64)
-        return()
-    endif()
-    set(${out_var} "${sha}" PARENT_SCOPE)
-endfunction()
-
-function(hf_provision version out_var)
+function(gh_provision version out_var)
     set(${out_var} FALSE PARENT_SCOPE)
 
-    set(local_sha "")
+    set(stamp "")
     if(EXISTS "${STAMP_FILE}")
-        file(READ "${STAMP_FILE}" local_sha)
-        string(STRIP "${local_sha}" local_sha)
+        file(READ "${STAMP_FILE}" stamp)
+        string(STRIP "${stamp}" stamp)
     endif()
 
-    if(EXISTS "${DIST_DIR}/index.html" AND NOT "${local_sha}" STREQUAL "")
-        hf_remote_sha("${version}" remote_sha)
-        if(NOT "${remote_sha}" STREQUAL "" AND "${local_sha}" STREQUAL "${remote_sha}")
-            message(STATUS "UI: HF '${version}' unchanged, skipping HF fetch")
-            set(${out_var} TRUE PARENT_SCOPE)
-            return()
-        endif()
+    # release assets are immutable per tag, so a matching stamp means up-to-date
+    if(EXISTS "${DIST_DIR}/index.html" AND "${stamp}" STREQUAL "${version}")
+        message(STATUS "UI: release '${version}' already provisioned, skipping download")
+        set(${out_var} TRUE PARENT_SCOPE)
+        return()
     endif()
 
-    hf_download("${version}" HF_OK)
-    if(HF_OK)
-        file(SHA256 "${UI_BINARY_DIR}/dist.tar.gz" sha)
-        string(TOLOWER "${sha}" sha)
-        file(WRITE "${STAMP_FILE}" "${sha}")
-        message(STATUS "UI: HF download succeeded, stamp updated (${sha})")
+    gh_download("${version}" GH_OK)
+    if(GH_OK)
+        file(WRITE "${STAMP_FILE}" "${version}")
+        message(STATUS "UI: release download succeeded, stamp updated (${version})")
         set(${out_var} TRUE PARENT_SCOPE)
     else()
-        message(STATUS "UI: HF download from '${version}' failed")
+        message(STATUS "UI: release download from '${version}' failed")
     endif()
 endfunction()
 
@@ -348,20 +350,20 @@ endif()
 # Resolve version from git build-info if not explicitly set
 set(provisioned FALSE)
 resolve_version(VERSION)
-set(HF_VERSION "${VERSION}")
+set(UI_VERSION "${VERSION}")
 
 # ---------------------------------------------------------------------------
-# 2. Priority 2: HF Bucket download of the resolved version (if HF_ENABLED=ON)
+# 2. Priority 2: GitHub release download of the resolved version (if GH_ENABLED=ON)
 # ---------------------------------------------------------------------------
-if(HF_ENABLED AND NOT "${VERSION}" STREQUAL "")
-    hf_provision("${VERSION}" HF_OK)
-    if(HF_OK)
+if(GH_ENABLED AND NOT "${VERSION}" STREQUAL "")
+    gh_provision("${VERSION}" GH_OK)
+    if(GH_OK)
         set(provisioned TRUE)
     endif()
 endif()
 
 # ---------------------------------------------------------------------------
-# 3. Priority 3: npm build (BUILD_UI=ON) or HF "latest" (BUILD_UI=OFF)
+# 3. Priority 3: npm build (BUILD_UI=ON) or latest release (BUILD_UI=OFF)
 # ---------------------------------------------------------------------------
 if(NOT provisioned)
     if(BUILD_UI)
@@ -369,10 +371,13 @@ if(NOT provisioned)
         if(NPM_OK)
             set(provisioned TRUE)
         endif()
-    elseif(HF_ENABLED)
-        hf_provision("latest" HF_OK)
-        if(HF_OK)
-            set(provisioned TRUE)
+    elseif(GH_ENABLED)
+        gh_resolve_latest(LATEST)
+        if(NOT "${LATEST}" STREQUAL "")
+            gh_provision("${LATEST}" GH_OK)
+            if(GH_OK)
+                set(provisioned TRUE)
+            endif()
         endif()
     endif()
 endif()
