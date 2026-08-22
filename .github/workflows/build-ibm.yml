@@ -77,7 +77,8 @@ jobs:
         run: |
           cmake -B build \
             -DLLAMA_FATAL_WARNINGS=ON \
-            -DGGML_RPC=ON
+            -DGGML_RPC=ON \
+            -DLLAMA_BUILD_UI=OFF
           time cmake --build build --config Release -j $(nproc)
 
       - name: Test
@@ -129,7 +130,8 @@ jobs:
         run: |
           cmake -B build \
             -DLLAMA_FATAL_WARNINGS=ON \
-            -DGGML_RPC=ON
+            -DGGML_RPC=ON \
+            -DLLAMA_BUILD_UI=OFF
           time cmake --build build --config Release -j $(nproc)
 
       - name: Test

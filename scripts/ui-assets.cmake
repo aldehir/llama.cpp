@@ -1,22 +1,26 @@
 # Provision UI assets and generate ui.cpp/ui.h.
 #
+# If INCLUDE_UI=OFF, no provisioning happens (no network access) and an empty
+# asset table is emitted.
+#
 # Asset provisioning priority:
 #   1. Pre-built assets in SRC_DIST_DIR (manually built by user)
 #   2. If GH_ENABLED=ON: GitHub release download of the resolved version
 #      (llama-<version>-ui.tar.gz)
 #   3. If the above did not produce assets:
-#        - BUILD_UI=ON:  npm build (npm ci runs as needed in the staged copy)
-#        - BUILD_UI=OFF: GitHub release download of the latest release
+#        - USE_NPM=ON:  npm build (npm ci runs as needed in the staged copy)
+#        - USE_NPM=OFF: GitHub release download of the latest release
 
 cmake_minimum_required(VERSION 3.19)
 
+set(INCLUDE_UI        "" CACHE STRING "Whether to include the UI at all (ON/OFF)")
 set(UI_SOURCE_DIR     "" CACHE STRING "UI source directory (to run npm build)")
 set(UI_BINARY_DIR     "" CACHE STRING "UI binary directory (to store generated files)")
 set(LLAMA_SOURCE_DIR  "" CACHE STRING "Project source root (to resolve version from git)")
 set(GH_REPO           "" CACHE STRING "GitHub repository (owner/repo) with UI release assets")
 set(UI_VERSION        "" CACHE STRING "Release tag to download (empty = resolve from git)")
 set(GH_ENABLED        "" CACHE STRING "Whether to allow GitHub release download (ON/OFF)")
-set(BUILD_UI          "" CACHE STRING "Build UI via npm (ON/OFF)")
+set(USE_NPM           "" CACHE STRING "Build UI via npm (ON/OFF)")
 set(LLAMA_UI_EMBED    "" CACHE STRING "Path to llama-ui-embed helper")
 set(LLAMA_UI_GZIP     "" CACHE STRING "Apply gzip compress to assets to save bandwidth")
 
@@ -338,6 +342,12 @@ function(emit_files dist_dir)
     endif()
 endfunction()
 
+if(NOT INCLUDE_UI)
+    message(STATUS "UI: excluded (LLAMA_BUILD_UI=OFF), embedding no assets")
+    emit_files("${UI_BINARY_DIR}/no-assets")
+    return()
+endif()
+
 # ---------------------------------------------------------------------------
 # 1. Priority 1: pre-built assets supplied in tools/ui/dist
 # ---------------------------------------------------------------------------
@@ -363,10 +373,10 @@ if(GH_ENABLED AND NOT "${VERSION}" STREQUAL "")
 endif()
 
 # ---------------------------------------------------------------------------
-# 3. Priority 3: npm build (BUILD_UI=ON) or latest release (BUILD_UI=OFF)
+# 3. Priority 3: npm build (USE_NPM=ON) or latest release (USE_NPM=OFF)
 # ---------------------------------------------------------------------------
 if(NOT provisioned)
-    if(BUILD_UI)
+    if(USE_NPM)
         npm_build(NPM_OK)
         if(NPM_OK)
             set(provisioned TRUE)

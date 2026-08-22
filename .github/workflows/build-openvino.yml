@@ -73,7 +73,8 @@ jobs:
           source ./openvino_toolkit/setupvars.sh
           cmake -B build/ReleaseOV -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
-            -DGGML_OPENVINO=ON
+            -DGGML_OPENVINO=ON \
+            -DLLAMA_BUILD_UI=OFF
           time cmake --build build/ReleaseOV --config Release --parallel
 
       - name: Test (CPU)
@@ -152,6 +153,7 @@ jobs:
             -A x64 ^
             -DCMAKE_BUILD_TYPE=Release ^
             -DGGML_OPENVINO=ON ^
+            -DLLAMA_BUILD_UI=OFF ^
             -DCMAKE_TOOLCHAIN_FILE=C:\vcpkg\scripts\buildsystems\vcpkg.cmake
 
           cmake --build build\ReleaseOV --config Release -- /m

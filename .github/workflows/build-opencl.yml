@@ -78,5 +78,5 @@ jobs:
       - name: Build
         id: cmake_build
         run: |
-          cmake -S . -B build -G "Ninja Multi-Config" -D CMAKE_TOOLCHAIN_FILE=cmake/arm64-windows-llvm.cmake -DCMAKE_PREFIX_PATH="$env:RUNNER_TEMP/opencl-arm64-release" -DGGML_OPENCL=ON -DGGML_OPENCL_USE_ADRENO_KERNELS=ON -DLLAMA_BUILD_BORINGSSL=ON
+          cmake -S . -B build -G "Ninja Multi-Config" -D CMAKE_TOOLCHAIN_FILE=cmake/arm64-windows-llvm.cmake -DCMAKE_PREFIX_PATH="$env:RUNNER_TEMP/opencl-arm64-release" -DGGML_OPENCL=ON -DGGML_OPENCL_USE_ADRENO_KERNELS=ON -DLLAMA_BUILD_BORINGSSL=ON -DLLAMA_BUILD_UI=OFF
           cmake --build build --config Release -j ${env:NUMBER_OF_PROCESSORS}

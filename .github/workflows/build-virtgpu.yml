@@ -46,5 +46,6 @@ jobs:
         run: |
           cmake -B build \
             -DGGML_VIRTGPU=ON \
-            -DGGML_VIRTGPU_BACKEND=ON
+            -DGGML_VIRTGPU_BACKEND=ON \
+            -DLLAMA_BUILD_UI=OFF
           cmake --build build --config Release -j $(nproc)

@@ -4,13 +4,9 @@ set(LLAMA_UI_GH_REPO "ggml-org/llama.cpp" CACHE STRING "GitHub repository (owner
 set(LLAMA_UI_GZIP    ON                   CACHE BOOL   "Apply gzip compress to assets to save bandwidth")
 
 # Backward compat: forward old var to new one
-if(DEFINED LLAMA_BUILD_WEBUI)
-    set(LLAMA_BUILD_UI ${LLAMA_BUILD_WEBUI})
-    message(DEPRECATION "LLAMA_BUILD_WEBUI is deprecated, use LLAMA_BUILD_UI instead")
-endif()
-if(DEFINED LLAMA_USE_PREBUILT_WEBUI)
-    set(LLAMA_USE_PREBUILT_UI ${LLAMA_USE_PREBUILT_WEBUI})
-    message(DEPRECATION "LLAMA_USE_PREBUILT_WEBUI is deprecated, use LLAMA_USE_PREBUILT_UI instead")
+if(DEFINED LLAMA_USE_PREBUILT_UI)
+    set(LLAMA_UI_USE_PREBUILT ${LLAMA_USE_PREBUILT_UI})
+    message(DEPRECATION "LLAMA_USE_PREBUILT_UI is deprecated, use LLAMA_UI_USE_PREBUILT instead")
 endif()
 
 # Resolve UI asset version: explicit env var > derived from build number > unset
@@ -93,10 +89,11 @@ add_custom_target(llama-ui-assets ALL
         "-DUI_BINARY_DIR=${CMAKE_CURRENT_BINARY_DIR}"
         "-DLLAMA_SOURCE_DIR=${PROJECT_SOURCE_DIR}"
         "-DLLAMA_BUILD_NUMBER=${LLAMA_BUILD_NUMBER}"
+        "-DINCLUDE_UI=${LLAMA_BUILD_UI}"
         "-DGH_REPO=${LLAMA_UI_GH_REPO}"
         "-DUI_VERSION=${UI_VERSION}"
-        "-DGH_ENABLED=${LLAMA_USE_PREBUILT_UI}"
-        "-DBUILD_UI=${LLAMA_BUILD_UI}"
+        "-DGH_ENABLED=${LLAMA_UI_USE_PREBUILT}"
+        "-DUSE_NPM=${LLAMA_UI_USE_NPM}"
         "-DLLAMA_UI_EMBED=${LLAMA_UI_EMBED_EXE}"
         "-DLLAMA_UI_GZIP=${LLAMA_UI_GZIP}"
         -P "${PROJECT_SOURCE_DIR}/scripts/ui-assets.cmake"

@@ -46,7 +46,8 @@ jobs:
         run: |
           cmake -B build \
             -DLLAMA_FATAL_WARNINGS=ON \
-            -DLLAMA_LLGUIDANCE=ON
+            -DLLAMA_LLGUIDANCE=ON \
+            -DLLAMA_BUILD_UI=OFF
           cmake --build build --config Release -j $(nproc)
 
       - name: Test
