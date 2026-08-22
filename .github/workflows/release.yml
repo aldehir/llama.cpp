@@ -61,31 +61,8 @@ jobs:
             echo "should_release=false" >> $GITHUB_OUTPUT
           fi
 
-  get-version:
-    runs-on: ubuntu-slim
-    outputs:
-      ui_version: ${{ steps.version.outputs.ui_version }}
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          fetch-depth: 0
-      - id: version
-        run: |
-          # Resolve UI version: BUILD_NUMBER from cmake/build-info.cmake > git hash + epoch > fallback
-          version=""
-          if grep -q "BUILD_NUMBER" cmake/build-info.cmake; then
-            build_number=$(grep "set(BUILD_NUMBER" cmake/build-info.cmake | grep -oP '\d+')
-            if [ -n "$build_number" ] && [ "$build_number" -gt 0 ]; then
-              version="b${build_number}"
-            fi
-          fi
-          if [ -z "$version" ]; then
-            version=$(git rev-parse --short HEAD)-$(date +%s)
-          fi
-          echo "ui_version=${version}" >> $GITHUB_OUTPUT
-
   macos-cpu:
-    needs: [check-release, get-version]
+    needs: [check-release, ui-build]
     if: ${{ needs.check-release.outputs.should_release == 'true' }}
     strategy:
       matrix:
@@ -119,12 +96,11 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v6
+      - name: Download UI
+        uses: actions/download-artifact@v7
         with:
-          node-version: "24"
-          cache: "npm"
-          cache-dependency-path: "tools/ui/package-lock.json"
+          name: ui-build
+          path: tools/ui/dist
 
       - name: ccache
         uses: ggml-org/ccache-action@v1.2.21
@@ -141,7 +117,6 @@ jobs:
             -DCMAKE_BUILD_WITH_INSTALL_RPATH=ON \
             -DLLAMA_FATAL_WARNINGS=ON \
             -DLLAMA_BUILD_BORINGSSL=ON \
-            -DHF_UI_VERSION=${{ needs.get-version.outputs.ui_version }} \
             ${{ env.CMAKE_ARGS }}
           cmake --build build --config Release -j $(sysctl -n hw.logicalcpu)
 
@@ -167,7 +142,7 @@ jobs:
           key: release-${{ matrix.os }}-${{ matrix.arch }}
 
   ubuntu-cpu:
-    needs: [check-release, get-version]
+    needs: [check-release, ui-build]
     if: ${{ needs.check-release.outputs.should_release == 'true' }}
     strategy:
       matrix:
@@ -176,8 +151,9 @@ jobs:
             os: ubuntu-22.04
           - build: 'arm64'
             os: ubuntu-24.04-arm
-          - build: 's390x'
-            os: ubuntu-24.04-s390x
+          # note: disabled for fork testing, the s390x runner is not available here
+          #- build: 's390x'
+          #  os: ubuntu-24.04-s390x
 
     runs-on: ${{ matrix.os }}
 
@@ -191,12 +167,11 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v6
+      - name: Download UI
+        uses: actions/download-artifact@v7
         with:
-          node-version: "24"
-          cache: "npm"
-          cache-dependency-path: "tools/ui/package-lock.json"
+          name: ui-build
+          path: tools/ui/dist
 
       - name: Dependencies
         id: depends
@@ -227,7 +202,6 @@ jobs:
             -DGGML_NATIVE=OFF \
             -DGGML_CPU_ALL_VARIANTS=ON \
             -DLLAMA_FATAL_WARNINGS=ON \
-            -DHF_UI_VERSION=${{ needs.get-version.outputs.ui_version }} \
             ${{ env.CMAKE_ARGS }}
           cmake --build build --config Release -j $(nproc)
 
@@ -254,7 +228,7 @@ jobs:
           key: release-${{ matrix.os }}-cpu
 
   ubuntu-vulkan:
-    needs: [check-release, get-version]
+    needs: [check-release, ui-build]
     if: ${{ needs.check-release.outputs.should_release == 'true' }}
 
     strategy:
@@ -277,12 +251,11 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v6
+      - name: Download UI
+        uses: actions/download-artifact@v7
         with:
-          node-version: "24"
-          cache: "npm"
-          cache-dependency-path: "tools/ui/package-lock.json"
+          name: ui-build
+          path: tools/ui/dist
 
       - name: Dependencies
         id: depends
@@ -314,7 +287,6 @@ jobs:
             -DGGML_NATIVE=OFF \
             -DGGML_CPU_ALL_VARIANTS=ON \
             -DGGML_VULKAN=ON \
-            -DHF_UI_VERSION=${{ needs.get-version.outputs.ui_version }} \
             ${{ env.CMAKE_ARGS }}
           cmake --build build --config Release -j $(nproc)
 
@@ -340,7 +312,7 @@ jobs:
           key: release-${{ matrix.os }}-vulkan
 
   android-arm64:
-    needs: [check-release, get-version]
+    needs: [check-release, ui-build]
     if: ${{ needs.check-release.outputs.should_release == 'true' }}
 
     runs-on: ubuntu-latest
@@ -358,12 +330,11 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v6
+      - name: Download UI
+        uses: actions/download-artifact@v7
         with:
-          node-version: "24"
-          cache: "npm"
-          cache-dependency-path: "tools/ui/package-lock.json"
+          name: ui-build
+          path: tools/ui/dist
 
       - name: Set up JDK
         uses: actions/setup-java@v5
@@ -407,7 +378,6 @@ jobs:
             -DLLAMA_FATAL_WARNINGS=ON \
             -DGGML_OPENMP=OFF \
             -DLLAMA_BUILD_BORINGSSL=ON \
-            -DHF_UI_VERSION=${{ needs.get-version.outputs.ui_version }} \
             ${{ env.CMAKE_ARGS }}
           cmake --build build --config Release -j $(nproc)
 
@@ -433,7 +403,7 @@ jobs:
           name: llama-bin-android-arm64.tar.gz
 
   ubuntu-24-openvino:
-    needs: [check-release, get-version]
+    needs: [check-release, ui-build]
     if: ${{ needs.check-release.outputs.should_release == 'true' }}
 
     runs-on: ubuntu-24.04
@@ -460,12 +430,11 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v6
+      - name: Download UI
+        uses: actions/download-artifact@v7
         with:
-          node-version: "24"
-          cache: "npm"
-          cache-dependency-path: "tools/ui/package-lock.json"
+          name: ui-build
+          path: tools/ui/dist
 
       - name: ccache
         uses: ggml-org/ccache-action@v1.2.21
@@ -508,7 +477,6 @@ jobs:
             -DGGML_OPENVINO=ON \
             -DCMAKE_INSTALL_RPATH='$ORIGIN' \
             -DCMAKE_BUILD_WITH_INSTALL_RPATH=ON \
-            -DHF_UI_VERSION=${{ needs.get-version.outputs.ui_version }} \
             ${{ env.CMAKE_ARGS }}
           cmake --build build/ReleaseOV --config Release --parallel
 
@@ -552,7 +520,7 @@ jobs:
           key: release-ubuntu-24.04-openvino-release-no-preset-v1
 
   windows-openvino:
-    needs: [check-release]
+    needs: [check-release, ui-build]
     if: ${{ needs.check-release.outputs.should_release == 'true' }}
 
     runs-on: windows-2022
@@ -577,12 +545,11 @@ jobs:
         with:
             fetch-depth: 0
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v6
+      - name: Download UI
+        uses: actions/download-artifact@v7
         with:
-          node-version: "24"
-          cache: "npm"
-          cache-dependency-path: "tools/ui/package-lock.json"
+          name: ui-build
+          path: tools/ui/dist
 
       - name: ccache
         uses: ggml-org/ccache-action@v1.2.21
@@ -682,7 +649,7 @@ jobs:
 
   windows-cpu:
     name: windows-cpu / ${{ matrix.arch }}
-    needs: [check-release]
+    needs: [check-release, ui-build]
     if: ${{ needs.check-release.outputs.should_release == 'true' }}
 
     runs-on: windows-2025-vs2026
@@ -702,12 +669,11 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v6
+      - name: Download UI
+        uses: actions/download-artifact@v7
         with:
-          node-version: "24"
-          cache: "npm"
-          cache-dependency-path: "tools/ui/package-lock.json"
+          name: ui-build
+          path: tools/ui/dist
 
       - name: Install Ninja
         run: |
@@ -750,7 +716,7 @@ jobs:
           key: release-windows-2025-vs2026-${{ matrix.arch }}-cpu
 
   windows-rocm:
-    needs: [check-release]
+    needs: [check-release, ui-build]
     if: ${{ needs.check-release.outputs.should_release == 'true' }}
 
     runs-on: windows-2022
@@ -768,6 +734,12 @@ jobs:
         uses: actions/checkout@v6
         with:
           fetch-depth: 0
+
+      - name: Download UI
+        uses: actions/download-artifact@v7
+        with:
+          name: ui-build
+          path: tools/ui/dist
 
       - name: ccache
         uses: ggml-org/ccache-action@v1.2.21
@@ -908,13 +880,6 @@ jobs:
         id: checkout
         uses: actions/checkout@v6
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v6
-        with:
-          node-version: "24"
-          cache: "npm"
-          cache-dependency-path: "tools/ui/package-lock.json"
-
       - name: Install Vulkan SDK
         id: get_vulkan
         if: ${{ matrix.backend == 'vulkan' }}
@@ -1004,13 +969,6 @@ jobs:
       - name: Clone
         id: checkout
         uses: actions/checkout@v6
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v6
-        with:
-          node-version: "24"
-          cache: "npm"
-          cache-dependency-path: "tools/ui/package-lock.json"
 
       - name: Install Cuda Toolkit
         uses: ./.github/actions/windows-setup-cuda
@@ -1117,13 +1075,6 @@ jobs:
           Expand-Archive -Path "level-zero-win-sdk.zip" -DestinationPath "C:/level-zero-sdk" -Force
           "LEVEL_ZERO_V1_SDK_PATH=C:/level-zero-sdk" | Out-File -FilePath $env:GITHUB_ENV -Append
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v6
-        with:
-          node-version: "24"
-          cache: "npm"
-          cache-dependency-path: "tools/ui/package-lock.json"
-
       - name: ccache
         uses: ggml-org/ccache-action@v1.2.21
         with:
@@ -1194,7 +1145,7 @@ jobs:
           key: release-windows-2022-x64-sycl
 
   ubuntu-24-sycl:
-    needs: [check-release]
+    needs: [check-release, ui-build]
     if: ${{ needs.check-release.outputs.should_release == 'true' }}
 
     strategy:
@@ -1221,6 +1172,12 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Download UI
+        uses: actions/download-artifact@v7
+        with:
+          name: ui-build
+          path: tools/ui/dist
+
       - name: Download & Install oneAPI
         shell: bash
         run: |
@@ -1235,13 +1192,6 @@ jobs:
           wget -q "https://github.com/oneapi-src/level-zero/releases/download/v${LEVEL_ZERO_VERSION}/level-zero_${LEVEL_ZERO_VERSION}%2B${LEVEL_ZERO_UBUNTU_VERSION}_amd64.deb" -O level-zero.deb
           wget -q "https://github.com/oneapi-src/level-zero/releases/download/v${LEVEL_ZERO_VERSION}/level-zero-devel_${LEVEL_ZERO_VERSION}%2B${LEVEL_ZERO_UBUNTU_VERSION}_amd64.deb" -O level-zero-devel.deb
           sudo apt-get install -y ./level-zero.deb ./level-zero-devel.deb
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v6
-        with:
-          node-version: "24"
-          cache: "npm"
-          cache-dependency-path: "tools/ui/package-lock.json"
 
       - name: ccache
         uses: ggml-org/ccache-action@v1.2.21
@@ -1405,7 +1355,7 @@ jobs:
 #       #     key: release-ubuntu-22.04-rocm-${{ matrix.ROCM_VERSION }}
 
   ios-xcode:
-    needs: [check-release, get-version]
+    needs: [check-release]
     if: ${{ needs.check-release.outputs.should_release == 'true' }}
     runs-on: macos-26
 
@@ -1433,8 +1383,7 @@ jobs:
             -DLLAMA_BUILD_SERVER=OFF \
             -DCMAKE_SYSTEM_NAME=iOS \
             -DCMAKE_OSX_DEPLOYMENT_TARGET=16.0 \
-            -DCMAKE_XCODE_ATTRIBUTE_DEVELOPMENT_TEAM=ggml \
-            -DHF_UI_VERSION=${{ needs.get-version.outputs.ui_version }}
+            -DCMAKE_XCODE_ATTRIBUTE_DEVELOPMENT_TEAM=ggml
           cmake --build build --config Release -j $(sysctl -n hw.logicalcpu) -- CODE_SIGNING_ALLOWED=NO
 
       - name: xcodebuild for swift package
@@ -1557,11 +1506,9 @@ jobs:
 #          name: llama-bin-${{ matrix.chip_type }}-openEuler-${{ matrix.arch }}${{ matrix.use_acl_graph == 'on' && '-aclgraph' || '' }}.tar.gz
 
   ui-build:
-    needs: [check-release, get-version]
+    needs: [check-release]
     if: ${{ needs.check-release.outputs.should_release == 'true' }}
     uses: ./.github/workflows/ui-build.yml
-    with:
-      hf_ui_version: ${{ needs.get-version.outputs.ui_version }}
 
   release:
     if: ${{ ( github.event_name == 'push' && github.ref == 'refs/heads/master' ) || github.event.inputs.create_release == 'true' }}
@@ -1576,7 +1523,6 @@ jobs:
     runs-on: ubuntu-slim
 
     needs:
-      - get-version
       - windows
       - windows-cpu
       - windows-cuda
@@ -1593,9 +1539,6 @@ jobs:
       - ios-xcode
       #- openEuler-cann
       - ui-build
-
-    outputs:
-      tag_name: ${{ steps.tag.outputs.name }}
 
     steps:
       - name: Clone
@@ -1765,15 +1708,3 @@ jobs:
                 });
               }
             }
-
-  ui-publish:
-    if: ${{ ( github.event_name == 'push' && github.ref == 'refs/heads/master' ) || github.event.inputs.create_release == 'true' }}
-
-    needs:
-      - release
-
-    uses: ./.github/workflows/ui-publish.yml
-    with:
-      version_tag: ${{ needs.release.outputs.tag_name }}
-    secrets:
-      hf_token: ${{ secrets.HF_TOKEN_UI_STATIC_OUTPUT }}

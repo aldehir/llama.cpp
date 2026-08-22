@@ -72,7 +72,8 @@ jobs:
             -DCMAKE_BUILD_TYPE=Debug \
             -DLLAMA_FATAL_WARNINGS=ON \
             -DLLAMA_SANITIZE_${{ matrix.sanitizer }}=ON \
-            -DGGML_SANITIZE_${{ matrix.sanitizer }}=ON
+            -DGGML_SANITIZE_${{ matrix.sanitizer }}=ON \
+            -DLLAMA_BUILD_UI=OFF
 
           cmake --build build --config Debug -j $(nproc)
 
@@ -83,7 +84,8 @@ jobs:
           cmake -B build \
             -DCMAKE_BUILD_TYPE=RelWithDebInfo \
             -DLLAMA_SANITIZE_${{ matrix.sanitizer }}=ON \
-            -DGGML_SANITIZE_${{ matrix.sanitizer }}=ON
+            -DGGML_SANITIZE_${{ matrix.sanitizer }}=ON \
+            -DLLAMA_BUILD_UI=OFF
 
           cmake --build build --config RelWithDebInfo -j $(nproc)
 
@@ -95,7 +97,8 @@ jobs:
             -DCMAKE_BUILD_TYPE=RelWithDebInfo \
             -DLLAMA_SANITIZE_${{ matrix.sanitizer }}=ON \
             -DGGML_SANITIZE_${{ matrix.sanitizer }}=ON \
-            -DGGML_OPENMP=OFF
+            -DGGML_OPENMP=OFF \
+            -DLLAMA_BUILD_UI=OFF
 
           cmake --build build --config RelWithDebInfo -j $(nproc)
 

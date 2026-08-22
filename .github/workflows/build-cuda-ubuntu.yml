@@ -69,7 +69,8 @@ jobs:
             -DCMAKE_EXE_LINKER_FLAGS=-Wl,--allow-shlib-undefined \
             -DGGML_NATIVE=OFF \
             -DGGML_CUDA=ON \
-            -DGGML_CUDA_CUB_3DOT2=ON
+            -DGGML_CUDA_CUB_3DOT2=ON \
+            -DLLAMA_BUILD_UI=OFF
           cmake --build build
 
   hip:
@@ -100,7 +101,8 @@ jobs:
           cmake -B build -S . \
             -DCMAKE_HIP_COMPILER="$(hipconfig -l)/clang" \
             -DGPU_TARGETS="gfx1030" \
-            -DGGML_HIP=ON
+            -DGGML_HIP=ON \
+            -DLLAMA_BUILD_UI=OFF
           cmake --build build --config Release -j $(nproc)
 
   musa:
@@ -129,5 +131,6 @@ jobs:
         id: cmake_build
         run: |
           cmake -B build -S . \
-            -DGGML_MUSA=ON
+            -DGGML_MUSA=ON \
+            -DLLAMA_BUILD_UI=OFF
           time cmake --build build --config Release -j $(nproc)

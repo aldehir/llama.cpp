@@ -86,11 +86,20 @@ jobs:
           evict-old-files: 1d
           save: ${{ github.event_name == 'push' && github.ref == 'refs/heads/master' }}
 
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          cache: "npm"
+          cache-dependency-path: "tools/ui/package-lock.json"
+
       - name: Build
         id: cmake_build
         run: |
           cmake -B build \
-            -DGGML_SCHED_NO_REALLOC=ON
+            -DGGML_SCHED_NO_REALLOC=ON \
+            -DLLAMA_UI_USE_PREBUILT=OFF \
+            -DLLAMA_UI_USE_NPM=ON
           cmake --build build --config Release -j $(nproc) --target llama-server
 
       - name: Python setup
@@ -146,6 +155,13 @@ jobs:
           evict-old-files: 1d
           save: ${{ github.event_name == 'push' && github.ref == 'refs/heads/master' }}
 
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          cache: "npm"
+          cache-dependency-path: "tools/ui/package-lock.json"
+
       - name: Build
         id: cmake_build
         shell: cmd
@@ -154,7 +170,9 @@ jobs:
             -DCMAKE_TOOLCHAIN_FILE=cmake/x64-windows-llvm.cmake ^
             -DCMAKE_BUILD_TYPE=Release ^
             -DLLAMA_BUILD_BORINGSSL=ON ^
-            -DGGML_SCHED_NO_REALLOC=ON
+            -DGGML_SCHED_NO_REALLOC=ON ^
+            -DLLAMA_UI_USE_PREBUILT=OFF ^
+            -DLLAMA_UI_USE_NPM=ON
           set /A NINJA_JOBS=%NUMBER_OF_PROCESSORS%-1
           cmake --build build --config Release -j %NINJA_JOBS% --target llama-server
 

@@ -145,5 +145,6 @@ jobs:
             -DGGML_CPU_ALL_VARIANTS=ON \
             -DGGML_OPENMP=OFF \
             -DLLAMA_BUILD_BORINGSSL=ON \
+            -DLLAMA_BUILD_UI=OFF \
             -DGGML_RPC=ON
           time cmake --build build --config Release -j $(nproc)

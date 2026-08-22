@@ -55,7 +55,7 @@ jobs:
       - name: Build using CMake
         shell: msys2 {0}
         run: |
-            cmake -B build
+            cmake -B build -DLLAMA_BUILD_UI=OFF
             cmake --build build --config ${{ matrix.build }} -j $(nproc)
 
       - name: Clean after building using CMake
@@ -66,5 +66,5 @@ jobs:
       - name: Build using CMake w/ OpenBLAS
         shell: msys2 {0}
         run: |
-            cmake -B build -DGGML_BLAS=ON -DGGML_BLAS_VENDOR=OpenBLAS
+            cmake -B build -DGGML_BLAS=ON -DGGML_BLAS_VENDOR=OpenBLAS -DLLAMA_BUILD_UI=OFF
             cmake --build build --config ${{ matrix.build }} -j $(nproc)

@@ -67,7 +67,8 @@ jobs:
             -DGGML_HIP=ON \
             -DGGML_HIP_EXPORT_METRICS=Off \
             -DCMAKE_HIP_FLAGS="-Werror -Wno-tautological-compare" \
-            -DCMAKE_BUILD_TYPE=Release
+            -DCMAKE_BUILD_TYPE=Release \
+            -DLLAMA_BUILD_UI=OFF
           cd build
           make -j $(nproc)
 
@@ -80,7 +81,8 @@ jobs:
             -DGGML_HIP=ON \
             -DGGML_HIP_EXPORT_METRICS=On \
             -DCMAKE_HIP_FLAGS="" \
-            -DCMAKE_BUILD_TYPE=Release
+            -DCMAKE_BUILD_TYPE=Release \
+            -DLLAMA_BUILD_UI=OFF
           cd build
           make -j $(nproc) 2>&1 | tee metrics.log | grep -v 'Rpass-analysis=kernel-resource-usage\|remark:\|^$'
           python3 ../scripts/hip/gcn-cdna-vgpr-check.py metrics.log

@@ -97,7 +97,8 @@ jobs:
           cmake -B build \
             -DGGML_NATIVE=OFF \
             -DLLAMA_FATAL_WARNINGS=ON \
-            -DGGML_RPC=ON
+            -DGGML_RPC=ON \
+            -DLLAMA_BUILD_UI=OFF
           time cmake --build build --config Release -j $(nproc)
 
       - name: Test
@@ -173,7 +174,8 @@ jobs:
         id: cmake_build
         run: |
           cmake -S . -B build ${{ matrix.defines }} `
-            -DLLAMA_BUILD_BORINGSSL=ON
+            -DLLAMA_BUILD_BORINGSSL=ON `
+            -DLLAMA_BUILD_UI=OFF
           cmake --build build --config Release -j ${env:NUMBER_OF_PROCESSORS}
 
       - name: Add libopenblas.dll

@@ -52,10 +52,17 @@ jobs:
           fetch-depth: 0
           ref: ${{ github.event.inputs.sha || github.event.pull_request.head.sha || github.sha || github.head_ref || github.ref_name }}
 
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          cache: "npm"
+          cache-dependency-path: "tools/ui/package-lock.json"
+
       - name: Build
         id: cmake_build
         run: |
-          cmake -B build -DGGML_SCHED_NO_REALLOC=ON
+          cmake -B build -DGGML_SCHED_NO_REALLOC=ON -DLLAMA_UI_USE_PREBUILT=OFF -DLLAMA_UI_USE_NPM=ON
           cmake --build build --config Release -j $(sysctl -n hw.logicalcpu) --target llama-server
 
       - name: Python setup
@@ -112,10 +119,17 @@ jobs:
           fetch-depth: 0
           ref: ${{ github.event.inputs.sha || github.event.pull_request.head.sha || github.sha || github.head_ref || github.ref_name }}
 
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          cache: "npm"
+          cache-dependency-path: "tools/ui/package-lock.json"
+
       - name: Build
         id: cmake_build
         run: |
-          cmake -B build -DGGML_CUDA=ON -DGGML_SCHED_NO_REALLOC=ON
+          cmake -B build -DGGML_CUDA=ON -DGGML_SCHED_NO_REALLOC=ON -DLLAMA_UI_USE_PREBUILT=OFF -DLLAMA_UI_USE_NPM=ON
           cmake --build build --config Release -j $(nproc) --target llama-server
 
       - name: Python setup
@@ -199,10 +213,17 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y cmake
 
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          cache: "npm"
+          cache-dependency-path: "tools/ui/package-lock.json"
+
       - name: Build
         id: cmake_build
         run: |
-          cmake -B build -DGGML_SCHED_NO_REALLOC=ON -DGGML_CPU_KLEIDIAI=ON
+          cmake -B build -DGGML_SCHED_NO_REALLOC=ON -DGGML_CPU_KLEIDIAI=ON -DLLAMA_UI_USE_PREBUILT=OFF -DLLAMA_UI_USE_NPM=ON
           cmake --build build --config Release -j $(nproc) --target llama-server
 
       - name: Python setup

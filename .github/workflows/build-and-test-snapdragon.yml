@@ -47,7 +47,7 @@ jobs:
         id: build_llama_cpp_snapdragon_android
         run: |
           cp docs/backend/snapdragon/CMakeUserPresets.json .
-          cmake --preset arm64-android-snapdragon-release -B build
+          cmake --preset arm64-android-snapdragon-release -B build -DLLAMA_BUILD_UI=OFF
           cmake --build build
           cmake --install build --prefix pkg-snapdragon/llama.cpp
 
@@ -77,7 +77,7 @@ jobs:
         id: build_llama_cpp_snapdragon_linux
         run: |
           cp docs/backend/snapdragon/CMakeUserPresets.json .
-          cmake --preset arm64-linux-snapdragon-release -B build-snapdragon -DGGML_OPENCL=ON
+          cmake --preset arm64-linux-snapdragon-release -B build-snapdragon -DGGML_OPENCL=ON -DLLAMA_BUILD_UI=OFF
           cmake --build build-snapdragon -j $(nproc)
           cmake --install build-snapdragon --prefix pkg-snapdragon/llama.cpp
 
