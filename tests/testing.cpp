@@ -14,6 +14,9 @@
 #include <thread>
 
 #ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <windows.h>
 #include <fcntl.h>
 #include <io.h>
 #else
@@ -30,6 +33,7 @@ int fd_close(int fd)                             { return _close(fd); }
 int fd_pipe(int fds[2])                          { return _pipe(fds, 1 << 16, _O_BINARY); }
 int fd_read(int fd, char * buf, size_t n)        { return _read(fd, buf, (unsigned) n); }
 int fd_write(int fd, const char * buf, size_t n) { return _write(fd, buf, (unsigned) n); }
+bool fd_is_tty(int fd)                           { return _isatty(fd) != 0; }
 #else
 int fd_dup(int fd)                               { return dup(fd); }
 int fd_dup2(int from, int to)                    { return dup2(from, to); }
@@ -37,7 +41,36 @@ int fd_close(int fd)                             { return close(fd); }
 int fd_pipe(int fds[2])                          { return pipe(fds); }
 int fd_read(int fd, char * buf, size_t n)        { return (int) read(fd, buf, n); }
 int fd_write(int fd, const char * buf, size_t n) { return (int) write(fd, buf, n); }
+bool fd_is_tty(int fd)                           { return isatty(fd) != 0; }
 #endif
+
+// ANSI colors are used only on a terminal; Windows consoles need virtual terminal processing switched on
+bool fd_wants_color(int fd) {
+    if (fd < 0 || !fd_is_tty(fd) || getenv("NO_COLOR")) {
+        return false;
+    }
+#ifdef _WIN32
+    HANDLE h = (HANDLE) _get_osfhandle(fd);
+    DWORD mode = 0;
+    if (!GetConsoleMode(h, &mode)) {
+        return false;
+    }
+    return SetConsoleMode(h, mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING) != 0;
+#else
+    return true;
+#endif
+}
+
+// a title centered in a line of fill characters, as in the pytest report
+std::string rule(const std::string & title, char fill) {
+    const size_t width = testing::status_column;
+    std::string  text  = " " + title + " ";
+    if (text.size() + 2 > width) {
+        return text;
+    }
+    size_t left = (width - text.size()) / 2;
+    return std::string(left, fill) + text + std::string(width - text.size() - left, fill);
+}
 
 void fd_write_all(int fd, const char * buf, size_t n) {
     while (n > 0) {
@@ -263,10 +296,41 @@ struct testing_state {
 
     std::unique_ptr<testing_capture> capture;
 
+    // dots style state
+    size_t marks_on_line = 0;
+    bool   color         = false;
+    bool   color_checked = false;
+
     explicit testing_state(std::ostream & os) : out(os) {}
 
     bool out_is_console() const {
         return &out == &std::cout || &out == &std::cerr;
+    }
+
+    int console_fd() const {
+        if (capture) {
+            return capture->console_buf.fd;
+        }
+        return &out == &std::cout ? 1 : &out == &std::cerr ? 2 : -1;
+    }
+
+    bool use_color() {
+        if (!color_checked) {
+            color_checked = true;
+            color = out_is_console() && fd_wants_color(console_fd());
+        }
+        return color;
+    }
+
+    std::string colored(const std::string & text, const char * code) {
+        return use_color() ? std::string("\x1b[") + code + "m" + text + "\x1b[0m" : text;
+    }
+
+    void end_marks(std::ostream & os) {
+        if (marks_on_line > 0) {
+            os << "\n";
+            marks_on_line = 0;
+        }
     }
 
     testing_capture * get_capture() {
@@ -283,6 +347,7 @@ testing::testing(testing & p, const std::string & n) :
     verbose(p.verbose),
     throw_exception(p.throw_exception),
     capture_output(p.capture_output),
+    style(p.style),
     name(n),
     parent(&p),
     state(p.state) {}
@@ -297,6 +362,13 @@ std::ostream & testing::stream() const {
     return state->out;
 }
 
+std::ostream & testing::report_stream() {
+    if (style == TESTING_STYLE_DOTS) {
+        return report;
+    }
+    return stream();
+}
+
 int testing::depth() const {
     int d = 0;
     for (const testing * p = parent; p; p = p->parent) {
@@ -307,7 +379,7 @@ int testing::depth() const {
 
 std::string testing::indent() const {
     int d = depth();
-    if (d <= 1) {
+    if (d <= 1 || style == TESTING_STYLE_DOTS) {
         return "";
     }
     return std::string((d - 1) * 2, ' ');
@@ -323,13 +395,20 @@ std::string testing::full_name() const {
 
 void testing::log(const std::string & msg) {
     if (verbose) {
-        stream() << indent() << "  " << msg << "\n";
+        report_stream() << indent() << "  " << msg << "\n";
     }
 }
 
 void testing::apply_env() {
     if (const char * v = getenv("LLAMA_TEST_VERBOSE")) {
         verbose = std::string(v) == "1";
+    }
+    if (const char * s = getenv("LLAMA_TEST_STYLE")) {
+        if (std::string(s) == "tree") {
+            style = TESTING_STYLE_TREE;
+        } else if (std::string(s) == "dots") {
+            style = TESTING_STYLE_DOTS;
+        }
     }
     if (const char * c = getenv("LLAMA_TEST_CAPTURE")) {
         capture_output = std::string(c) != "0";
@@ -360,14 +439,14 @@ void testing::run_guarded(const std::function<void()> & body, const char * ctx) 
     } catch (const std::exception & e) {
         ++failures;
         ++exceptions;
-        stream() << indent() << "UNHANDLED EXCEPTION (" << ctx << "): " << e.what() << "\n";
+        report_stream() << indent() << "UNHANDLED EXCEPTION (" << ctx << "): " << e.what() << "\n";
         if (throw_exception) {
             throw;
         }
     } catch (...) {
         ++failures;
         ++exceptions;
-        stream() << indent() << "UNHANDLED EXCEPTION (" << ctx << "): unknown\n";
+        report_stream() << indent() << "UNHANDLED EXCEPTION (" << ctx << "): unknown\n";
         if (throw_exception) {
             throw;
         }
@@ -392,7 +471,9 @@ testing * testing::begin(const std::string & test_name, const std::string & labe
     testing * child = subtests.back().get();
     child->matched = child_matched;
 
-    stream() << child->indent() << label << "\n";
+    if (style == TESTING_STYLE_TREE) {
+        stream() << child->indent() << label << "\n";
+    }
 
     if (child->capture_output) {
         testing_capture * cap = state->get_capture();
@@ -424,18 +505,61 @@ void testing::roll_up() {
 }
 
 void testing::finish(const std::string & label, const std::string & extra) {
-    std::string captured = end_capture();
+    std::string output = end_capture();
 
     bool was_skipped = skip_requested && failures == 0;
     if (was_skipped) {
         ++skipped;
     }
 
-    if (failures > 0 && !captured.empty()) {
-        print_captured(captured);
+    if (style == TESTING_STYLE_DOTS) {
+        if (failures > 0) {
+            captured = output;
+        }
+        // a failed test gets a mark, a bench prints its result since that is its point, any other leaf gets a mark
+        if (own_failures() > 0) {
+            print_mark(own_exceptions() > 0 ? 'E' : 'F');
+        } else if (!extra.empty()) {
+            std::ostream & out = stream();
+            state->end_marks(out);
+            out << label << " (" << extra << ")\n";
+        } else if (subtests.empty()) {
+            print_mark(was_skipped ? 's' : '.');
+        }
+    } else {
+        if (failures > 0 && !output.empty()) {
+            print_captured(output);
+        }
+        print_result(label, was_skipped ? skip_reason : extra, was_skipped);
     }
-    print_result(label, was_skipped ? skip_reason : extra, was_skipped);
     roll_up();
+}
+
+int testing::own_failures() const {
+    int own = failures;
+    for (const auto & child : subtests) {
+        own -= child->failures;
+    }
+    return own;
+}
+
+int testing::own_exceptions() const {
+    int own = exceptions;
+    for (const auto & child : subtests) {
+        own -= child->exceptions;
+    }
+    return own;
+}
+
+void testing::print_mark(char mark) const {
+    std::ostream & out = stream();
+
+    const char * code = mark == '.' ? "32" : mark == 's' ? "33" : "31";
+    out << state->colored(std::string(1, mark), code);
+    if (++state->marks_on_line >= status_column) {
+        state->end_marks(out);
+    }
+    out.flush();
 }
 
 void testing::run_test(const std::string & test_name, const std::function<void(testing &)> & body) {
@@ -546,16 +670,27 @@ void testing::print_captured(const std::string & captured) const {
     }
 }
 
-void testing::collect_failed(std::vector<std::string> & names) const {
-    int own = failures;
+// in completion order, so a subtest comes before the test that contains it
+void testing::collect_failed(std::vector<const testing *> & failed) const {
     for (const auto & child : subtests) {
-        own -= child->failures;
+        child->collect_failed(failed);
     }
-    if (own > 0 && parent) {
-        names.push_back(full_name());
+    if (own_failures() > 0 && parent) {
+        failed.push_back(this);
     }
-    for (const auto & child : subtests) {
-        child->collect_failed(names);
+}
+
+void testing::print_failures(const std::vector<const testing *> & failed) const {
+    std::ostream & out = stream();
+
+    out << state->colored(rule("FAILURES", '='), "31") << "\n";
+    for (const testing * node : failed) {
+        out << state->colored(rule(node->full_name(), '_'), "31") << "\n";
+        out << node->report.str();
+        if (!node->captured.empty()) {
+            node->print_captured(node->captured);
+        }
+        out << "\n";
     }
 }
 
@@ -563,7 +698,7 @@ bool testing::assert_true(const std::string & msg, bool cond) {
     ++assertions;
     if (!cond) {
         ++failures;
-        std::ostream & out = stream();
+        std::ostream & out = report_stream();
         out << indent() << "ASSERTION FAILED";
         if (!msg.empty()) {
             out << " : " << msg;
@@ -577,16 +712,24 @@ bool testing::assert_true(const std::string & msg, bool cond) {
 int testing::summary() const {
     std::ostream & out = stream();
 
-    std::vector<std::string> failed;
+    std::vector<const testing *> failed;
     collect_failed(failed);
 
-    out << "\n";
-    if (!failed.empty()) {
-        out << "failed tests:\n";
-        for (const auto & failed_name : failed) {
-            out << "  " << failed_name << "\n";
-        }
+    if (style == TESTING_STYLE_DOTS) {
+        state->end_marks(out);
         out << "\n";
+        if (!failed.empty()) {
+            print_failures(failed);
+        }
+    } else {
+        out << "\n";
+        if (!failed.empty()) {
+            out << "failed tests:\n";
+            for (const testing * node : failed) {
+                out << "  " << node->full_name() << "\n";
+            }
+            out << "\n";
+        }
     }
     out << "tests      : " << tests << "\n";
     out << "assertions : " << assertions << "\n";
