@@ -9,9 +9,6 @@
 
 #include "json.h"
 
-#undef NDEBUG
-#include <cassert>
-
 #include "llama.h"
 #include "common.h"
 #include "chat.h"
@@ -19,10 +16,11 @@
 #include "jinja/parser.h"
 #include "jinja/lexer.h"
 #include "jinja/caps.h"
+#include "testing.h"
 
 using json = common_json;
 
-static int main_automated_tests(void);
+static void main_automated_tests(testing & t);
 
 static void run_multiple(const std::string& dir_path, bool stop_on_first_failure, const json& input, bool use_common = false);
 static void run_single(const std::string& contents, json input, bool use_common = false, bool dump_prog = false, const std::string & output_path = "");
@@ -39,6 +37,7 @@ Options:
   --no-common              Use direct Jinja engine instead of common chat templates (default: use common).
   --dump-prog              Dump the parsed program for debugging (only for single template runs).
   --output <path>          Path to output results (only for single template runs).
+  --filter <regex>         Only run the automated tests whose full name matches the regex.
 If PATH_TO_TEMPLATE is a file, runs that single template.
 If PATH_TO_TEMPLATE is a directory, runs all .jinja files in that directory.
 If PATH_TO_TEMPLATE is omitted, runs automated tests (default CI mode).
@@ -118,6 +117,7 @@ int main(int argc, char ** argv) {
     std::string tmpl_path;
     std::string json_path;
     std::string output_path;
+    std::string filter;
     std::string & json_to_use = DEFAULT_JSON;
     bool stop_on_first_fail = false;
     bool use_common = true;
@@ -130,6 +130,9 @@ int main(int argc, char ** argv) {
         }
         if (args[i] == "--json" && i + 1 < args.size()) {
             json_path = args[i + 1];
+            i++;
+        } else if (args[i] == "--filter" && i + 1 < args.size()) {
+            filter = args[i + 1];
             i++;
         } else if (args[i] == "--with-tools") {
             json_to_use = DEFAULT_JSON_WITH_TOOLS;
@@ -152,7 +155,14 @@ int main(int argc, char ** argv) {
     }
 
     if (tmpl_path.empty()) {
-        return main_automated_tests();
+        testing t;
+        t.capture_output = true;
+        t.apply_env();
+        if (!filter.empty()) {
+            t.set_filter(filter);
+        }
+        main_automated_tests(t);
+        return t.summary();
     }
 
     json input_json;
@@ -349,7 +359,7 @@ static common_chat_msg simple_msg(const std::string & role, const std::string & 
     return msg;
 }
 
-int main_automated_tests(void) {
+void main_automated_tests(testing & t) {
     // jinja::enable_debug(true);
 
     std::vector<llama_chat_message> conversation {
@@ -656,83 +666,76 @@ int main_automated_tests(void) {
     std::vector<char> formatted_chat(1024);
     int32_t res;
 
-    // list all supported templates
-    std::vector<const char *> supported_tmpl;
-    res = llama_chat_builtin_templates(nullptr, 0);
-    assert(res > 0);
-    supported_tmpl.resize(res);
-    res = llama_chat_builtin_templates(supported_tmpl.data(), supported_tmpl.size());
-    std::cout << "Built-in chat templates:\n";
-    for (const auto *tmpl : supported_tmpl) {
-        std::cout << "  " << tmpl << "\n";
-    }
-
-    // test invalid chat template
-    res = llama_chat_apply_template("INVALID TEMPLATE", conversation.data(), conversation.size(), true, formatted_chat.data(), formatted_chat.size());
-    assert(res < 0);
-    const auto add_generation_prompt = true;
-
-    for (const auto & test_case : test_cases) {
-        std::cout << "\n\n=== " << test_case.name << " ===\n\n";
-        auto conv = conversation;
-        conv.insert(conv.end(), test_case.extra_conversation.begin(), test_case.extra_conversation.end());
-        formatted_chat.resize(2048);
-        res = llama_chat_apply_template(
-            test_case.template_str.c_str(),
-            conv.data(),
-            conv.size(),
-            add_generation_prompt,
-            formatted_chat.data(),
-            formatted_chat.size()
-        );
-        formatted_chat.resize(res);
-        std::string output(formatted_chat.data(), formatted_chat.size());
-        if (output != test_case.expected_output) {
-            std::cout << "Expected:\n" << test_case.expected_output << "\n";
-            std::cout << "-------------------------\n";
-            std::cout << "Actual:\n" << output << "\n";
-            std::cout.flush();
-            assert(output == test_case.expected_output);
-        }
-    }
-
-    std::vector<common_chat_msg> messages;
-    messages.reserve(conversation.size());
-    for (const auto & msg : conversation) {
-        messages.push_back(simple_msg(msg.role, msg.content));
-    }
-    for (const auto & test_case : test_cases) {
-        if (!test_case.supported_with_jinja) {
-            continue;
-        }
-        std::cout << "\n\n=== " << test_case.name << " (jinja) ===\n\n";
-        try {
-            auto msgs = messages;
-            for (const auto & msg : test_case.extra_conversation) {
-                msgs.push_back(simple_msg(msg.role, msg.content));
+    t.test("builtin", [&](testing & t) {
+        // list all supported templates
+        t.test("list", [&](testing & t) {
+            std::vector<const char *> supported_tmpl;
+            res = llama_chat_builtin_templates(nullptr, 0);
+            if (!t.assert_true("llama_chat_builtin_templates reports a count, got " + std::to_string(res), res > 0)) {
+                return;
             }
-            auto output = format_using_common(
-                                test_case.template_str,
-                                test_case.bos_token,
-                                test_case.eos_token,
-                                msgs);
-            auto expected_output = normalize_newlines(test_case.expected_output_jinja.empty() ? test_case.expected_output : test_case.expected_output_jinja);
-            if (output != expected_output) {
-                std::cout << "Template:```\n" << test_case.template_str << "\n```";
-                std::cout << "-------------------------\n";
-                std::cout << "Expected:```\n" << expected_output << "\n```";
-                std::cout << "-------------------------\n";
-                std::cout << "Actual:```\n" << output << "\n```";
-                std::cout.flush();
-                assert(output == expected_output);
+            supported_tmpl.resize(res);
+            res = llama_chat_builtin_templates(supported_tmpl.data(), supported_tmpl.size());
+            std::cout << "Built-in chat templates:\n";
+            for (const auto *tmpl : supported_tmpl) {
+                std::cout << "  " << tmpl << "\n";
             }
-        } catch (const std::exception & e) {
-            std::cerr << "ERROR: " << e.what() << "\n";
-            assert(false);
+        });
+
+        // test invalid chat template
+        t.test("invalid template", [&](testing & t) {
+            res = llama_chat_apply_template("INVALID TEMPLATE", conversation.data(), conversation.size(), true, formatted_chat.data(), formatted_chat.size());
+            t.assert_true("INVALID TEMPLATE is rejected, got " + std::to_string(res), res < 0);
+        });
+        const auto add_generation_prompt = true;
+
+        for (const auto & test_case : test_cases) {
+            t.test(test_case.name, [&](testing & t) {
+                std::cout << "\n\n=== " << test_case.name << " ===\n\n";
+                auto conv = conversation;
+                conv.insert(conv.end(), test_case.extra_conversation.begin(), test_case.extra_conversation.end());
+                formatted_chat.resize(2048);
+                res = llama_chat_apply_template(
+                    test_case.template_str.c_str(),
+                    conv.data(),
+                    conv.size(),
+                    add_generation_prompt,
+                    formatted_chat.data(),
+                    formatted_chat.size()
+                );
+                formatted_chat.resize(res);
+                std::string output(formatted_chat.data(), formatted_chat.size());
+                t.assert_equal("output", test_case.expected_output, output);
+            });
         }
-    }
+    });
 
-    std::cout << "\nOK: All tests passed successfully.\n";
-
-    return 0;
+    t.test("jinja", [&](testing & t) {
+        std::vector<common_chat_msg> messages;
+        messages.reserve(conversation.size());
+        for (const auto & msg : conversation) {
+            messages.push_back(simple_msg(msg.role, msg.content));
+        }
+        for (const auto & test_case : test_cases) {
+            if (!test_case.supported_with_jinja) {
+                continue;
+            }
+            t.test(test_case.name, [&](testing & t) {
+                std::cout << "\n\n=== " << test_case.name << " (jinja) ===\n\n";
+                auto msgs = messages;
+                for (const auto & msg : test_case.extra_conversation) {
+                    msgs.push_back(simple_msg(msg.role, msg.content));
+                }
+                auto output = format_using_common(
+                                    test_case.template_str,
+                                    test_case.bos_token,
+                                    test_case.eos_token,
+                                    msgs);
+                auto expected_output = normalize_newlines(test_case.expected_output_jinja.empty() ? test_case.expected_output : test_case.expected_output_jinja);
+                if (!t.assert_equal("output", expected_output, output)) {
+                    std::cout << "Template:```\n" << test_case.template_str << "\n```\n";
+                }
+            });
+        }
+    });
 }
