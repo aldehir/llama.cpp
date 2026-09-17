@@ -1,10 +1,12 @@
 #include "ggml.h"
 #include "ggml-cpu.h"
+#include "testing.h"
 
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cassert>
+#include <string>
 #include <vector>
 
 #if defined(_MSC_VER)
@@ -124,7 +126,148 @@ static void ggml_graph_compute_helper(std::vector<uint8_t> & buf, ggml_cgraph * 
     ggml_graph_compute(graph, &plan);
 }
 
-int main(int /*argc*/, const char ** /*argv*/) {
+static const char * rope_mode_name(int m) {
+    switch (m) {
+        case 0:  return "normal";
+        case 1:  return "neox";
+        case 2:  return "mrope";
+        case 3:  return "vision";
+        default: return "imrope";
+    }
+}
+
+// rope f32
+static void test_rope_mode(testing & t, struct ggml_context * ctx0, std::vector<uint8_t> & work_buffer, int m) {
+    const int ndims = 4;
+
+    const int64_t n_rot = 128;
+    const int64_t ne[4] = { 2*n_rot, 32, 73, 1 };
+
+    const int n_past_0 = 100;
+    const int n_past_2 = 33;
+
+    struct ggml_tensor * r0;
+    struct ggml_tensor * r1;
+    struct ggml_tensor * r2;
+    struct ggml_tensor * x = get_random_tensor_f32(ctx0, ndims, ne, -1.0f, 1.0f);
+    int mode = -1;
+
+    if (m < 2) {
+        struct ggml_tensor * p0 = ggml_new_tensor_1d(ctx0, GGML_TYPE_I32, ne[2]);
+        struct ggml_tensor * p1 = ggml_new_tensor_1d(ctx0, GGML_TYPE_I32, ne[2]);
+        struct ggml_tensor * p2 = ggml_new_tensor_1d(ctx0, GGML_TYPE_I32, ne[2]);
+
+        for (int i = 0; i < ne[2]; ++i) {
+            ((int32_t *) p0->data)[i] = n_past_0 + i;
+            ((int32_t *) p1->data)[i] = n_past_2 - n_past_0;
+            ((int32_t *) p2->data)[i] = n_past_2 + i;
+        }
+        // test mode 0, 2  (standard, GPT-NeoX)
+        mode = m == 0 ? GGML_ROPE_TYPE_NORMAL : GGML_ROPE_TYPE_NEOX;
+
+        // 100, 101, 102, ..., 172
+        r0 = ggml_rope(ctx0, x,  p0, n_rot, mode);
+        // -67, -67, -67, ..., -67
+        r1 = ggml_rope(ctx0, r0, p1, n_rot, mode); // "context swap", i.e. forget n_past_0 - n_past_2 tokens
+
+        //  33,  34,  35, ..., 105
+        r2 = ggml_rope(ctx0, x,  p2, n_rot, mode);
+    } else {
+        // testing multi-dimension rope position embedding mode
+        struct ggml_tensor * p0 = ggml_new_tensor_1d(ctx0, GGML_TYPE_I32, ne[2] * 4);
+        struct ggml_tensor * p1 = ggml_new_tensor_1d(ctx0, GGML_TYPE_I32, ne[2] * 4);
+        struct ggml_tensor * p2 = ggml_new_tensor_1d(ctx0, GGML_TYPE_I32, ne[2] * 4);
+
+        int sections[4] = {16, 24, 24, 0};
+
+        mode = (m == 2) ? GGML_ROPE_TYPE_MROPE : (m == 3) ? GGML_ROPE_TYPE_VISION : GGML_ROPE_TYPE_IMROPE;
+
+        for (int i = 0; i < ne[2]; ++i) {
+            for (int j = 0; j < 4; ++j) {
+                ((int32_t *) p0->data)[i + ne[2] * j] = n_past_0 + i + j;
+                ((int32_t *) p1->data)[i + ne[2] * j] = n_past_2 - n_past_0;
+                ((int32_t *) p2->data)[i + ne[2] * j] = n_past_2 + i + j;
+            }
+        }
+
+        // [[100, 101, 102, ..., 172],
+        // [101, 102, 103, ..., 173],
+        // [102, 103, 104, ..., 174]]
+        r0 = ggml_rope_multi(
+            ctx0, x, p0, nullptr,
+            n_rot, sections, mode, 32768, 1000000, 1, 0, 1, 32, 1);
+        // [[-67, -67, -67, ..., -67]
+        // [-67, -67, -67, ..., -67]
+        // [-67, -67, -67, ..., -67]]
+        r1 = ggml_rope_multi(
+            ctx0, r0, p1, nullptr,
+            n_rot, sections, mode, 32768, 1000000, 1, 0, 1, 32, 1);
+
+        //  [[33,  34,  35, ..., 105]
+        //  [34,  35,  36, ..., 106]
+        //  [35,  36,  37, ..., 107]]
+        r2 = ggml_rope_multi(
+            ctx0, x, p2, nullptr,
+            n_rot, sections, mode, 32768, 1000000, 1, 0, 1, 32, 1);
+    }
+
+    ggml_cgraph * gf = ggml_new_graph(ctx0);
+
+    ggml_build_forward_expand(gf, r0);
+    ggml_build_forward_expand(gf, r1);
+    ggml_build_forward_expand(gf, r2);
+
+    ggml_graph_compute_helper(work_buffer, gf, 4);
+
+    // check that r1 and r2 are the same
+    {
+        double sum0 = 0.0f;
+        double sum1 = 0.0f;
+        double diff = 0.0f;
+
+        const float * r1_data = (float *) r1->data;
+        const float * r2_data = (float *) r2->data;
+
+        const int n_elements = ggml_nelements(r1);
+
+        for (int i = 0; i < n_elements; ++i) {
+            sum0 += fabs(r1_data[i]);
+            sum1 += fabs(r2_data[i]);
+            diff += fabs(r1_data[i] - r2_data[i]);
+            //if (fabs(r1_data[i] - r2_data[i]) > 0.0001f) {
+            //    printf("%d: %f %f\n", i, r1_data[i], r2_data[i]);
+            //    printf("diff: %f\n", fabs(r1_data[i] - r2_data[i]));
+            //}
+        }
+
+        //for (int i = 4096; i < 4096 + 128; ++i) {
+        //    printf("%f %f\n", r1_data[i], r2_data[i]);
+        //}
+
+        printf("mode: %d\n", mode);
+        printf("sum0: %f\n", sum0);
+        printf("sum1: %f\n", sum1);
+        printf("diff: %f\n", diff);
+        printf("rel err: %f\n", diff / sum0);
+        printf("rel err: %f\n", diff / sum1);
+
+        char msg[128];
+        snprintf(msg, sizeof(msg), "mode %d: rel err diff/sum0 = %f < 0.0001", mode, diff / sum0);
+        t.assert_true(msg, diff / sum0 < 0.0001f);
+        snprintf(msg, sizeof(msg), "mode %d: rel err diff/sum1 = %f < 0.0001", mode, diff / sum1);
+        t.assert_true(msg, diff / sum1 < 0.0001f);
+    }
+}
+
+int main(int argc, const char ** argv) {
+    testing t;
+    t.capture_output = true;
+    t.apply_env();
+
+    if (argc > 1) {
+        t.set_filter(argv[1]);
+    }
+
     struct ggml_init_params params = {
         /* .mem_size   = */ 128*1024*1024,
         /* .mem_buffer = */ NULL,
@@ -135,129 +278,15 @@ int main(int /*argc*/, const char ** /*argv*/) {
 
     struct ggml_context * ctx0 = ggml_init(params);
 
-    struct ggml_tensor * x;
-
-    // rope f32
-    for (int m = 0; m < 5; ++m) {
-        const int ndims = 4;
-
-        const int64_t n_rot = 128;
-        const int64_t ne[4] = { 2*n_rot, 32, 73, 1 };
-
-        const int n_past_0 = 100;
-        const int n_past_2 = 33;
-
-        struct ggml_tensor * r0;
-        struct ggml_tensor * r1;
-        struct ggml_tensor * r2;
-        x = get_random_tensor_f32(ctx0, ndims, ne, -1.0f, 1.0f);
-        int mode = -1;
-
-        if (m < 2) {
-            struct ggml_tensor * p0 = ggml_new_tensor_1d(ctx0, GGML_TYPE_I32, ne[2]);
-            struct ggml_tensor * p1 = ggml_new_tensor_1d(ctx0, GGML_TYPE_I32, ne[2]);
-            struct ggml_tensor * p2 = ggml_new_tensor_1d(ctx0, GGML_TYPE_I32, ne[2]);
-
-            for (int i = 0; i < ne[2]; ++i) {
-                ((int32_t *) p0->data)[i] = n_past_0 + i;
-                ((int32_t *) p1->data)[i] = n_past_2 - n_past_0;
-                ((int32_t *) p2->data)[i] = n_past_2 + i;
-            }
-            // test mode 0, 2  (standard, GPT-NeoX)
-            mode = m == 0 ? GGML_ROPE_TYPE_NORMAL : GGML_ROPE_TYPE_NEOX;
-
-            // 100, 101, 102, ..., 172
-            r0 = ggml_rope(ctx0, x,  p0, n_rot, mode);
-            // -67, -67, -67, ..., -67
-            r1 = ggml_rope(ctx0, r0, p1, n_rot, mode); // "context swap", i.e. forget n_past_0 - n_past_2 tokens
-
-            //  33,  34,  35, ..., 105
-            r2 = ggml_rope(ctx0, x,  p2, n_rot, mode);
-        } else {
-            // testing multi-dimension rope position embedding mode
-            struct ggml_tensor * p0 = ggml_new_tensor_1d(ctx0, GGML_TYPE_I32, ne[2] * 4);
-            struct ggml_tensor * p1 = ggml_new_tensor_1d(ctx0, GGML_TYPE_I32, ne[2] * 4);
-            struct ggml_tensor * p2 = ggml_new_tensor_1d(ctx0, GGML_TYPE_I32, ne[2] * 4);
-
-            int sections[4] = {16, 24, 24, 0};
-
-            mode = (m == 2) ? GGML_ROPE_TYPE_MROPE : (m == 3) ? GGML_ROPE_TYPE_VISION : GGML_ROPE_TYPE_IMROPE;
-
-            for (int i = 0; i < ne[2]; ++i) {
-                for (int j = 0; j < 4; ++j) {
-                    ((int32_t *) p0->data)[i + ne[2] * j] = n_past_0 + i + j;
-                    ((int32_t *) p1->data)[i + ne[2] * j] = n_past_2 - n_past_0;
-                    ((int32_t *) p2->data)[i + ne[2] * j] = n_past_2 + i + j;
-                }
-            }
-
-            // [[100, 101, 102, ..., 172],
-            // [101, 102, 103, ..., 173],
-            // [102, 103, 104, ..., 174]]
-            r0 = ggml_rope_multi(
-                ctx0, x, p0, nullptr,
-                n_rot, sections, mode, 32768, 1000000, 1, 0, 1, 32, 1);
-            // [[-67, -67, -67, ..., -67]
-            // [-67, -67, -67, ..., -67]
-            // [-67, -67, -67, ..., -67]]
-            r1 = ggml_rope_multi(
-                ctx0, r0, p1, nullptr,
-                n_rot, sections, mode, 32768, 1000000, 1, 0, 1, 32, 1);
-
-            //  [[33,  34,  35, ..., 105]
-            //  [34,  35,  36, ..., 106]
-            //  [35,  36,  37, ..., 107]]
-            r2 = ggml_rope_multi(
-                ctx0, x, p2, nullptr,
-                n_rot, sections, mode, 32768, 1000000, 1, 0, 1, 32, 1);
+    t.test("rope", [&](testing & t) {
+        for (int m = 0; m < 5; ++m) {
+            t.test(rope_mode_name(m), [&](testing & t) {
+                test_rope_mode(t, ctx0, work_buffer, m);
+            });
         }
-
-        ggml_cgraph * gf = ggml_new_graph(ctx0);
-
-        ggml_build_forward_expand(gf, r0);
-        ggml_build_forward_expand(gf, r1);
-        ggml_build_forward_expand(gf, r2);
-
-        ggml_graph_compute_helper(work_buffer, gf, 4);
-
-        // check that r1 and r2 are the same
-        {
-            double sum0 = 0.0f;
-            double sum1 = 0.0f;
-            double diff = 0.0f;
-
-            const float * r1_data = (float *) r1->data;
-            const float * r2_data = (float *) r2->data;
-
-            const int n_elements = ggml_nelements(r1);
-
-            for (int i = 0; i < n_elements; ++i) {
-                sum0 += fabs(r1_data[i]);
-                sum1 += fabs(r2_data[i]);
-                diff += fabs(r1_data[i] - r2_data[i]);
-                //if (fabs(r1_data[i] - r2_data[i]) > 0.0001f) {
-                //    printf("%d: %f %f\n", i, r1_data[i], r2_data[i]);
-                //    printf("diff: %f\n", fabs(r1_data[i] - r2_data[i]));
-                //}
-            }
-
-            //for (int i = 4096; i < 4096 + 128; ++i) {
-            //    printf("%f %f\n", r1_data[i], r2_data[i]);
-            //}
-
-            printf("mode: %d\n", mode);
-            printf("sum0: %f\n", sum0);
-            printf("sum1: %f\n", sum1);
-            printf("diff: %f\n", diff);
-            printf("rel err: %f\n", diff / sum0);
-            printf("rel err: %f\n", diff / sum1);
-
-            GGML_ASSERT(diff / sum0 < 0.0001f);
-            GGML_ASSERT(diff / sum1 < 0.0001f);
-        }
-    }
+    });
 
     ggml_free(ctx0);
 
-    return 0;
+    return t.summary();
 }
