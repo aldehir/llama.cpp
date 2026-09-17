@@ -575,14 +575,12 @@ static void test_gradient_accumulation(
                 for (int i = 0; i < 6; ++i) {
                     expected[i] = (i % 2 == 0 && nbatch_physical != 1) ? 0.0 : double(i + 1);
                 }
-                if (loss_type == GGML_OPT_LOSS_TYPE_SUM) {
-                    // nothing to scale
-                } else if (loss_type == GGML_OPT_LOSS_TYPE_MEAN) {
+                if (loss_type == GGML_OPT_LOSS_TYPE_MEAN) {
                     for (int i = 0; i < 6; ++i) {
                         expected[i] /= ndata;
                     }
                 } else {
-                    GGML_ASSERT(false);
+                    GGML_ASSERT(loss_type == GGML_OPT_LOSS_TYPE_SUM);
                 }
                 for (int i = 0; i < 6; ++i) {
                     assert_almost_equal(t, "grad_history[" + std::to_string(i) + "]", expected[i], grad_history[i], atol);
