@@ -43,11 +43,6 @@ int main(int argc, char ** argv) {
     t.capture_output = true;
     t.apply_env();
 
-    // the command line belongs to common_params_parse, so the filter comes from the environment
-    if (const char * filter = getenv("LLAMA_TEST_FILTER")) {
-        t.set_filter(filter);
-    }
-
     llama_backend_init();
     llama_numa_init(params.numa);
 

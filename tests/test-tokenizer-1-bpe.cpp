@@ -152,11 +152,6 @@ int main(int argc, char **argv) {
     t.capture_output = true;
     t.apply_env();
 
-    // the positional arguments are taken, so the filter comes from the environment
-    if (const char * filter = getenv("LLAMA_TEST_FILTER")) {
-        t.set_filter(filter);
-    }
-
     llama_model * model = nullptr;
     llama_context * ctx = nullptr;
 
