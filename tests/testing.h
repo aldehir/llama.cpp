@@ -44,6 +44,8 @@ struct testing {
     std::string full_name() const;
 
     void log(const std::string & msg);
+    // LLAMA_TEST_VERBOSE=1 turns on log(), LLAMA_TEST_CAPTURE=0 shows test output live
+    void apply_env();
     void set_filter(const std::string & re);
     void skip(const std::string & reason = "");
 

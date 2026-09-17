@@ -6,6 +6,7 @@
 #include <condition_variable>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <exception>
 #include <mutex>
 #include <regex>
@@ -322,6 +323,15 @@ std::string testing::full_name() const {
 void testing::log(const std::string & msg) {
     if (verbose) {
         stream() << indent() << "  " << msg << "\n";
+    }
+}
+
+void testing::apply_env() {
+    if (const char * v = getenv("LLAMA_TEST_VERBOSE")) {
+        verbose = std::string(v) == "1";
+    }
+    if (const char * c = getenv("LLAMA_TEST_CAPTURE")) {
+        capture_output = std::string(c) != "0";
     }
 }
 
