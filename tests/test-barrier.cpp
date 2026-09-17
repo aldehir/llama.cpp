@@ -1,17 +1,19 @@
 #include "ggml.h"
 #include "ggml-cpu.h"
+#include "testing.h"
 
 #include <chrono>
 #include <iostream>
 #include <cstdio>
 #include <cstdlib>
 #include <cassert>
+#include <string>
 #include <vector>
 #include <thread>
 
 #define MAX_NARGS 2
 
-static void test_barrier(int n_threads, int n_rounds) {
+static void test_barrier(testing & t, int n_threads, int n_rounds) {
     struct ggml_init_params params = {
         /* .mem_size   = */ 1024*1024*1024,
         /* .mem_buffer = */ NULL,
@@ -39,9 +41,9 @@ static void test_barrier(int n_threads, int n_rounds) {
     // Create threadpool
     struct ggml_threadpool_params tpp  = ggml_threadpool_params_default(n_threads);
     struct ggml_threadpool* threadpool = ggml_threadpool_new(&tpp);
-    if (!threadpool) {
-        fprintf(stderr, "threadpool create failed : n_threads %d\n", n_threads);
-        exit(1);
+    if (!t.assert_true("threadpool created with n_threads=" + std::to_string(n_threads), threadpool != nullptr)) {
+        ggml_free(ctx);
+        return;
     }
 
     // The test runs with constant number of threads
@@ -79,7 +81,7 @@ static void test_barrier(int n_threads, int n_rounds) {
     ggml_free(ctx);
 }
 
-static void test_active(int n_threads, int n_rounds) {
+static void test_active(testing & t, int n_threads, int n_rounds) {
     struct ggml_init_params params = {
         /* .mem_size   = */ 1024*1024*1024,
         /* .mem_buffer = */ NULL,
@@ -107,9 +109,9 @@ static void test_active(int n_threads, int n_rounds) {
     // Create threadpool
     struct ggml_threadpool_params tpp  = ggml_threadpool_params_default(n_threads);
     struct ggml_threadpool* threadpool = ggml_threadpool_new(&tpp);
-    if (!threadpool) {
-        fprintf(stderr, "threadpool create failed : n_threads %d\n", n_threads);
-        exit(1);
+    if (!t.assert_true("threadpool created with n_threads=" + std::to_string(n_threads), threadpool != nullptr)) {
+        ggml_free(ctx);
+        return;
     }
 
     std::cerr << "graph-compute with"
@@ -135,7 +137,7 @@ static void test_active(int n_threads, int n_rounds) {
     ggml_free(ctx);
 }
 
-static void test_multi_graph(int n_threads, int n_rounds) {
+static void test_multi_graph(testing & t, int n_threads, int n_rounds) {
     struct ggml_init_params params = {
         /* .mem_size   = */ 1024*1024*1024,
         /* .mem_buffer = */ NULL,
@@ -180,9 +182,9 @@ static void test_multi_graph(int n_threads, int n_rounds) {
     // Create threadpool
     struct ggml_threadpool_params tpp  = ggml_threadpool_params_default(n_threads);
     struct ggml_threadpool* threadpool = ggml_threadpool_new(&tpp);
-    if (!threadpool) {
-        fprintf(stderr, "threadpool create failed : n_threads %d\n", n_threads);
-        exit(1);
+    if (!t.assert_true("threadpool created with n_threads=" + std::to_string(n_threads), threadpool != nullptr)) {
+        ggml_free(ctx);
+        return;
     }
 
     std::cerr << "graph-compute with"
@@ -214,6 +216,9 @@ static void test_multi_graph(int n_threads, int n_rounds) {
 
 
 int main(int argc, char *argv[]) {
+    testing t;
+    t.capture_output = true;
+    t.apply_env();
 
     int n_threads = std::max(1, std::min(4, (int) std::thread::hardware_concurrency()));
     int n_rounds  = 100;
@@ -226,11 +231,17 @@ int main(int argc, char *argv[]) {
         n_rounds  = std::atoi(argv[2]);
     }
 
-    test_barrier(n_threads, n_rounds);
+    t.test("barrier", [&](testing & t) {
+        test_barrier(t, n_threads, n_rounds);
+    });
 
-    test_active(n_threads,  n_rounds * 100);
+    t.test("active", [&](testing & t) {
+        test_active(t, n_threads,  n_rounds * 100);
+    });
 
-    test_multi_graph(n_threads,  n_rounds * 10);
+    t.test("multi_graph", [&](testing & t) {
+        test_multi_graph(t, n_threads,  n_rounds * 10);
+    });
 
-    return 0;
+    return t.summary();
 }
