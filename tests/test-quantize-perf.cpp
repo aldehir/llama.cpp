@@ -109,7 +109,8 @@ static void benchmark_function(size_t size, size_t q_size, int64_t iterations, c
 }
 
 // one benchmarked op over every requested size
-static void benchmark_op(const quantize_perf_params & params, ggml_type type, const std::function<float(size_t)> & func) {
+template <typename F>
+static void benchmark_op(const quantize_perf_params & params, ggml_type type, F func) {
     for (size_t size : params.test_sizes) {
         printf("    %zu values (%.2f MB)\n", size, 4*size/(float)(1024*1024));
         size_t quantized_size = ggml_row_size(type, size);
