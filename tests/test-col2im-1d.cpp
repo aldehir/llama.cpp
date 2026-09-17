@@ -12,11 +12,13 @@
 
 #include "ggml.h"
 #include "ggml-cpu.h"
+#include "testing.h"
 
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <string>
 #include <vector>
 
 // One geometry: kernel size, output channels, input length, stride, crop
@@ -86,74 +88,104 @@ static double nmse_cropped(const float * y, const float * ref, int64_t T_out, in
     return num / (den + 1e-30);
 }
 
-int main(void) {
-    int fails = 0;
+static std::string case_name(const col2im_case & c) {
+    char buf[128];
+    snprintf(buf, sizeof(buf), "K=%d OC=%d T_in=%d s0=%d p0=%d", (int) c.K, (int) c.OC, (int) c.T_in, c.s0, c.p0);
+    return buf;
+}
 
-    for (const col2im_case & c : CASES) {
-        const int64_t T_ref = (c.T_in - 1) * c.s0 + c.K;
-        const int64_t T_out = T_ref - 2 * c.p0;
+static std::string nmse_msg(const char * type, double err, double max_err) {
+    char buf[128];
+    snprintf(buf, sizeof(buf), "%s nmse %.2e <= %.0e", type, err, max_err);
+    return buf;
+}
 
-        struct ggml_init_params params = {
-            /* .mem_size   = */ (size_t) 64 << 20,
-            /* .mem_base   = */ NULL,
-            /* .no_alloc   = */ false,
-        };
-        struct ggml_context * ctx = ggml_init(params);
+static void test_case(testing & t, const col2im_case & c) {
+    const int64_t T_ref = (c.T_in - 1) * c.s0 + c.K;
+    const int64_t T_out = T_ref - 2 * c.p0;
 
-        // One logical weight and one logical input feed both paths
-        struct ggml_tensor * w = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, c.K, c.OC, IC);
-        struct ggml_tensor * x = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, c.T_in, IC);
-        for (int64_t i = 0; i < ggml_nelements(w); i++) {
-            ((float *) w->data)[i] = frand();
-        }
-        for (int64_t i = 0; i < ggml_nelements(x); i++) {
-            ((float *) x->data)[i] = frand();
-        }
+    struct ggml_init_params params = {
+        /* .mem_size   = */ (size_t) 64 << 20,
+        /* .mem_base   = */ NULL,
+        /* .no_alloc   = */ false,
+    };
+    struct ggml_context * ctx = ggml_init(params);
 
-        // Reference path: the native op, uncropped
-        struct ggml_tensor * y_ref = ggml_conv_transpose_1d(ctx, w, x, c.s0, 0, 1);
-
-        // Decomposed path: [K, OC, IC] -> [IC, K, OC] -> [IC, K*OC], k fastest inside each oc block
-        struct ggml_tensor * w_perm = ggml_cont(ctx, ggml_permute(ctx, w, 1, 2, 0, 3));
-        w_perm                      = ggml_reshape_2d(ctx, w_perm, IC, c.K * c.OC);
-        struct ggml_tensor * x_t    = ggml_cont(ctx, ggml_transpose(ctx, x));
-        struct ggml_tensor * col    = ggml_mul_mat(ctx, w_perm, x_t);
-        struct ggml_tensor * y32    = ggml_col2im_1d(ctx, col, c.s0, (int) c.OC, c.p0);
-
-        // Half precision kernels: the same columns cast before the scatter
-        struct ggml_tensor * y16 = ggml_col2im_1d(ctx, ggml_cast(ctx, col, GGML_TYPE_F16),  c.s0, (int) c.OC, c.p0);
-        struct ggml_tensor * ybf = ggml_col2im_1d(ctx, ggml_cast(ctx, col, GGML_TYPE_BF16), c.s0, (int) c.OC, c.p0);
-
-        GGML_ASSERT(y_ref->ne[0] == T_ref && y_ref->ne[1] == c.OC);
-        GGML_ASSERT(y32->ne[0] == T_out && y32->ne[1] == c.OC);
-
-        struct ggml_cgraph * gf = ggml_new_graph(ctx);
-        ggml_build_forward_expand(gf, y_ref);
-        ggml_build_forward_expand(gf, y32);
-        ggml_build_forward_expand(gf, y16);
-        ggml_build_forward_expand(gf, ybf);
-        ggml_graph_compute_with_ctx(ctx, gf, 4);
-
-        const std::vector<float> f32 = tensor_to_f32(y32);
-        const std::vector<float> f16 = tensor_to_f32(y16);
-        const std::vector<float> fbf = tensor_to_f32(ybf);
-        const float * ref = (const float *) y_ref->data;
-
-        const double e32 = nmse_cropped(f32.data(), ref, T_out, T_ref, c.OC, c.p0);
-        const double e16 = nmse_cropped(f16.data(), ref, T_out, T_ref, c.OC, c.p0);
-        const double ebf = nmse_cropped(fbf.data(), ref, T_out, T_ref, c.OC, c.p0);
-
-        // Same thresholds as test-backend-ops: 1e-7 full precision, 5e-4 half
-        const bool ok = e32 <= 1e-7 && e16 <= 5e-4 && ebf <= 5e-4;
-        if (!ok) {
-            fails++;
-        }
-        printf("col2im_1d K=%2d OC=%2d T_in=%3d s0=%d p0=%d: nmse f32=%.2e f16=%.2e bf16=%.2e %s\n",
-            (int) c.K, (int) c.OC, (int) c.T_in, c.s0, c.p0, e32, e16, ebf, ok ? "OK" : "FAIL");
-
-        ggml_free(ctx);
+    // One logical weight and one logical input feed both paths
+    struct ggml_tensor * w = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, c.K, c.OC, IC);
+    struct ggml_tensor * x = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, c.T_in, IC);
+    for (int64_t i = 0; i < ggml_nelements(w); i++) {
+        ((float *) w->data)[i] = frand();
+    }
+    for (int64_t i = 0; i < ggml_nelements(x); i++) {
+        ((float *) x->data)[i] = frand();
     }
 
-    printf(fails == 0 ? "all col2im_1d checks passed\n" : "%d col2im_1d checks FAILED\n", fails);
-    return fails == 0 ? 0 : 1;
+    // Reference path: the native op, uncropped
+    struct ggml_tensor * y_ref = ggml_conv_transpose_1d(ctx, w, x, c.s0, 0, 1);
+
+    // Decomposed path: [K, OC, IC] -> [IC, K, OC] -> [IC, K*OC], k fastest inside each oc block
+    struct ggml_tensor * w_perm = ggml_cont(ctx, ggml_permute(ctx, w, 1, 2, 0, 3));
+    w_perm                      = ggml_reshape_2d(ctx, w_perm, IC, c.K * c.OC);
+    struct ggml_tensor * x_t    = ggml_cont(ctx, ggml_transpose(ctx, x));
+    struct ggml_tensor * col    = ggml_mul_mat(ctx, w_perm, x_t);
+    struct ggml_tensor * y32    = ggml_col2im_1d(ctx, col, c.s0, (int) c.OC, c.p0);
+
+    // Half precision kernels: the same columns cast before the scatter
+    struct ggml_tensor * y16 = ggml_col2im_1d(ctx, ggml_cast(ctx, col, GGML_TYPE_F16),  c.s0, (int) c.OC, c.p0);
+    struct ggml_tensor * ybf = ggml_col2im_1d(ctx, ggml_cast(ctx, col, GGML_TYPE_BF16), c.s0, (int) c.OC, c.p0);
+
+    bool shape_ok = true;
+    shape_ok = t.assert_true("reference shape [T_ref, OC]", y_ref->ne[0] == T_ref && y_ref->ne[1] == c.OC) && shape_ok;
+    shape_ok = t.assert_true("col2im shape [T_out, OC]",    y32->ne[0] == T_out && y32->ne[1] == c.OC) && shape_ok;
+    if (!shape_ok) {
+        ggml_free(ctx);
+        return;
+    }
+
+    struct ggml_cgraph * gf = ggml_new_graph(ctx);
+    ggml_build_forward_expand(gf, y_ref);
+    ggml_build_forward_expand(gf, y32);
+    ggml_build_forward_expand(gf, y16);
+    ggml_build_forward_expand(gf, ybf);
+    ggml_graph_compute_with_ctx(ctx, gf, 4);
+
+    const std::vector<float> f32 = tensor_to_f32(y32);
+    const std::vector<float> f16 = tensor_to_f32(y16);
+    const std::vector<float> fbf = tensor_to_f32(ybf);
+    const float * ref = (const float *) y_ref->data;
+
+    const double e32 = nmse_cropped(f32.data(), ref, T_out, T_ref, c.OC, c.p0);
+    const double e16 = nmse_cropped(f16.data(), ref, T_out, T_ref, c.OC, c.p0);
+    const double ebf = nmse_cropped(fbf.data(), ref, T_out, T_ref, c.OC, c.p0);
+
+    // Same thresholds as test-backend-ops: 1e-7 full precision, 5e-4 half
+    bool ok = true;
+    ok = t.assert_true(nmse_msg("f32",  e32, 1e-7), e32 <= 1e-7) && ok;
+    ok = t.assert_true(nmse_msg("f16",  e16, 5e-4), e16 <= 5e-4) && ok;
+    ok = t.assert_true(nmse_msg("bf16", ebf, 5e-4), ebf <= 5e-4) && ok;
+    printf("col2im_1d K=%2d OC=%2d T_in=%3d s0=%d p0=%d: nmse f32=%.2e f16=%.2e bf16=%.2e %s\n",
+        (int) c.K, (int) c.OC, (int) c.T_in, c.s0, c.p0, e32, e16, ebf, ok ? "OK" : "FAIL");
+
+    ggml_free(ctx);
+}
+
+int main(int argc, char ** argv) {
+    testing t;
+    t.capture_output = true;
+    t.apply_env();
+
+    if (argc > 1) {
+        t.set_filter(argv[1]);
+    }
+
+    t.test("col2im_1d", [](testing & t) {
+        for (const col2im_case & c : CASES) {
+            t.test(case_name(c), [&](testing & t) {
+                test_case(t, c);
+            });
+        }
+    });
+
+    return t.summary();
 }

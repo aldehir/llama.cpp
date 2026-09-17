@@ -1,15 +1,15 @@
-#ifdef NDEBUG
-#undef NDEBUG
-#endif
-
 #include "json-schema-to-grammar.h"
 
 #include "../src/llama-grammar.h"
 
 #include "json.h"
+#include "testing.h"
 
-#include <cassert>
+#include <cstdio>
+#include <functional>
 #include <regex>
+#include <stdexcept>
+#include <string>
 
 static std::string trim(const std::string & source) {
     std::string s(source);
@@ -32,41 +32,46 @@ struct TestCase {
     void _print_failure_header() const {
         fprintf(stderr, "#\n# Test '%s' failed.\n#\n%s\n", name.c_str(), schema.c_str());
     }
-    void verify(const std::string & actual_grammar) const {
-        if (trim(actual_grammar) != trim(expected_grammar)) {
-        _print_failure_header();
-        fprintf(stderr, "# EXPECTED:\n%s\n# ACTUAL:\n%s\n", expected_grammar.c_str(), actual_grammar.c_str());
-        assert(false);
+    void verify(testing & t, const std::string & actual_grammar) const {
+        const bool matches = trim(actual_grammar) == trim(expected_grammar);
+        if (!matches) {
+            _print_failure_header();
+            fprintf(stderr, "# EXPECTED:\n%s\n# ACTUAL:\n%s\n", expected_grammar.c_str(), actual_grammar.c_str());
         }
+        t.assert_true("grammar matches the expectation", matches);
     }
-    void verify_expectation_parseable() const {
+    void verify_expectation_parseable(testing & t) const {
+        bool parsed = false;
         try {
             llama_grammar_parser state;
             state.parse(expected_grammar.c_str());
             if (state.symbol_ids.find("root") == state.symbol_ids.end()) {
                 throw std::runtime_error("Grammar failed to parse:\n" + expected_grammar);
             }
+            parsed = true;
         } catch (const std::runtime_error & ex) {
             _print_failure_header();
             fprintf(stderr, "# GRAMMAR ERROR: %s\n", ex.what());
-            assert(false);
         }
+        t.assert_true("expected grammar parses", parsed);
     }
-    void verify_status(TestCaseStatus status) const {
+    void verify_status(testing & t, TestCaseStatus status) const {
         if (status != expected_status) {
             _print_failure_header();
             fprintf(stderr, "# EXPECTED STATUS: %s\n", expected_status == SUCCESS ? "SUCCESS" : "FAILURE");
             fprintf(stderr, "# ACTUAL STATUS: %s\n", status == SUCCESS ? "SUCCESS" : "FAILURE");
-            assert(false);
         }
+        t.assert_true(std::string("status is ") + (expected_status == SUCCESS ? "SUCCESS" : "FAILURE"), status == expected_status);
     }
 };
 
-static void test_all(const std::string & title, std::function<void(const TestCase &)> runner) {
-    fprintf(stderr, "#\n# %s\n#\n", title.c_str());
+// runs every case as a subtest of t
+static void test_all(testing & t, std::function<void(testing &, const TestCase &)> runner) {
     auto test = [&](const TestCase & tc) {
-        fprintf(stderr, "- %s%s\n", tc.name.c_str(), tc.expected_status == FAILURE ? " (failure expected)" : "");
-        runner(tc);
+        t.test(tc.name, [&](testing & t) {
+            fprintf(stderr, "- %s%s\n", tc.name.c_str(), tc.expected_status == FAILURE ? " (failure expected)" : "");
+            runner(t, tc);
+        });
     };
 
     test({
@@ -1510,20 +1515,28 @@ static void test_all(const std::string & title, std::function<void(const TestCas
     });
 }
 
-int main() {
-    test_all("JSON schema conversion", [](const TestCase & tc) {
-        try {
-            tc.verify(json_schema_to_grammar(common_json::parse(tc.schema), true));
-            tc.verify_status(SUCCESS);
-        } catch (const std::invalid_argument & ex) {
-            fprintf(stderr, "Error: %s\n", ex.what());
-            tc.verify_status(FAILURE);
-        }
+int main(int argc, char ** argv) {
+    testing t;
+    t.capture_output = true;
+    t.apply_env();
+    if (argc > 1) {
+        t.set_filter(argv[1]);
+    }
+
+    t.test("conversion", [](testing & t) {
+        test_all(t, [](testing & t, const TestCase & tc) {
+            try {
+                tc.verify(t, json_schema_to_grammar(common_json::parse(tc.schema), true));
+                tc.verify_status(t, SUCCESS);
+            } catch (const std::invalid_argument & ex) {
+                fprintf(stderr, "Error: %s\n", ex.what());
+                tc.verify_status(t, FAILURE);
+            }
+        });
     });
 
     // a document parsed up front gives the same grammar as the JSON, recursion included
-    {
-        fprintf(stderr, "- parsed document\n");
+    t.test("parsed document", [](testing & t) {
         auto schema = common_json::parse(R"""({
             "$ref": "#/$defs/node",
             "$defs": {
@@ -1534,12 +1547,11 @@ int main() {
                 }
             }
         })""");
-        assert(json_schema_to_grammar(common_chat_schema_from_json(schema)) == json_schema_to_grammar(schema, true));
-    }
+        t.assert_equal("grammar from the parsed document", json_schema_to_grammar(schema, true), json_schema_to_grammar(common_chat_schema_from_json(schema)));
+    });
 
     // a property node carries its $ref target, so its grammar names the ref rule
-    {
-        fprintf(stderr, "- sub-schema $ref\n");
+    t.test("sub-schema $ref", [](testing & t) {
         auto parameters = common_json::parse(R"""({
             "type": "object",
             "properties": {"item": {"$ref": "#/$defs/item"}},
@@ -1566,15 +1578,21 @@ int main() {
             )""",
         };
         auto doc = common_chat_schema_from_json(parameters);
-        tc.verify(build_grammar([&](const common_grammar_builder & builder) {
+        tc.verify(t, build_grammar([&](const common_grammar_builder & builder) {
             const auto & item = static_cast<const common_chat_schema_object &>(*doc.root).properties.at(0);
             builder.add_schema("root", *item.schema);
         }));
-    }
-
-    test_all("Check the expectations parse", [](const TestCase & tc) {
-        if (tc.expected_status == SUCCESS) {
-            tc.verify_expectation_parseable();
-        }
     });
+
+    t.test("expectations parse", [](testing & t) {
+        test_all(t, [](testing & t, const TestCase & tc) {
+            if (tc.expected_status == SUCCESS) {
+                tc.verify_expectation_parseable(t);
+            } else {
+                t.skip("failure expected");
+            }
+        });
+    });
+
+    return t.summary();
 }

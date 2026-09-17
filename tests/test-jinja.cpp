@@ -42,7 +42,9 @@ static bool g_python_mode = false;
 
 int main(int argc, char *argv[]) {
     testing t(std::cout);
-    t.verbose = true;
+    t.verbose        = true;
+    t.capture_output = true;
+    t.apply_env();
 
     // usage: test-jinja [-py] [filter_regex]
     //  -py : enable python mode (use python jinja2 for rendering expected output)

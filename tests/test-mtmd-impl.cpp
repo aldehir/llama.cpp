@@ -143,7 +143,9 @@ MAKE_TEST(test_temporal_merge_grouping) {
 
 int main(int argc, char ** argv) {
     testing t(std::cout);
-    t.verbose = true;
+    t.verbose        = true;
+    t.capture_output = true;
+    t.apply_env();
 
     // usage: test-mtmd-impl [filter_regex]
     for (int i = 1; i < argc; i++) {

@@ -30,10 +30,8 @@ int main(int argc, char * argv[]) {
         t.set_filter(argv[1]);
     }
 
-    const char * verbose = getenv("LLAMA_TEST_VERBOSE");
-    if (verbose) {
-        t.verbose = std::string(verbose) == "1";
-    }
+    t.capture_output = true;
+    t.apply_env();
 
     t.test("native", test_example_native);
     t.test("qwen3 coder", test_example_qwen3_coder);

@@ -8,38 +8,17 @@
 #include "download.h"
 #include "http.h"
 #include "log.h"
+#include "testing.h"
 
 #include "json.h"
 
 #include <algorithm>
 #include <cstdio>
-#include <cstdlib>
 #include <filesystem>
 #include <map>
 #include <thread>
 #include <string>
 #include <vector>
-
-// the case and reordering being checked, printed with every failure
-static std::string g_context;
-
-// independent of NDEBUG, so the checks stay alive in Release builds
-#define REQUIRE(x) do {                                                         \
-    if (!(x)) {                                                                 \
-        fprintf(stderr, "%s:%d: [%s] REQUIRE(%s) failed\n",                     \
-                __FILE__, __LINE__, g_context.c_str(), #x);                     \
-        std::abort();                                                           \
-    }                                                                           \
-} while (0)
-
-#define REQUIRE_EQ(actual, expected) do {                                       \
-    if (!((actual) == (expected))) {                                            \
-        fprintf(stderr, "%s:%d: [%s] REQUIRE_EQ(%s, %s) failed\n  actual:   '%s'\n  expected: '%s'\n", \
-                __FILE__, __LINE__, g_context.c_str(), #actual, #expected,      \
-                std::string(actual).c_str(), std::string(expected).c_str());    \
-        std::abort();                                                           \
-    }                                                                           \
-} while (0)
 
 //
 // synthetic repos keyed by repo id, served over the loopback by a real
@@ -92,6 +71,14 @@ static std::filesystem::path cache_dir;
 static std::string cached(std::string repo_id, const std::string & path) {
     string_replace_all(repo_id, "/", "--");
     return (cache_dir / ("models--" + repo_id) / "snapshots" / COMMIT / path).string();
+}
+
+static std::string join(const std::vector<std::string> & items) {
+    std::string res;
+    for (const auto & item : items) {
+        res += res.empty() ? item : ", " + item;
+    }
+    return res;
 }
 
 //
@@ -285,7 +272,8 @@ static const plan_case plan_cases[] = {
      "", "", "", "", "dspark-model-BF16.gguf"},
 };
 
-static void check_plan(const plan_case & c) {
+// ctx names the reordering being checked, printed with every failure
+static void check_plan(testing & t, const plan_case & c, const std::string & ctx) {
     common_download_opts opts;
     opts.download_mmproj = c.sidecars;
     opts.download_mtp    = c.sidecars;
@@ -295,12 +283,12 @@ static void check_plan(const plan_case & c) {
 
     auto plan = common_download_get_hf_plan(model_ref(c.hf_repo, c.hf_file), opts);
 
-    REQUIRE_EQ(plan.primary.path, c.primary);
-    REQUIRE_EQ(plan.mmproj.path,  c.mmproj);
-    REQUIRE_EQ(plan.mtp.path,     c.mtp);
-    REQUIRE_EQ(plan.dflash.path,  c.dflash);
-    REQUIRE_EQ(plan.eagle3.path,  c.eagle3);
-    REQUIRE_EQ(plan.dspark.path,  c.dspark);
+    t.assert_equal(ctx + " primary", std::string(c.primary), plan.primary.path);
+    t.assert_equal(ctx + " mmproj",  std::string(c.mmproj),  plan.mmproj.path);
+    t.assert_equal(ctx + " mtp",     std::string(c.mtp),     plan.mtp.path);
+    t.assert_equal(ctx + " dflash",  std::string(c.dflash),  plan.dflash.path);
+    t.assert_equal(ctx + " eagle3",  std::string(c.eagle3),  plan.eagle3.path);
+    t.assert_equal(ctx + " dspark",  std::string(c.dspark),  plan.dspark.path);
 
     // exact shard set, order insensitive; the primary must be the first split
     std::vector<std::string> actual;
@@ -310,31 +298,29 @@ static void check_plan(const plan_case & c) {
     std::sort(actual.begin(), actual.end());
     auto expected = c.model_files;
     std::sort(expected.begin(), expected.end());
-    REQUIRE(actual == expected);
+    t.assert_equal(ctx + " model_files", join(expected), join(actual));
     if (!expected.empty()) {
-        REQUIRE(plan.primary.path == expected.front());
+        t.assert_equal(ctx + " primary is the first split", expected.front(), plan.primary.path);
     }
 }
 
-static void test_plan_resolution() {
-    printf("test-model-resolution: plan resolution on %zu cases\n", sizeof(plan_cases) / sizeof(plan_cases[0]));
-
+static void test_plan_resolution(testing & t) {
     for (const auto & c : plan_cases) {
-        printf("  %s\n", c.name);
-        // invariant: the resolution is insensitive to the listing order
-        for (size_t rot = 0; rot < c.files.size(); ++rot) {
-            if (c.order_dependent && rot > 0) {
-                continue;
+        t.test(c.name, [&](testing & t) {
+            // invariant: the resolution is insensitive to the listing order
+            for (size_t rot = 0; rot < c.files.size(); ++rot) {
+                if (c.order_dependent && rot > 0) {
+                    continue;
+                }
+                auto files = c.files;
+                std::rotate(files.begin(), files.begin() + rot, files.end());
+                if (rot % 2 == 1) {
+                    std::reverse(files.begin(), files.end());
+                }
+                g_repos["test/repo"] = files;
+                check_plan(t, c, "reordering " + std::to_string(rot));
             }
-            g_context = std::string(c.name) + ", reordering " + std::to_string(rot);
-            auto files = c.files;
-            std::rotate(files.begin(), files.begin() + rot, files.end());
-            if (rot % 2 == 1) {
-                std::reverse(files.begin(), files.end());
-            }
-            g_repos["test/repo"] = files;
-            check_plan(c);
-        }
+        });
     }
     g_repos.clear();
 }
@@ -344,26 +330,25 @@ static void test_plan_resolution() {
 // loopback, downloads skipped by flipping offline before apply
 //
 
-static void assemble(std::vector<std::string> argv, common_params & params) {
+static bool assemble(testing & t, std::vector<std::string> argv, common_params & params) {
     std::vector<char *> cargv;
-    g_context.clear();
     for (auto & a : argv) {
-        g_context += g_context.empty() ? a : " " + a;
         cargv.push_back(a.data());
     }
     bool ok = common_params_parse((int) cargv.size(), cargv.data(), params, LLAMA_EXAMPLE_SERVER);
-    REQUIRE(ok);
+    if (!t.assert_true(join(argv) + " parses", ok)) {
+        return false;
+    }
 
     auto handler = common_models_handler_init(params, LLAMA_EXAMPLE_SERVER);
 
     // skip the network execution, on_done still wires the params
     params.offline = true;
     common_models_handler_apply(handler, params);
+    return true;
 }
 
-static void test_task_assembly() {
-    printf("test-model-resolution: end-to-end assembly\n");
-
+static void test_task_assembly(testing & t) {
     g_repos["test/main"]   = flat;
     g_repos["test/hole"]   = hole;
     g_repos["test/quad"]   = quad;
@@ -374,108 +359,139 @@ static void test_task_assembly() {
     g_repos["test/small"]  = {"draft-model-Q4_K_M.gguf"};
     g_repos["test/preset"] = {"preset.ini", "model-Q8_0.gguf"};
 
-    {
+    t.test("plain -hf", [](testing & t) {
         // plain -hf wires the model and its mmproj, nothing speculative
         common_params params;
-        assemble({"server", "-hf", "test/main:Q8_0"}, params);
-        REQUIRE_EQ(params.model.path,  cached("test/main", "model-Q8_0.gguf"));
-        REQUIRE_EQ(params.mmproj.path, cached("test/main", "mmproj-model-Q8_0.gguf"));
-        REQUIRE(params.speculative.draft.mparams.path.empty());
-    }
-    {
+        if (!assemble(t, {"server", "-hf", "test/main:Q8_0"}, params)) {
+            return;
+        }
+        t.assert_equal("model.path",  cached("test/main", "model-Q8_0.gguf"),        params.model.path);
+        t.assert_equal("mmproj.path", cached("test/main", "mmproj-model-Q8_0.gguf"), params.mmproj.path);
+        t.assert_true("no draft model, got " + params.speculative.draft.mparams.path, params.speculative.draft.mparams.path.empty());
+    });
+    t.test("--no-mmproj", [](testing & t) {
         // --no-mmproj disables the mmproj discovery
         common_params params;
-        assemble({"server", "-hf", "test/main:Q8_0", "--no-mmproj"}, params);
-        REQUIRE(params.mmproj.path.empty());
-    }
-    {
+        if (!assemble(t, {"server", "-hf", "test/main:Q8_0", "--no-mmproj"}, params)) {
+            return;
+        }
+        t.assert_true("no mmproj, got " + params.mmproj.path, params.mmproj.path.empty());
+    });
+    t.test("explicit --mmproj", [](testing & t) {
         // an explicit --mmproj wins over the discovery
         common_params params;
-        assemble({"server", "-hf", "test/main:Q8_0", "--mmproj", "/local/mmproj.gguf"}, params);
-        REQUIRE(params.mmproj.path == "/local/mmproj.gguf");
-    }
-    {
+        if (!assemble(t, {"server", "-hf", "test/main:Q8_0", "--mmproj", "/local/mmproj.gguf"}, params)) {
+            return;
+        }
+        t.assert_equal("mmproj.path", "/local/mmproj.gguf", params.mmproj.path);
+    });
+    t.test("-hf with spec type", [](testing & t) {
         // -hf with a spec type wires the sidecar of the main repo as fallback draft
         common_params params;
-        assemble({"server", "-hf", "test/main:Q8_0", "--spec-type", "draft-mtp"}, params);
-        REQUIRE_EQ(params.speculative.draft.mparams.path, cached("test/main", "mtp-model-Q8_0.gguf"));
-    }
-    {
+        if (!assemble(t, {"server", "-hf", "test/main:Q8_0", "--spec-type", "draft-mtp"}, params)) {
+            return;
+        }
+        t.assert_equal("draft path", cached("test/main", "mtp-model-Q8_0.gguf"), params.speculative.draft.mparams.path);
+    });
+    t.test("-hfd with spec type", [](testing & t) {
         // -hfd with a spec type wires the draft repo sidecar at its tag,
         // not its full model, and suppresses the main repo fallback
         common_params params;
-        assemble({"server", "-hf", "test/hole:Q8_0", "-hfd", "test/hole:Q4_0", "--spec-type", "draft-mtp"}, params);
-        REQUIRE_EQ(params.speculative.draft.mparams.path, cached("test/hole", "mtp-model-Q4_0.gguf"));
-    }
-    {
+        if (!assemble(t, {"server", "-hf", "test/hole:Q8_0", "-hfd", "test/hole:Q4_0", "--spec-type", "draft-mtp"}, params)) {
+            return;
+        }
+        t.assert_equal("draft path", cached("test/hole", "mtp-model-Q4_0.gguf"), params.speculative.draft.mparams.path);
+    });
+    t.test("explicit -md", [](testing & t) {
         // an explicit -md file wins over the sidecar resolution
         common_params params;
-        assemble({"server", "-hf", "test/main:Q8_0", "-hfd", "test/main", "-md", "mtp-model-BF16.gguf", "--spec-type", "draft-mtp"}, params);
-        REQUIRE_EQ(params.speculative.draft.mparams.path, cached("test/main", "mtp-model-BF16.gguf"));
-    }
-    {
+        if (!assemble(t, {"server", "-hf", "test/main:Q8_0", "-hfd", "test/main", "-md", "mtp-model-BF16.gguf", "--spec-type", "draft-mtp"}, params)) {
+            return;
+        }
+        t.assert_equal("draft path", cached("test/main", "mtp-model-BF16.gguf"), params.speculative.draft.mparams.path);
+    });
+    t.test("-hfd auto-select mtp", [](testing & t) {
         // -hfd without a spec type auto-selects the type, mtp first when all ship
         common_params params;
-        assemble({"server", "-hf", "test/main:Q8_0", "-hfd", "test/quad:Q8_0"}, params);
-        REQUIRE(params.speculative.types == std::vector<enum common_speculative_type>{COMMON_SPECULATIVE_TYPE_DRAFT_MTP});
-        REQUIRE_EQ(params.speculative.draft.mparams.path, cached("test/quad", "mtp-model-Q8_0.gguf"));
-    }
-    {
+        if (!assemble(t, {"server", "-hf", "test/main:Q8_0", "-hfd", "test/quad:Q8_0"}, params)) {
+            return;
+        }
+        t.assert_true("speculative.types is draft-mtp", params.speculative.types == std::vector<enum common_speculative_type>{COMMON_SPECULATIVE_TYPE_DRAFT_MTP});
+        t.assert_equal("draft path", cached("test/quad", "mtp-model-Q8_0.gguf"), params.speculative.draft.mparams.path);
+    });
+    t.test("-hfd auto-select dflash", [](testing & t) {
         // auto-selection with only a dflash sidecar
         common_params params;
-        assemble({"server", "-hf", "test/main:Q8_0", "-hfd", "test/dflash:Q8_0"}, params);
-        REQUIRE(params.speculative.types == std::vector<enum common_speculative_type>{COMMON_SPECULATIVE_TYPE_DRAFT_DFLASH});
-        REQUIRE_EQ(params.speculative.draft.mparams.path, cached("test/dflash", "dflash-model-Q8_0.gguf"));
-    }
-    {
+        if (!assemble(t, {"server", "-hf", "test/main:Q8_0", "-hfd", "test/dflash:Q8_0"}, params)) {
+            return;
+        }
+        t.assert_true("speculative.types is draft-dflash", params.speculative.types == std::vector<enum common_speculative_type>{COMMON_SPECULATIVE_TYPE_DRAFT_DFLASH});
+        t.assert_equal("draft path", cached("test/dflash", "dflash-model-Q8_0.gguf"), params.speculative.draft.mparams.path);
+    });
+    t.test("-hfd auto-select eagle3", [](testing & t) {
         // auto-selection with only an eagle3 sidecar
         common_params params;
-        assemble({"server", "-hf", "test/main:Q8_0", "-hfd", "test/eagle3:Q8_0"}, params);
-        REQUIRE(params.speculative.types == std::vector<enum common_speculative_type>{COMMON_SPECULATIVE_TYPE_DRAFT_EAGLE3});
-        REQUIRE_EQ(params.speculative.draft.mparams.path, cached("test/eagle3", "eagle3-model-Q8_0.gguf"));
-    }
-    {
+        if (!assemble(t, {"server", "-hf", "test/main:Q8_0", "-hfd", "test/eagle3:Q8_0"}, params)) {
+            return;
+        }
+        t.assert_true("speculative.types is draft-eagle3", params.speculative.types == std::vector<enum common_speculative_type>{COMMON_SPECULATIVE_TYPE_DRAFT_EAGLE3});
+        t.assert_equal("draft path", cached("test/eagle3", "eagle3-model-Q8_0.gguf"), params.speculative.draft.mparams.path);
+    });
+    t.test("-hfd auto-select dspark over dflash", [](testing & t) {
         // auto-selection prefers dspark over dflash when both ship
         common_params params;
-        assemble({"server", "-hf", "test/main:Q8_0", "-hfd", "test/pair:Q8_0"}, params);
-        REQUIRE(params.speculative.types == std::vector<enum common_speculative_type>{COMMON_SPECULATIVE_TYPE_DRAFT_DSPARK});
-        REQUIRE_EQ(params.speculative.draft.mparams.path, cached("test/pair", "dspark-model-Q8_0.gguf"));
-    }
-    {
+        if (!assemble(t, {"server", "-hf", "test/main:Q8_0", "-hfd", "test/pair:Q8_0"}, params)) {
+            return;
+        }
+        t.assert_true("speculative.types is draft-dspark", params.speculative.types == std::vector<enum common_speculative_type>{COMMON_SPECULATIVE_TYPE_DRAFT_DSPARK});
+        t.assert_equal("draft path", cached("test/pair", "dspark-model-Q8_0.gguf"), params.speculative.draft.mparams.path);
+    });
+    t.test("-hf with dspark spec type", [](testing & t) {
         // -hf with the dspark spec type wires the sidecar of the main repo,
         // anchored on the only full quant
         common_params params;
-        assemble({"server", "-hf", "test/spark", "--spec-type", "draft-dspark"}, params);
-        REQUIRE_EQ(params.model.path, cached("test/spark", "model-MXFP4.gguf"));
-        REQUIRE_EQ(params.speculative.draft.mparams.path, cached("test/spark", "dspark-model-MXFP4.gguf"));
-    }
-    {
+        if (!assemble(t, {"server", "-hf", "test/spark", "--spec-type", "draft-dspark"}, params)) {
+            return;
+        }
+        t.assert_equal("model.path", cached("test/spark", "model-MXFP4.gguf"), params.model.path);
+        t.assert_equal("draft path", cached("test/spark", "dspark-model-MXFP4.gguf"), params.speculative.draft.mparams.path);
+    });
+    t.test("-hfd without sidecars", [](testing & t) {
         // -hfd on a repo without sidecars keeps resolving a full model as draft
         common_params params;
-        assemble({"server", "-hf", "test/main:Q8_0", "-hfd", "test/small"}, params);
-        REQUIRE(params.speculative.types == std::vector<enum common_speculative_type>{COMMON_SPECULATIVE_TYPE_NONE});
-        REQUIRE_EQ(params.speculative.draft.mparams.path, cached("test/small", "draft-model-Q4_K_M.gguf"));
-    }
-    {
+        if (!assemble(t, {"server", "-hf", "test/main:Q8_0", "-hfd", "test/small"}, params)) {
+            return;
+        }
+        t.assert_true("speculative.types is none", params.speculative.types == std::vector<enum common_speculative_type>{COMMON_SPECULATIVE_TYPE_NONE});
+        t.assert_equal("draft path", cached("test/small", "draft-model-Q4_K_M.gguf"), params.speculative.draft.mparams.path);
+    });
+    t.test("preset repo", [](testing & t) {
         // a preset repo wires the preset and clears the model for router mode
         common_params params;
-        assemble({"server", "-hf", "test/preset"}, params);
-        REQUIRE_EQ(params.models_preset, cached("test/preset", "preset.ini"));
-        REQUIRE(params.model.path.empty());
-        REQUIRE(params.model.hf_repo.empty());
-    }
+        if (!assemble(t, {"server", "-hf", "test/preset"}, params)) {
+            return;
+        }
+        t.assert_equal("models_preset", cached("test/preset", "preset.ini"), params.models_preset);
+        t.assert_true("no model path, got " + params.model.path, params.model.path.empty());
+        t.assert_true("no hf_repo, got " + params.model.hf_repo, params.model.hf_repo.empty());
+    });
 
     g_repos.clear();
 }
 
-int main(void) {
+int main(int argc, char ** argv) {
     // unbuffered, so a crash cannot swallow the reports already printed
     setvbuf(stdout, nullptr, _IONBF, 0);
     setvbuf(stderr, nullptr, _IONBF, 0);
 
+    testing t;
     // the negative cases legitimately log errors on every reordering,
-    // keep the output down to the reports
-    common_log_pause(common_log_main());
+    // the capture only shows them for a case that fails
+    t.capture_output = true;
+    t.apply_env();
+    if (argc > 1) {
+        t.set_filter(argv[1]);
+    }
 
     // the loopback endpoint also keeps the client init from rejecting
     // https on the builds without TLS support
@@ -494,13 +510,12 @@ int main(void) {
     server.wait_until_ready();
     common_set_env("MODEL_ENDPOINT", "http://127.0.0.1:" + std::to_string(port) + "/");
 
-    test_plan_resolution();
-    test_task_assembly();
+    t.test("plan resolution", test_plan_resolution);
+    t.test("assembly", test_task_assembly);
 
     server.stop();
     server_thread.join();
 
     std::filesystem::remove_all(cache_dir);
-    printf("test-model-resolution: all tests OK\n");
-    return 0;
+    return t.summary();
 }

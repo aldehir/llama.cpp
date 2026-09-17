@@ -1,15 +1,13 @@
-#ifdef NDEBUG
-#undef NDEBUG
-#endif
-
 #include "json-schema-to-grammar.h"
 
 #include "../src/unicode.h"
 #include "../src/llama-grammar.h"
 
 #include "json.h"
+#include "testing.h"
 
-#include <cassert>
+#include <cstdio>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -32,6 +30,7 @@ static bool test_build_grammar_fails(const std::string & grammar_str) {
     } else {
         grammar_fails = true;
         fprintf(stdout, "  ✅︎\n");
+        fflush(stdout);
     }
     return grammar_fails;
 }
@@ -113,11 +112,14 @@ static bool match_string(const std::string & input, llama_grammar * grammar) {
     return false;
 }
 
-static void test(const std::string & test_desc, const std::string & grammar_str, const std::vector<std::string> & passing_strings, const std::vector<std::string> & failing_strings) {
+static void test(testing & t, const std::string & test_desc, const std::string & grammar_str, const std::vector<std::string> & passing_strings, const std::vector<std::string> & failing_strings) {
     fprintf(stderr, "⚫ Testing %s\n%s\n", test_desc.c_str(), grammar_str.c_str());
     fflush(stderr);
 
     auto * grammar = build_grammar(grammar_str);
+    if (!t.assert_true("grammar builds", grammar != nullptr)) {
+        return;
+    }
 
     // Save the original grammar stacks so that we can reset after every new string we want to test
     const llama_grammar_stacks stacks_org = llama_grammar_get_stacks(grammar); // copy
@@ -154,9 +156,10 @@ static void test(const std::string & test_desc, const std::string & grammar_str,
             fprintf(stderr, "\n NOTE: Debug grammar file generated. To analyze this failure in detail, run the following command:     ./llama-gbnf-validator test-grammar-integration.grammar.gbnf test-grammar-integration.string.txt\n\n");
         } else {
             fprintf(stdout, "✅︎\n");
+            fflush(stdout);
         }
 
-        assert(matched);
+        t.assert_true("matches \"" + test_string + "\"", matched);
 
         // Reset the grammar stacks
         stacks_cur = stacks_org;
@@ -175,8 +178,9 @@ static void test(const std::string & test_desc, const std::string & grammar_str,
             fprintf(stderr, "❌ (incorrectly matched)\n");
         } else {
             fprintf(stdout, "✅︎\n");
+            fflush(stdout);
         }
-        assert(!matched);
+        t.assert_true("rejects \"" + test_string + "\"", !matched);
 
         // Reset the grammar stacks
         stacks_cur = stacks_org;
@@ -185,15 +189,19 @@ static void test(const std::string & test_desc, const std::string & grammar_str,
     // Clean up allocated memory
     llama_grammar_free_impl(grammar);
 }
-static void test_grammar(const std::string & test_desc, const std::string & grammar_str, const std::vector<std::string> & passing_strings, const std::vector<std::string> & failing_strings) {
-    test(test_desc + ". Grammar: " + grammar_str, grammar_str, passing_strings, failing_strings);
+static void test_grammar(testing & t, const std::string & test_desc, const std::string & grammar_str, const std::vector<std::string> & passing_strings, const std::vector<std::string> & failing_strings) {
+    t.test(test_desc, [&](testing & t) {
+        test(t, test_desc + ". Grammar: " + grammar_str, grammar_str, passing_strings, failing_strings);
+    });
 }
-static void test_schema(const std::string & test_desc, const std::string & schema_str, const std::vector<std::string> & passing_strings, const std::vector<std::string> & failing_strings) {
-    test(test_desc + ". Schema: " + schema_str, json_schema_to_grammar(json::parse(schema_str), true), passing_strings, failing_strings);
+static void test_schema(testing & t, const std::string & test_desc, const std::string & schema_str, const std::vector<std::string> & passing_strings, const std::vector<std::string> & failing_strings) {
+    t.test(test_desc, [&](testing & t) {
+        test(t, test_desc + ". Schema: " + schema_str, json_schema_to_grammar(json::parse(schema_str), true), passing_strings, failing_strings);
+    });
 }
 
-static void test_simple_grammar() {
-    test_schema(
+static void test_simple_grammar(testing & t) {
+    test_schema(t,
         "min 0",
         R"""({
             "type": "integer",
@@ -218,7 +226,7 @@ static void test_simple_grammar() {
             "-0",
         }
     );
-    test_schema(
+    test_schema(t,
         "min 2",
         // Schema
         R"""({
@@ -247,7 +255,7 @@ static void test_simple_grammar() {
             "12345678900000000",
         }
     );
-    test_schema(
+    test_schema(t,
         "min 456",
         R"""({
             "type": "integer",
@@ -271,7 +279,7 @@ static void test_simple_grammar() {
             "-456",
         }
     );
-    test_schema(
+    test_schema(t,
         "min -123",
         R"""({
             "type": "integer",
@@ -296,7 +304,7 @@ static void test_simple_grammar() {
         }
     );
 
-    test_schema(
+    test_schema(t,
         "max 9999",
         // Schema
         R"""({
@@ -315,7 +323,7 @@ static void test_simple_grammar() {
             "99991",
         }
     );
-    test_schema(
+    test_schema(t,
         "max -9999",
         // Schema
         R"""({
@@ -334,7 +342,7 @@ static void test_simple_grammar() {
             "9999",
         }
     );
-    test_schema(
+    test_schema(t,
         "min 5 max 30",
         // Schema
         R"""({
@@ -358,7 +366,7 @@ static void test_simple_grammar() {
             "0123",
         }
     );
-    test_schema(
+    test_schema(t,
         "min 1 max 900719925474091",
         // Schema
         R"""({
@@ -382,7 +390,7 @@ static void test_simple_grammar() {
             "9007199254740910",
         }
     );
-    test_schema(
+    test_schema(t,
         "min -1 max 1",
         R"""({
             "type": "integer",
@@ -405,7 +413,7 @@ static void test_simple_grammar() {
             "11",
         }
     );
-    test_schema(
+    test_schema(t,
         "min -123 max 42",
         R"""({
             "type": "integer",
@@ -439,7 +447,7 @@ static void test_simple_grammar() {
             "0123",
         }
     );
-    test_schema(
+    test_schema(t,
         "exclusive min / max",
         // Schema
         R"""({
@@ -462,7 +470,7 @@ static void test_simple_grammar() {
     );
 
     // Test case for a simple grammar
-    test_grammar(
+    test_grammar(t,
         "simple grammar",
         R"""(
             root ::= expr
@@ -485,7 +493,7 @@ static void test_simple_grammar() {
     );
 
     // Test case for a simple grammar with tokens
-    test_grammar(
+    test_grammar(t,
         "simple grammar with tokens",
         R"""(
             root ::= <[10]> content <[11]>
@@ -509,9 +517,9 @@ static void test_simple_grammar() {
     );
 }
 
-static void test_complex_grammar() {
+static void test_complex_grammar(testing & t) {
     // Test case for a more complex grammar, with both failure strings and success strings
-    test_grammar(
+    test_grammar(t,
         "medium complexity grammar",
         // Grammar
         R"""(
@@ -570,7 +578,7 @@ static void test_complex_grammar() {
     );
 
     // Test case for a more complex grammar with tokens
-    test_grammar(
+    test_grammar(t,
         "complex grammar with tokens",
         R"""(
             root ::= reasoning+ content tool-call*
@@ -598,9 +606,9 @@ static void test_complex_grammar() {
     );
 }
 
-static void test_special_chars() {
+static void test_special_chars(testing & t) {
     // A collection of tests to exercise special characters such as "."
-    test_grammar(
+    test_grammar(t,
         "special characters",
         // Grammar
         R"""(
@@ -625,10 +633,10 @@ static void test_special_chars() {
     );
 }
 
-static void test_quantifiers() {
+static void test_quantifiers(testing & t) {
     // A collection of tests to exercise * + and ? quantifiers
 
-    test_grammar(
+    test_grammar(t,
         "* quantifier",
         // Grammar
         R"""(root ::= "a"*)""",
@@ -649,7 +657,7 @@ static void test_quantifiers() {
             "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaab"
         }
     );
-    test_grammar(
+    test_grammar(t,
         "+ quantifier",
         // Grammar
         R"""(root ::= "a"+)""",
@@ -670,7 +678,7 @@ static void test_quantifiers() {
             "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaab"
         }
     );
-    test_grammar(
+    test_grammar(t,
         "? quantifier",
         // Grammar
         R"""(root ::= "a"?)""",
@@ -687,7 +695,7 @@ static void test_quantifiers() {
             "ba",
         }
     );
-    test_grammar(
+    test_grammar(t,
         "mixed quantifiers",
         // Grammar
         R"""(
@@ -712,7 +720,7 @@ static void test_quantifiers() {
             "catyyy",
         }
     );
-    test_grammar(
+    test_grammar(t,
         "simple exact repetition",
         // Grammar
         R"""(
@@ -731,7 +739,7 @@ static void test_quantifiers() {
             "aaaaa",
         }
     );
-    test_grammar(
+    test_grammar(t,
         "simple min repetition",
         // Grammar
         R"""(
@@ -750,7 +758,7 @@ static void test_quantifiers() {
             "aba",
         }
     );
-    test_grammar(
+    test_grammar(t,
         "simple max repetition",
         // Grammar
         R"""(
@@ -769,7 +777,7 @@ static void test_quantifiers() {
             "aaaaa",
         }
     );
-    test_grammar(
+    test_grammar(t,
         "min / max repetition",
         // Grammar
         R"""(
@@ -788,7 +796,7 @@ static void test_quantifiers() {
             "0xFF 0x12 0xAB 0x00 0x00 0x00",
         }
     );
-    test_grammar(
+    test_grammar(t,
         "segfault",
         // Grammar
         R"""(
@@ -808,8 +816,7 @@ static void test_quantifiers() {
     );
 }
 
-static void test_failure_missing_root() {
-    fprintf(stderr, "⚫ Testing missing root node:\n");
+static void test_failure_missing_root(testing & t) {
     // Test case for a grammar that is missing a root rule
     const std::string grammar_str = R"""(
         rot ::= expr
@@ -821,16 +828,13 @@ static void test_failure_missing_root() {
     parsed_grammar.parse(grammar_str.c_str());
 
     // Ensure we parsed correctly
-    assert(!parsed_grammar.rules.empty());
+    t.assert_true("grammar without a root rule still parses", !parsed_grammar.rules.empty());
 
     // Ensure we do NOT have a root node
-    assert(parsed_grammar.symbol_ids.find("root") == parsed_grammar.symbol_ids.end());
-    fprintf(stderr, "  ✅︎ Passed\n");
+    t.assert_true("no root symbol is defined", parsed_grammar.symbol_ids.find("root") == parsed_grammar.symbol_ids.end());
 }
 
-static void test_failure_missing_reference() {
-    fprintf(stderr, "⚫ Testing missing reference node:\n");
-
+static void test_failure_missing_reference(testing & t) {
     // Test case for a grammar that is missing a referenced rule
     const std::string grammar_str =
         R"""(root ::= expr
@@ -844,80 +848,76 @@ static void test_failure_missing_reference() {
     parsed_grammar.parse(grammar_str.c_str());
 
     // Ensure we did NOT parsed correctly
-    assert(parsed_grammar.rules.empty());
+    t.assert_true("grammar with an undefined reference fails to parse", parsed_grammar.rules.empty());
 
     fprintf(stderr, "    End of expected error.\n");
-    fprintf(stderr, "  ✅︎ Passed\n");
 }
 
-static void test_failure_left_recursion() {
-    fprintf(stderr, "⚫ Testing left recursion detection:\n");
-
+static void test_failure_left_recursion(testing & t) {
     // Test simple left recursion detection
-    const std::string simple_str = R"""(root ::= "a" | root "a")""";
-    assert(test_build_grammar_fails(simple_str));
+    t.test("simple", [](testing & t) {
+        const std::string simple_str = R"""(root ::= "a" | root "a")""";
+        t.assert_true("left recursion is rejected: " + simple_str, test_build_grammar_fails(simple_str));
+    });
 
     // Test more complicated left recursion detection
-    const std::string medium_str = R"""(
-        root ::= asdf
-        asdf ::= "a" | asdf "a"
-        )""";
-    assert(test_build_grammar_fails(medium_str));
+    t.test("medium", [](testing & t) {
+        const std::string medium_str = R"""(
+            root ::= asdf
+            asdf ::= "a" | asdf "a"
+            )""";
+        t.assert_true("left recursion is rejected: " + medium_str, test_build_grammar_fails(medium_str));
+    });
 
     // Test even more complicated left recursion detection
-    const std::string hard_str = R"""(
-        root ::= asdf
-        asdf ::= "a" | foo "b"
-        foo ::= "c" | asdf "d" | "e")""";
-    assert(test_build_grammar_fails(hard_str));
+    t.test("hard", [](testing & t) {
+        const std::string hard_str = R"""(
+            root ::= asdf
+            asdf ::= "a" | foo "b"
+            foo ::= "c" | asdf "d" | "e")""";
+        t.assert_true("left recursion is rejected: " + hard_str, test_build_grammar_fails(hard_str));
+    });
 
     // Test yet even more complicated left recursion detection
-    const std::string hardest_str = R"""(
-        root ::= asdf
-        asdf ::= "a" | foo "b"
-        foo ::= "c" | empty asdf "d" | "e"
-        empty ::= "blah" | )""";
-    assert(test_build_grammar_fails(hardest_str));
-
-    fprintf(stderr, "  ✅︎ Passed\n");
+    t.test("hardest", [](testing & t) {
+        const std::string hardest_str = R"""(
+            root ::= asdf
+            asdf ::= "a" | foo "b"
+            foo ::= "c" | empty asdf "d" | "e"
+            empty ::= "blah" | )""";
+        t.assert_true("left recursion is rejected: " + hardest_str, test_build_grammar_fails(hardest_str));
+    });
 }
 
-static void test_failure_missing_root_symbol() {
-    fprintf(stderr, "⚫ Testing missing root symbol:\n");
-
+static void test_failure_missing_root_symbol(testing & t) {
     const std::string grammar_str = R"""(
         root ::= "foobar"
     )""";
 
     llama_grammar * failure_result = build_grammar_with_root(grammar_str, "nonexistent");
-    assert(failure_result == nullptr);
-
-    fprintf(stderr, "  ✅︎ Passed\n");
+    t.assert_true("building with an undefined root symbol fails", failure_result == nullptr);
 }
 
-static void test_custom_root_symbol_check() {
-    fprintf(stderr, "⚫ Testing custom root symbol check:\n");
-
+static void test_custom_root_symbol_check(testing & t) {
     const std::string custom_root_grammar_str = R"""(
         foobar ::= "foobar"
     )""";
 
     llama_grammar * failure_result = build_grammar_with_root(custom_root_grammar_str, "root");
-    assert(failure_result == nullptr);
+    t.assert_true("building with the default root fails when only foobar is defined", failure_result == nullptr);
 
     llama_grammar * success_result = build_grammar_with_root(custom_root_grammar_str, "foobar");
-    assert(success_result != nullptr);
-    llama_grammar_free_impl(success_result);
-
-    fprintf(stderr, "  ✅︎ Passed\n");
+    if (t.assert_true("building with root symbol foobar succeeds", success_result != nullptr)) {
+        llama_grammar_free_impl(success_result);
+    }
 }
 
-static void test_json_schema() {
+static void test_json_schema(testing & t) {
     // Note that this is similar to the regular grammar tests,
     //  but we convert each json schema to a grammar before parsing.
     // Otherwise, this test structure is the same.
 
-    test_schema(
+    test_schema(t,
         "empty schema (any value)",
         // Schema
         R"""(
@@ -940,7 +940,7 @@ static void test_json_schema() {
         }
     );
 
-    test_schema(
+    test_schema(t,
         "exotic formats (list)",
         // Schema
         R"""({
@@ -966,7 +966,7 @@ static void test_json_schema() {
         }
     );
 
-    test_schema(
+    test_schema(t,
         "string",
         // Schema
         R"""({
@@ -985,7 +985,7 @@ static void test_json_schema() {
         }
     );
 
-    test_schema(
+    test_schema(t,
         "string w/ min length 1",
         // Schema
         R"""({
@@ -1005,7 +1005,7 @@ static void test_json_schema() {
         }
     );
 
-    test_schema(
+    test_schema(t,
         "string w/ min length 3",
         // Schema
         R"""({
@@ -1026,7 +1026,7 @@ static void test_json_schema() {
         }
     );
 
-    test_schema(
+    test_schema(t,
         "string w/ max length",
         // Schema
         R"""({
@@ -1047,7 +1047,7 @@ static void test_json_schema() {
         }
     );
 
-    test_schema(
+    test_schema(t,
         "string w/ min & max length",
         // Schema
         R"""({
@@ -1070,7 +1070,7 @@ static void test_json_schema() {
         }
     );
 
-    test_schema(
+    test_schema(t,
         "boolean",
         // Schema
         R"""({
@@ -1090,7 +1090,7 @@ static void test_json_schema() {
         }
     );
 
-    test_schema(
+    test_schema(t,
         "integer",
         // Schema
         R"""({
@@ -1111,7 +1111,7 @@ static void test_json_schema() {
         }
     );
 
-    test_schema(
+    test_schema(t,
         "string const",
         // Schema
         R"""({
@@ -1128,7 +1128,7 @@ static void test_json_schema() {
         }
     );
 
-    test_schema(
+    test_schema(t,
         "non-string const",
         // Schema
         R"""({
@@ -1146,7 +1146,7 @@ static void test_json_schema() {
         }
     );
 
-    test_schema(
+    test_schema(t,
         "non-string const",
         // Schema
         R"""({
@@ -1168,7 +1168,7 @@ static void test_json_schema() {
         }
     );
 
-    test_schema(
+    test_schema(t,
         "simple pattern",
         // Schema
         R"""({
@@ -1186,7 +1186,7 @@ static void test_json_schema() {
         }
     );
 
-    test_schema(
+    test_schema(t,
         "pattern with escapes",
         // Schema
         R"""({
@@ -1202,8 +1202,8 @@ static void test_json_schema() {
         }
     );
 
-    test_schema(
-        "",
+    test_schema(t,
+        "nullable array",
         // Schema
         R"""(
             {
@@ -1227,7 +1227,7 @@ static void test_json_schema() {
         }
     );
 
-    test_schema(
+    test_schema(t,
         "min+max items",
         // Schema
         R"""({
@@ -1252,7 +1252,7 @@ static void test_json_schema() {
     );
 
     // Properties (from: https://json-schema.org/understanding-json-schema/reference/object#properties)
-    test_schema(
+    test_schema(t,
         "object properties",
         // Schema
         R"""({
@@ -1287,7 +1287,7 @@ static void test_json_schema() {
         }
     );
 
-    test_schema(
+    test_schema(t,
         "additional properties can't override other properties",
         R"""({
             "properties": {
@@ -1312,7 +1312,7 @@ static void test_json_schema() {
     );
 
     // Properties (from: https://json-schema.org/understanding-json-schema/reference/object#properties)
-    test_schema(
+    test_schema(t,
         "object properties, additionalProperties: true",
         // Schema
         R"""({
@@ -1346,7 +1346,7 @@ static void test_json_schema() {
     );
 
     // Additional properties: false
-    test_schema(
+    test_schema(t,
         "required + optional props each in original order",
         // Schema
         R"""({
@@ -1376,7 +1376,7 @@ static void test_json_schema() {
         }
     );
 
-    test_schema(
+    test_schema(t,
         "required + optional props each in original order",
         // Schema
         R"""({
@@ -1405,7 +1405,7 @@ static void test_json_schema() {
     );
 
     // NOTE: Example from https://json-schema.org/learn/getting-started-step-by-step#define-required-properties
-    test_schema(
+    test_schema(t,
         "required props",
         // Schema
         R"""({
@@ -1478,18 +1478,24 @@ static void test_json_schema() {
     );
 }
 
-int main() {
-    fprintf(stdout, "Running grammar integration tests...\n");
-    test_simple_grammar();
-    test_complex_grammar();
-    test_special_chars();
-    test_quantifiers();
-    test_failure_missing_root();
-    test_failure_missing_reference();
-    test_failure_left_recursion();
-    test_failure_missing_root_symbol();
-    test_custom_root_symbol_check();
-    test_json_schema();
-    fprintf(stdout, "All tests passed.\n");
-    return 0;
+int main(int argc, char ** argv) {
+    testing t;
+    t.capture_output = true;
+    t.apply_env();
+    if (argc > 1) {
+        t.set_filter(argv[1]);
+    }
+
+    t.test("simple grammar",     test_simple_grammar);
+    t.test("complex grammar",    test_complex_grammar);
+    t.test("special chars",      test_special_chars);
+    t.test("quantifiers",        test_quantifiers);
+    t.test("missing root",       test_failure_missing_root);
+    t.test("missing reference",  test_failure_missing_reference);
+    t.test("left recursion",     test_failure_left_recursion);
+    t.test("missing root symbol", test_failure_missing_root_symbol);
+    t.test("custom root symbol", test_custom_root_symbol_check);
+    t.test("json schema",        test_json_schema);
+
+    return t.summary();
 }

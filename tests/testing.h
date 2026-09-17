@@ -44,6 +44,9 @@ struct testing {
     std::string full_name() const;
 
     void log(const std::string & msg);
+    // LLAMA_TEST_VERBOSE=1 turns on log(), LLAMA_TEST_CAPTURE=0 shows test output live, LLAMA_TEST_FILTER sets the filter
+    void apply_env();
+    // run only the tests whose dotted full name matches; a matched test runs its whole subtree
     void set_filter(const std::string & re);
     void skip(const std::string & reason = "");
 
@@ -105,7 +108,6 @@ private:
     testing(testing & p, const std::string & n);
 
     std::string next_unnamed(const char * prefix);
-    bool should_run(const std::string & full) const;
 
     void run_test(const std::string & test_name, const std::function<void(testing &)> & body);
     void run_bench(const std::string & test_name, const std::function<void()> & body, int iterations);
@@ -122,6 +124,7 @@ private:
 
     std::shared_ptr<testing_state> state;
 
+    bool        matched        = false;
     bool        skip_requested = false;
     std::string skip_reason;
 

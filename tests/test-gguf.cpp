@@ -2,6 +2,7 @@
 #include "ggml-backend.h"
 #include "../ggml/src/ggml-impl.h"
 #include "gguf.h"
+#include "testing.h"
 
 #include <algorithm>
 #include <array>
@@ -205,6 +206,14 @@ static size_t read_buffer_callback(void * userdata, void * output, uint64_t offs
     const size_t nread = std::min(len, reader.size - data_offset);
     memcpy(static_cast<uint8_t *>(output), reader.data + data_offset, nread);
     return nread;
+}
+
+static std::string shape_to_string(const int64_t * ne) {
+    std::string result = "[";
+    for (int j = 0; j < GGML_MAX_DIMS; ++j) {
+        result += (j == 0 ? "" : ", ") + std::to_string(ne[j]);
+    }
+    return result + "]";
 }
 
 static FILE * get_handcrafted_file(const unsigned int seed, const enum handcrafted_file_type hft, const int extra_bytes = 0) {
@@ -496,9 +505,9 @@ static FILE * get_handcrafted_file(const unsigned int seed, const enum handcraft
     return file;
 }
 
-static bool handcrafted_check_header(const gguf_context * gguf_ctx, const unsigned int seed, const bool has_kv, const bool has_tensors, const bool alignment_defined) {
-    if (!gguf_ctx) {
-        return false;
+static void handcrafted_check_header(testing & t, const gguf_context * gguf_ctx, const unsigned int seed, const bool has_kv, const bool has_tensors, const bool alignment_defined) {
+    if (!t.assert_true("context is not null", gguf_ctx != nullptr)) {
+        return;
     }
 
     std::mt19937 rng(seed);
@@ -512,24 +521,14 @@ static bool handcrafted_check_header(const gguf_context * gguf_ctx, const unsign
         kv_types = get_kv_types(rng);
     }
 
-    bool ok = true;
-
-    if (gguf_get_version(gguf_ctx) != GGUF_VERSION) {
-        ok = false;
-    }
-    if (gguf_get_n_tensors(gguf_ctx) != int(tensor_configs.size())) {
-        ok = false;
-    }
-    if (gguf_get_n_kv(gguf_ctx) != int(alignment_defined ? kv_types.size() + 1 : kv_types.size())) {
-        ok = false;
-    }
-
-    return ok;
+    t.assert_equal("version",   (uint32_t) GGUF_VERSION,                                                               gguf_get_version(gguf_ctx));
+    t.assert_equal("n_tensors", (int64_t) tensor_configs.size(),                                                        gguf_get_n_tensors(gguf_ctx));
+    t.assert_equal("n_kv",      (int64_t) (alignment_defined ? kv_types.size() + 1 : kv_types.size()),                  gguf_get_n_kv(gguf_ctx));
 }
 
-static bool handcrafted_check_kv(const gguf_context * gguf_ctx, const unsigned int seed, const bool has_tensors, const bool alignment_defined) {
-    if (!gguf_ctx) {
-        return false;
+static void handcrafted_check_kv(testing & t, const gguf_context * gguf_ctx, const unsigned int seed, const bool has_tensors, const bool alignment_defined) {
+    if (!t.assert_true("context is not null", gguf_ctx != nullptr)) {
+        return;
     }
 
     std::mt19937 rng(seed);
@@ -540,8 +539,6 @@ static bool handcrafted_check_kv(const gguf_context * gguf_ctx, const unsigned i
     }
 
     std::vector<std::pair<enum gguf_type, enum gguf_type>> kv_types = get_kv_types(rng);
-
-    bool ok = true;
 
     for (int i = 0; i < int(kv_types.size()); ++i) {
         const enum gguf_type type     = gguf_type(kv_types[i].first);
@@ -559,18 +556,18 @@ static bool handcrafted_check_kv(const gguf_context * gguf_ctx, const unsigned i
 
         const char * data8 = reinterpret_cast<const char *>(data);
         const int id = gguf_find_key(gguf_ctx, key.c_str());
+        if (!t.assert_true(key + " found", id >= 0)) {
+            continue;
+        }
 
         if (type == GGUF_TYPE_STRING) {
             const char * str = gguf_get_val_str(gguf_ctx, id);
             const uint64_t n = strlen(str);
             const uint64_t n_expected = rng() % sizeof(data);
-            if (n != n_expected) {
-                ok = false;
+            if (!t.assert_equal(key + " string length", n_expected, n)) {
                 continue;
             }
-            if (!std::equal(str, str + n, data8)) {
-                ok = false;
-            }
+            t.assert_true(key + " string content", std::equal(str, str + n, data8));
             continue;
         }
 
@@ -580,8 +577,7 @@ static bool handcrafted_check_kv(const gguf_context * gguf_ctx, const unsigned i
 
             if (type_arr == GGUF_TYPE_STRING) {
                 const uint64_t nstr_expected = rng() % (16 + 1);
-                if (arr_n != nstr_expected) {
-                    ok = false;
+                if (!t.assert_equal(key + " string array length", nstr_expected, arr_n)) {
                     continue;
                 }
                 for (uint64_t istr = 0; istr < nstr_expected; ++istr) {
@@ -589,67 +585,55 @@ static bool handcrafted_check_kv(const gguf_context * gguf_ctx, const unsigned i
                     const uint64_t n = strlen(str);
                     const uint64_t n_expected = rng() % (sizeof(uint32_t) + 1);
 
-                    if (n != n_expected) {
-                        ok = false;
+                    const std::string elem = key + "[" + std::to_string(istr) + "]";
+                    if (!t.assert_equal(elem + " string length", n_expected, n)) {
                         continue;
                     }
                     const char * str_expected = reinterpret_cast<const char *>(&data[istr]);
-                    if (strncmp(str, str_expected, n) != 0) {
-                        ok = false;
-                        continue;
-                    }
+                    t.assert_true(elem + " string content", strncmp(str, str_expected, n) == 0);
                 }
                 continue;
             }
 
             const uint64_t arr_n_expected = (rng() % sizeof(data)) / type_size;
-            if (arr_n != arr_n_expected) {
-                ok = false;
+            if (!t.assert_equal(key + " array length", arr_n_expected, arr_n)) {
                 continue;
             }
 
             const char * data_gguf = reinterpret_cast<const char *>(gguf_get_arr_data(gguf_ctx, id));
 
             if (type_arr == GGUF_TYPE_BOOL) {
+                bool same = true;
                 for (size_t arr_i = 0; arr_i < arr_n; ++arr_i) {
                     if (bool(data8[arr_i]) != bool(data_gguf[arr_i])) {
-                        ok = false;
+                        same = false;
                     }
                 }
+                t.assert_true(key + " bool array content", same);
                 continue;
             }
 
-            if (!std::equal(data8, data8 + arr_n*type_size, data_gguf)) {
-                ok = false;
-            }
+            t.assert_true(key + " array content", std::equal(data8, data8 + arr_n*type_size, data_gguf));
             continue;
         }
 
         const char * data_gguf = reinterpret_cast<const char *>(gguf_get_val_data(gguf_ctx, id));
 
         if (type == GGUF_TYPE_BOOL) {
-            if (bool(*data8) != bool(*data_gguf)) {
-                ok = false;
-            }
+            t.assert_equal(key + " bool value", bool(*data8), bool(*data_gguf));
             continue;
         }
 
-        if (!std::equal(data8, data8 + gguf_type_size(type), data_gguf)) {
-            ok = false;
-        }
+        t.assert_true(key + " value", std::equal(data8, data8 + gguf_type_size(type), data_gguf));
     }
 
     const uint32_t expected_alignment = alignment_defined ? 1 : GGUF_DEFAULT_ALIGNMENT;
-    if (gguf_get_alignment(gguf_ctx) != expected_alignment) {
-        ok = false;
-    }
-
-    return ok;
+    t.assert_equal("alignment", (size_t) expected_alignment, gguf_get_alignment(gguf_ctx));
 }
 
-static bool handcrafted_check_tensors(const gguf_context * gguf_ctx, const unsigned int seed) {
-    if (!gguf_ctx) {
-        return false;
+static void handcrafted_check_tensors(testing & t, const gguf_context * gguf_ctx, const unsigned int seed) {
+    if (!t.assert_true("context is not null", gguf_ctx != nullptr)) {
+        return;
     }
 
     std::mt19937 rng(seed);
@@ -658,8 +642,6 @@ static bool handcrafted_check_tensors(const gguf_context * gguf_ctx, const unsig
 
     // Call get_kv_types to get the same RNG state:
     get_kv_types(rng);
-
-    bool ok = true;
 
     const int id_alignment = gguf_find_key(gguf_ctx, GGUF_KEY_GENERAL_ALIGNMENT);
     const uint32_t alignment = id_alignment >= 0 ? gguf_get_val_u32(gguf_ctx, id_alignment) : GGUF_DEFAULT_ALIGNMENT;
@@ -672,52 +654,35 @@ static bool handcrafted_check_tensors(const gguf_context * gguf_ctx, const unsig
         const std::string name = "my_tensor_" + std::to_string(i);
         const int id = gguf_find_tensor(gguf_ctx, name.c_str());
 
-        if (id >= 0) {
-            if (std::string(gguf_get_tensor_name(gguf_ctx, id)) != name) {
-                ok = false;
-            }
-
-            if (gguf_get_tensor_type(gguf_ctx, id) != type) {
-                ok = false;
-            }
-
-            const int64_t * ne = gguf_get_tensor_ne(gguf_ctx, id);
-            for (int j = 0; j < GGML_MAX_DIMS; ++j) {
-                if (ne[j] != shape[j]) {
-                    ok = false;
-                }
-            }
-        } else {
-            ok = false;
+        if (!t.assert_true(name + " found", id >= 0)) {
             continue;
         }
 
+        t.assert_equal(name + " name", name, std::string(gguf_get_tensor_name(gguf_ctx, id)));
+        t.assert_equal(name + " type", std::string(ggml_type_name(type)), std::string(ggml_type_name(gguf_get_tensor_type(gguf_ctx, id))));
+
+        const int64_t * ne = gguf_get_tensor_ne(gguf_ctx, id);
+        t.assert_equal(name + " shape", shape_to_string(shape.data()), shape_to_string(ne));
+
         const size_t offset = gguf_get_tensor_offset(gguf_ctx, id);
+        t.assert_equal(name + " offset", expected_offset, (uint64_t) offset);
 
-        if (offset != expected_offset) {
-            ok = false;
-        }
-
-        int64_t ne = shape[0];
+        int64_t ne_total = shape[0];
         for (size_t j = 1; j < GGML_MAX_DIMS; ++j) {
-            ne *= shape[j];
+            ne_total *= shape[j];
         }
-        expected_offset += GGML_PAD(ggml_row_size(type, ne), alignment);
+        expected_offset += GGML_PAD(ggml_row_size(type, ne_total), (uint64_t) alignment);
     }
-
-    return ok;
 }
 
-static bool handcrafted_check_tensor_data(const gguf_context * gguf_ctx, const unsigned int seed, FILE * file) {
-    if (!gguf_ctx) {
-        return false;
+static void handcrafted_check_tensor_data(testing & t, const gguf_context * gguf_ctx, const unsigned int seed, FILE * file) {
+    if (!t.assert_true("context is not null", gguf_ctx != nullptr)) {
+        return;
     }
 
     std::mt19937 rng(seed);
 
     std::vector<tensor_config_t> tensor_configs = get_tensor_configs(rng);
-
-    bool ok = true;
 
     for (int i = 0; i < int(tensor_configs.size()); ++i) {
         const ggml_type                          type  = tensor_configs[i].first;
@@ -736,21 +701,18 @@ static bool handcrafted_check_tensor_data(const gguf_context * gguf_ctx, const u
         GGML_ASSERT(fseek(file, gguf_get_data_offset(gguf_ctx) + offset, SEEK_SET) == 0);
         GGML_ASSERT(fread(data.data(), 1, data.size(), file) == data.size());
 
+        size_t n_mismatch = 0;
         for (size_t j = 0; j < size; ++j) {
             const uint8_t expected_byte = (j + offset) % 256;
             if (data[j] != expected_byte) {
-                ok = false;
+                n_mismatch++;
             }
         }
+        t.assert_true(name + " data (" + std::to_string(n_mismatch) + " of " + std::to_string(size) + " bytes differ)", n_mismatch == 0);
     }
-
-    return ok;
 }
 
-static std::pair<int, int> test_handcrafted_file(const unsigned int seed) {
-    int npass = 0;
-    int ntest = 0;
-
+static void test_handcrafted_file(testing & t, const unsigned int seed) {
     const std::vector<handcrafted_file_type> hfts = {
         HANDCRAFTED_HEADER_BAD_MAGIC,
         HANDCRAFTED_HEADER_BAD_VERSION_0,
@@ -791,109 +753,69 @@ static std::pair<int, int> test_handcrafted_file(const unsigned int seed) {
     };
 
     for (enum handcrafted_file_type hft : hfts) {
-        printf("%s: handcrafted_file_type=%s\n", __func__, handcrafted_file_type_name(hft).c_str());
-        FILE * file = get_handcrafted_file(seed, hft);
+        t.test(handcrafted_file_type_name(hft), [&](testing & t) {
+            printf("test_handcrafted_file: handcrafted_file_type=%s, seed=%u\n", handcrafted_file_type_name(hft).c_str(), seed);
+            FILE * file = get_handcrafted_file(seed, hft);
 
 #ifdef _WIN32
-        if (!file) {
-            printf("failed to create tmpfile(), needs elevated privileges on Windows");
-            printf("skipping tests");
-            continue;
-        }
+            if (!file) {
+                t.skip("failed to create tmpfile(), needs elevated privileges on Windows");
+                return;
+            }
 #else
-        GGML_ASSERT(file);
+            GGML_ASSERT(file);
 #endif // _WIN32
 
-        struct ggml_context * ctx = nullptr;
-        struct gguf_init_params gguf_params = {
-            /*no_alloc =*/ false,
-            /*ctx      =*/ hft >= offset_has_data ? &ctx : nullptr,
-        };
+            struct ggml_context * ctx = nullptr;
+            struct gguf_init_params gguf_params = {
+                /*no_alloc =*/ false,
+                /*ctx      =*/ hft >= offset_has_data ? &ctx : nullptr,
+            };
 
-        struct gguf_context * gguf_ctx = gguf_init_from_file_ptr(file, gguf_params);
+            struct gguf_context * gguf_ctx = gguf_init_from_file_ptr(file, gguf_params);
 
-        if (expect_context_not_null(hft)) {
-            printf("%s:   - context_not_null: ", __func__);
-        } else {
-            printf("%s:   - context_null: ", __func__);
-        }
-        if (bool(gguf_ctx) == expect_context_not_null(hft)) {
-            printf("\033[1;32mOK\033[0m\n");
-            npass++;
-        } else {
-            printf("\033[1;31mFAIL\033[0m\n");
-        }
-        ntest++;
+            const bool expect_not_null = expect_context_not_null(hft);
+            t.assert_true(expect_not_null ? "context_not_null" : "context_null", bool(gguf_ctx) == expect_not_null);
 
-        if (hft >= offset_has_data && !expect_context_not_null(hft)) {
-            printf("%s:   - no_dangling_ggml_context_pointer: ", __func__);
-            if (ctx) {
-                printf("\033[1;31mFAIL\033[0m\n");
-            } else {
-                printf("\033[1;32mOK\033[0m\n");
-                npass++;
+            if (hft >= offset_has_data && !expect_not_null) {
+                t.assert_true("no_dangling_ggml_context_pointer", ctx == nullptr);
             }
-            ntest++;
-        }
 
-        const bool alignment_defined = hft == HANDCRAFTED_TENSORS_CUSTOM_ALIGN || hft == HANDCRAFTED_DATA_CUSTOM_ALIGN;
+            const bool alignment_defined = hft == HANDCRAFTED_TENSORS_CUSTOM_ALIGN || hft == HANDCRAFTED_DATA_CUSTOM_ALIGN;
 
-        if (expect_context_not_null(hft)) {
-            printf("%s:   - check_header: ", __func__);
-            if (handcrafted_check_header(gguf_ctx, seed, hft >= offset_has_kv, hft >= offset_has_tensors, alignment_defined)) {
-                printf("\033[1;32mOK\033[0m\n");
-                npass++;
-            } else {
-                printf("\033[1;31mFAIL\033[0m\n");
+            if (expect_not_null) {
+                t.test("check_header", [&](testing & t) {
+                    handcrafted_check_header(t, gguf_ctx, seed, hft >= offset_has_kv, hft >= offset_has_tensors, alignment_defined);
+                });
             }
-            ntest++;
-        }
 
-        if (expect_context_not_null(hft) && hft >= offset_has_kv) {
-            printf("%s:   - check_kv: ", __func__);
-            if (handcrafted_check_kv(gguf_ctx, seed, hft >= offset_has_tensors, alignment_defined)) {
-                printf("\033[1;32mOK\033[0m\n");
-                npass++;
-            } else {
-                printf("\033[1;31mFAIL\033[0m\n");
+            if (expect_not_null && hft >= offset_has_kv) {
+                t.test("check_kv", [&](testing & t) {
+                    handcrafted_check_kv(t, gguf_ctx, seed, hft >= offset_has_tensors, alignment_defined);
+                });
             }
-            ntest++;
-        }
 
-        // HANDCRAFTED_TENSORS_ZERO_DIM deliberately mangles the tensor shapes to 0 elements,
-        // so only assert that it loads without crashing; skip the exact-geometry comparison.
-        if (expect_context_not_null(hft) && hft >= offset_has_tensors && hft != HANDCRAFTED_TENSORS_ZERO_DIM) {
-            printf("%s:   - check_tensors: ", __func__);
-            if (handcrafted_check_tensors(gguf_ctx, seed)) {
-                printf("\033[1;32mOK\033[0m\n");
-                npass++;
-            } else {
-                printf("\033[1;31mFAIL\033[0m\n");
+            // HANDCRAFTED_TENSORS_ZERO_DIM deliberately mangles the tensor shapes to 0 elements,
+            // so only assert that it loads without crashing; skip the exact-geometry comparison.
+            if (expect_not_null && hft >= offset_has_tensors && hft != HANDCRAFTED_TENSORS_ZERO_DIM) {
+                t.test("check_tensors", [&](testing & t) {
+                    handcrafted_check_tensors(t, gguf_ctx, seed);
+                });
             }
-            ntest++;
-        }
 
-        if (expect_context_not_null(hft) && hft >= offset_has_data) {
-            printf("%s:   - check_tensor_data: ", __func__);
-            if (handcrafted_check_tensor_data(gguf_ctx, seed, file)) {
-                printf("\033[1;32mOK\033[0m\n");
-                npass++;
-            } else {
-                printf("\033[1;31mFAIL\033[0m\n");
+            if (expect_not_null && hft >= offset_has_data) {
+                t.test("check_tensor_data", [&](testing & t) {
+                    handcrafted_check_tensor_data(t, gguf_ctx, seed, file);
+                });
             }
-            ntest++;
-        }
 
-        fclose(file);
-        if (gguf_ctx) {
-            ggml_free(ctx);
-            gguf_free(gguf_ctx);
-        }
-        printf("\n");
+            fclose(file);
+            if (gguf_ctx) {
+                ggml_free(ctx);
+                gguf_free(gguf_ctx);
+            }
+        });
     }
-
-
-    return std::make_pair(npass, ntest);
 }
 
 struct random_gguf_context_result {
@@ -1017,152 +939,124 @@ static struct random_gguf_context_result get_random_gguf_context(ggml_backend_t 
     return {gguf_ctx, ctx, buf};
 }
 
-static bool all_kv_in_other(const gguf_context * ctx, const gguf_context * other) {
-    bool ok = true;
-
+static void all_kv_in_other(testing & t, const gguf_context * ctx, const gguf_context * other) {
     const int n_kv = gguf_get_n_kv(ctx);
     for (int id = 0; id < n_kv; ++id) {
-        const char * name = gguf_get_key(ctx, id);
+        const std::string name = gguf_get_key(ctx, id);
 
-        const int idx_other = gguf_find_key(other, name);
-        if (idx_other < 0) {
-            ok = false;
+        const int idx_other = gguf_find_key(other, name.c_str());
+        if (!t.assert_true(name + " found in other", idx_other >= 0)) {
             continue;
         }
 
         const gguf_type type = gguf_get_kv_type(ctx, id);
-        if (type != gguf_get_kv_type(other, idx_other)) {
-            ok = false;
+        if (!t.assert_equal(name + " type", type, gguf_get_kv_type(other, idx_other))) {
             continue;
         }
 
         if (type == GGUF_TYPE_ARRAY) {
             const size_t arr_n = gguf_get_arr_n(ctx, id);
-            if (arr_n != gguf_get_arr_n(other, idx_other)) {
-                ok = false;
+            if (!t.assert_equal(name + " array length", arr_n, gguf_get_arr_n(other, idx_other))) {
                 continue;
             }
 
             const gguf_type type_arr = gguf_get_arr_type(ctx, id);
-            if (type_arr != gguf_get_arr_type(other, idx_other)) {
-                ok = false;
+            if (!t.assert_equal(name + " array type", type_arr, gguf_get_arr_type(other, idx_other))) {
                 continue;
             }
 
             if (type_arr == GGUF_TYPE_BOOL) {
                 const int8_t * data       = reinterpret_cast<const int8_t *>(gguf_get_arr_data(ctx,   id));
                 const int8_t * data_other = reinterpret_cast<const int8_t *>(gguf_get_arr_data(other, idx_other));
+                bool same = true;
                 for (size_t arr_i = 0; arr_i < arr_n; ++arr_i) {
                     if (bool(data[arr_i]) != bool(data_other[arr_i])) {
-                        ok = false;
+                        same = false;
                     }
                 }
+                t.assert_true(name + " bool array content", same);
                 continue;
             }
 
             if (type_arr == GGUF_TYPE_STRING) {
+                bool same = true;
                 for (size_t arr_i = 0; arr_i < arr_n; ++arr_i) {
                     const std::string str       = gguf_get_arr_str(ctx,   id,       arr_i);
                     const std::string str_other = gguf_get_arr_str(other, idx_other, arr_i);
                     if (str != str_other) {
-                        ok = false;
+                        same = false;
                     }
                 }
+                t.assert_true(name + " string array content", same);
                 continue;
             }
 
             const int8_t * data       = reinterpret_cast<const int8_t *>(gguf_get_arr_data(ctx,   id));
             const int8_t * data_other = reinterpret_cast<const int8_t *>(gguf_get_arr_data(other, idx_other));
-            if (!std::equal(data, data + arr_n*gguf_type_size(type_arr), data_other)) {
-                ok = false;
-            }
+            t.assert_true(name + " array content", std::equal(data, data + arr_n*gguf_type_size(type_arr), data_other));
             continue;
         }
 
         if (type == GGUF_TYPE_STRING) {
             const std::string str       = gguf_get_val_str(ctx,   id);
             const std::string str_other = gguf_get_val_str(other, idx_other);
-            if (str != str_other) {
-                ok = false;
-            }
+            t.assert_equal(name + " string value", str, str_other);
             continue;
         }
 
         const char * data       = reinterpret_cast<const char *>(gguf_get_val_data(ctx,   id));
         const char * data_other = reinterpret_cast<const char *>(gguf_get_val_data(other, idx_other));
-        if (!std::equal(data, data + gguf_type_size(type), data_other)) {
-            ok = false;
-        }
+        t.assert_true(name + " value", std::equal(data, data + gguf_type_size(type), data_other));
     }
-
-    return ok;
 }
 
-static bool all_tensors_in_other(const gguf_context * ctx, const gguf_context * other) {
-    bool ok = true;
-
+static void all_tensors_in_other(testing & t, const gguf_context * ctx, const gguf_context * other) {
     const int n_tensors = gguf_get_n_tensors(ctx);
     for (int id = 0; id < n_tensors; ++id) {
         const std::string name = gguf_get_tensor_name(ctx, id);
 
         const int idx_other = gguf_find_tensor(other, name.c_str());
-        if (id != idx_other) {
-            ok = false;
+        if (!t.assert_equal(name + " index in other", id, idx_other)) {
             if (idx_other < 0) {
                 continue;
             }
         }
 
         const ggml_type type = gguf_get_tensor_type(ctx, id);
-        if (type != gguf_get_tensor_type(other, id)) {
-            ok = false;
-        }
+        t.assert_equal(name + " type", std::string(ggml_type_name(type)), std::string(ggml_type_name(gguf_get_tensor_type(other, id))));
 
         const size_t offset = gguf_get_tensor_offset(ctx, id);
-        if (offset != gguf_get_tensor_offset(other, id)) {
-            ok = false;
-        }
+        t.assert_equal(name + " offset", offset, gguf_get_tensor_offset(other, id));
     }
-
-    return ok;
 }
 
-static bool same_tensor_data(const struct ggml_context * orig, const struct ggml_context * read) {
-    bool ok = true;
-
+static void same_tensor_data(testing & t, const struct ggml_context * orig, const struct ggml_context * read) {
     struct ggml_tensor * t_orig = ggml_get_first_tensor(orig);
     struct ggml_tensor * t_read = ggml_get_first_tensor(read);
 
-    if (std::string(t_read->name) != "GGUF tensor data binary blob") {
-        return false;
+    if (!t.assert_equal("first read tensor", std::string("GGUF tensor data binary blob"), std::string(t_read->name))) {
+        return;
     }
     t_read = ggml_get_next_tensor(read, t_read);
 
     while (t_orig) {
-        if (!t_read) {
-            ok = false;
+        const std::string name = t_orig->name;
+        if (!t.assert_true(name + " has a read counterpart", t_read != nullptr)) {
             break;
         }
 
         const size_t nbytes = ggml_nbytes(t_orig);
-        if (ggml_nbytes(t_read) != nbytes) {
-            ok = false;
+        if (!t.assert_equal(name + " nbytes", nbytes, ggml_nbytes(t_read))) {
             break;
         }
         std::vector<char> data_orig(nbytes);
         ggml_backend_tensor_get(t_orig, data_orig.data(), 0, nbytes);
-        if (!std::equal(data_orig.data(), data_orig.data() + nbytes, reinterpret_cast<const char *>(t_read->data))) {
-            ok = false;
-        }
+        t.assert_true(name + " data", std::equal(data_orig.data(), data_orig.data() + nbytes, reinterpret_cast<const char *>(t_read->data)));
 
         t_orig = ggml_get_next_tensor(orig, t_orig);
         t_read = ggml_get_next_tensor(read, t_read);
     }
-    if (t_read) {
-        ok = false;
-    }
-
-    return ok;
+    t.assert_true("no extra tensors in read context", t_read == nullptr);
 }
 
 enum roundtrip_read_mode {
@@ -1183,16 +1077,13 @@ static const char * roundtrip_read_mode_name(const roundtrip_read_mode mode) {
     GGML_ABORT("fatal error");
 }
 
-static std::pair<int, int> test_roundtrip(
-        ggml_backend_dev_t dev, const unsigned int seed, const bool only_meta,
+static void test_roundtrip(
+        testing & t, ggml_backend_dev_t dev, const unsigned int seed, const bool only_meta,
         const roundtrip_read_mode read_mode) {
     ggml_backend_t backend = ggml_backend_dev_init(dev, nullptr);
-    printf("%s: device=%s, backend=%s, only_meta=%s, read_mode=%s\n",
-        __func__, ggml_backend_dev_description(dev), ggml_backend_name(backend),
-        only_meta ? "yes" : "no", roundtrip_read_mode_name(read_mode));
-
-    int npass = 0;
-    int ntest = 0;
+    printf("test_roundtrip: device=%s, backend=%s, only_meta=%s, read_mode=%s, seed=%u\n",
+        ggml_backend_dev_description(dev), ggml_backend_name(backend),
+        only_meta ? "yes" : "no", roundtrip_read_mode_name(read_mode), seed);
 
     struct gguf_context * gguf_ctx_0;
     struct ggml_context * ctx_0;
@@ -1208,9 +1099,12 @@ static std::pair<int, int> test_roundtrip(
 
 #ifdef _WIN32
     if (!file) {
-        printf("failed to create tmpfile(), needs elevated privileges on Windows");
-        printf("skipping tests");
-        return std::make_pair(0, 0);
+        t.skip("failed to create tmpfile(), needs elevated privileges on Windows");
+        ggml_backend_buffer_free(bbuf);
+        ggml_free(ctx_0);
+        gguf_free(gguf_ctx_0);
+        ggml_backend_free(backend);
+        return;
     }
 #else
     GGML_ASSERT(file);
@@ -1248,78 +1142,32 @@ static std::pair<int, int> test_roundtrip(
         gguf_ctx_1 = gguf_init_from_file_ptr(file, gguf_params);
     }
 
-    printf("%s: same_version: ", __func__);
-    if (gguf_get_version(gguf_ctx_0) == gguf_get_version(gguf_ctx_1)) {
-        printf("\033[1;32mOK\033[0m\n");
-        npass++;
-    } else {
-        printf("\033[1;31mFAIL\033[0m\n");
-    }
-    ntest++;
+    if (t.assert_true("read back context is not null", gguf_ctx_1 != nullptr)) {
+        t.assert_equal("same_version",   gguf_get_version(gguf_ctx_0),   gguf_get_version(gguf_ctx_1));
+        t.assert_equal("same_n_kv",      gguf_get_n_kv(gguf_ctx_0),      gguf_get_n_kv(gguf_ctx_1));
+        t.assert_equal("same_n_tensors", gguf_get_n_tensors(gguf_ctx_0), gguf_get_n_tensors(gguf_ctx_1));
 
-    printf("%s: same_n_kv: ", __func__);
-    if (gguf_get_n_kv(gguf_ctx_0) == gguf_get_n_kv(gguf_ctx_1)) {
-        printf("\033[1;32mOK\033[0m\n");
-        npass++;
-    } else {
-        printf("\033[1;31mFAIL\033[0m\n");
-    }
-    ntest++;
+        t.test("all_orig_kv_in_read", [&](testing & t) {
+            all_kv_in_other(t, gguf_ctx_0, gguf_ctx_1);
+        });
 
-    printf("%s: same_n_tensors: ", __func__);
-    if (gguf_get_n_tensors(gguf_ctx_0) == gguf_get_n_tensors(gguf_ctx_1)) {
-        printf("\033[1;32mOK\033[0m\n");
-        npass++;
-    } else {
-        printf("\033[1;31mFAIL\033[0m\n");
-    }
-    ntest++;
+        t.test("all_read_kv_in_orig", [&](testing & t) {
+            all_kv_in_other(t, gguf_ctx_1, gguf_ctx_0);
+        });
 
-    printf("%s: all_orig_kv_in_read: ", __func__);
-    if (all_kv_in_other(gguf_ctx_0, gguf_ctx_1)) {
-        printf("\033[1;32mOK\033[0m\n");
-        npass++;
-    } else {
-        printf("\033[1;31mFAIL\033[0m\n");
-    }
-    ntest++;
+        t.test("all_orig_tensors_in_read", [&](testing & t) {
+            all_tensors_in_other(t, gguf_ctx_0, gguf_ctx_1);
+        });
 
-    printf("%s: all_read_kv_in_orig: ", __func__);
-    if (all_kv_in_other(gguf_ctx_1, gguf_ctx_0)) {
-        printf("\033[1;32mOK\033[0m\n");
-        npass++;
-    } else {
-        printf("\033[1;31mFAIL\033[0m\n");
-    }
-    ntest++;
+        t.test("all_read_tensors_in_orig", [&](testing & t) {
+            all_tensors_in_other(t, gguf_ctx_1, gguf_ctx_0);
+        });
 
-    printf("%s: all_orig_tensors_in_read: ", __func__);
-    if (all_tensors_in_other(gguf_ctx_0, gguf_ctx_1)) {
-        printf("\033[1;32mOK\033[0m\n");
-        npass++;
-    } else {
-        printf("\033[1;31mFAIL\033[0m\n");
-    }
-    ntest++;
-
-    printf("%s: all_read_tensors_in_orig: ", __func__);
-    if (all_tensors_in_other(gguf_ctx_1, gguf_ctx_0)) {
-        printf("\033[1;32mOK\033[0m\n");
-        npass++;
-    } else {
-        printf("\033[1;31mFAIL\033[0m\n");
-    }
-    ntest++;
-
-    if (!only_meta) {
-        printf("%s: same_tensor_data: ", __func__);
-        if (same_tensor_data(ctx_0, ctx_1)) {
-            printf("\033[1;32mOK\033[0m\n");
-            npass++;
-        } else {
-            printf("\033[1;31mFAIL\033[0m\n");
+        if (!only_meta) {
+            t.test("same_tensor_data", [&](testing & t) {
+                same_tensor_data(t, ctx_0, ctx_1);
+            });
         }
-        ntest++;
     }
 
     ggml_backend_buffer_free(bbuf);
@@ -1329,17 +1177,11 @@ static std::pair<int, int> test_roundtrip(
     gguf_free(gguf_ctx_1);
     ggml_backend_free(backend);
     fclose(file);
-
-    printf("\n");
-    return std::make_pair(npass, ntest);
 }
 
-static std::pair<int, int> test_gguf_set_kv(ggml_backend_dev_t dev, const unsigned int seed) {
+static void test_gguf_set_kv(testing & t, ggml_backend_dev_t dev, const unsigned int seed) {
     ggml_backend_t backend = ggml_backend_dev_init(dev, nullptr);
-    printf("%s: device=%s, backend=%s\n", __func__, ggml_backend_dev_description(dev), ggml_backend_name(backend));
-
-    int npass = 0;
-    int ntest = 0;
+    printf("test_gguf_set_kv: device=%s, backend=%s, seed=%u\n", ggml_backend_dev_description(dev), ggml_backend_name(backend), seed);
 
     struct gguf_context * gguf_ctx_0;
     struct ggml_context * ctx_0;
@@ -1366,52 +1208,23 @@ static std::pair<int, int> test_gguf_set_kv(ggml_backend_dev_t dev, const unsign
     gguf_set_kv(gguf_ctx_1, gguf_ctx_0);
     gguf_set_kv(gguf_ctx_2, gguf_ctx_0);
 
-    printf("%s: same_n_kv: ", __func__);
-    if (gguf_get_n_kv(gguf_ctx_0) == gguf_get_n_kv(gguf_ctx_2)) {
-        printf("\033[1;32mOK\033[0m\n");
-        npass++;
-    } else {
-        printf("\033[1;31mFAIL\033[0m\n");
-    }
-    ntest++;
+    t.assert_equal("same_n_kv", gguf_get_n_kv(gguf_ctx_0), gguf_get_n_kv(gguf_ctx_2));
 
-    printf("%s: all_kv_0_in_1: ", __func__);
-    if (all_kv_in_other(gguf_ctx_0, gguf_ctx_1)) {
-        printf("\033[1;32mOK\033[0m\n");
-        npass++;
-    } else {
-        printf("\033[1;31mFAIL\033[0m\n");
-    }
-    ntest++;
+    t.test("all_kv_0_in_1", [&](testing & t) {
+        all_kv_in_other(t, gguf_ctx_0, gguf_ctx_1);
+    });
 
-    printf("%s: all_kv_0_in_2: ", __func__);
-    if (all_kv_in_other(gguf_ctx_0, gguf_ctx_2)) {
-        printf("\033[1;32mOK\033[0m\n");
-        npass++;
-    } else {
-        printf("\033[1;31mFAIL\033[0m\n");
-    }
-    ntest++;
+    t.test("all_kv_0_in_2", [&](testing & t) {
+        all_kv_in_other(t, gguf_ctx_0, gguf_ctx_2);
+    });
 
     gguf_set_kv(gguf_ctx_0, gguf_ctx_1);
 
-    printf("%s: same_n_kv_after_double_copy: ", __func__);
-    if (gguf_get_n_kv(gguf_ctx_0) == gguf_get_n_kv(gguf_ctx_1)) {
-        printf("\033[1;32mOK\033[0m\n");
-        npass++;
-    } else {
-        printf("\033[1;31mFAIL\033[0m\n");
-    }
-    ntest++;
+    t.assert_equal("same_n_kv_after_double_copy", gguf_get_n_kv(gguf_ctx_0), gguf_get_n_kv(gguf_ctx_1));
 
-    printf("%s: all_kv_1_in_0_after_double_copy: ", __func__);
-    if (all_kv_in_other(gguf_ctx_1, gguf_ctx_0)) {
-        printf("\033[1;32mOK\033[0m\n");
-        npass++;
-    } else {
-        printf("\033[1;31mFAIL\033[0m\n");
-    }
-    ntest++;
+    t.test("all_kv_1_in_0_after_double_copy", [&](testing & t) {
+        all_kv_in_other(t, gguf_ctx_1, gguf_ctx_0);
+    });
 
     ggml_backend_buffer_free(bbuf_0);
     ggml_backend_buffer_free(bbuf_1);
@@ -1421,18 +1234,16 @@ static std::pair<int, int> test_gguf_set_kv(ggml_backend_dev_t dev, const unsign
     gguf_free(gguf_ctx_1);
     gguf_free(gguf_ctx_2);
     ggml_backend_free(backend);
-
-    printf("\n");
-    return std::make_pair(npass, ntest);
 }
 
 static void print_usage() {
-    printf("usage: test-gguf [seed]\n");
+    printf("usage: test-gguf [seed] [filter]\n");
     printf("  if no seed is unspecified then a random seed is used\n");
+    printf("  filter is a regex matched against the full test name\n");
 }
 
 int main(int argc, char ** argv) {
-    if (argc > 2) {
+    if (argc > 3) {
         print_usage();
         return 1;
     }
@@ -1440,54 +1251,49 @@ int main(int argc, char ** argv) {
     std::random_device rd;
     const unsigned int seed = argc < 2 ? rd() : std::stoi(argv[1]);
 
+    testing t;
+    t.capture_output = true;
+    t.apply_env();
+
+    if (argc > 2) {
+        t.set_filter(argv[2]);
+    }
+
     // Initialize ggml backends early so the prints aren't interleaved with the test results:
     ggml_backend_dev_count();
     fprintf(stderr, "\n");
 
-    int npass = 0;
-    int ntest = 0;
-    {
-        std::pair<int, int> result = test_handcrafted_file(seed);
-        npass += result.first;
-        ntest += result.second;
-    }
+    t.test("handcrafted", [&](testing & t) {
+        test_handcrafted_file(t, seed);
+    });
 
     for (size_t i = 0; i < ggml_backend_dev_count(); ++i) {
         ggml_backend_dev_t dev = ggml_backend_dev_get(i);
 
-        for (bool only_meta : {true, false}) {
-            std::pair<int, int> result = test_roundtrip(dev, seed, only_meta, ROUNDTRIP_READ_MODE_FILE);
-            npass += result.first;
-            ntest += result.second;
-        }
-        {
-            std::pair<int, int> result = test_roundtrip(dev, seed, /*only_meta=*/false, ROUNDTRIP_READ_MODE_FILE_OFFSET);
-            npass += result.first;
-            ntest += result.second;
-        }
-        {
-            std::pair<int, int> result = test_roundtrip(dev, seed, /*only_meta=*/false, ROUNDTRIP_READ_MODE_BUFFER);
-            npass += result.first;
-            ntest += result.second;
-        }
-        {
-            std::pair<int, int> result = test_roundtrip(dev, seed, /*only_meta=*/false, ROUNDTRIP_READ_MODE_CALLBACK);
-            npass += result.first;
-            ntest += result.second;
-        }
+        t.test(ggml_backend_dev_name(dev), [&](testing & t) {
+            t.test("roundtrip", [&](testing & t) {
+                t.test("file_only_meta", [&](testing & t) {
+                    test_roundtrip(t, dev, seed, /*only_meta=*/true, ROUNDTRIP_READ_MODE_FILE);
+                });
+                t.test("file", [&](testing & t) {
+                    test_roundtrip(t, dev, seed, /*only_meta=*/false, ROUNDTRIP_READ_MODE_FILE);
+                });
+                t.test("file_offset", [&](testing & t) {
+                    test_roundtrip(t, dev, seed, /*only_meta=*/false, ROUNDTRIP_READ_MODE_FILE_OFFSET);
+                });
+                t.test("buffer", [&](testing & t) {
+                    test_roundtrip(t, dev, seed, /*only_meta=*/false, ROUNDTRIP_READ_MODE_BUFFER);
+                });
+                t.test("callback", [&](testing & t) {
+                    test_roundtrip(t, dev, seed, /*only_meta=*/false, ROUNDTRIP_READ_MODE_CALLBACK);
+                });
+            });
 
-        {
-            std::pair<int, int> result = test_gguf_set_kv(dev, seed);
-            npass += result.first;
-            ntest += result.second;
-        }
+            t.test("set_kv", [&](testing & t) {
+                test_gguf_set_kv(t, dev, seed);
+            });
+        });
     }
 
-    printf("%d/%d tests passed\n", npass, ntest);
-    if (npass != ntest) {
-        printf("\033[1;31mFAIL\033[0m\n");
-        return 1;
-    }
-    printf("\033[1;32mOK\033[0m\n");
-    return 0;
+    return t.summary();
 }

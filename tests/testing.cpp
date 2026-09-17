@@ -6,6 +6,7 @@
 #include <condition_variable>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <exception>
 #include <mutex>
 #include <regex>
@@ -256,6 +257,7 @@ struct testing_capture {
 struct testing_state {
     std::ostream & out;
     std::regex     filter;
+    std::string    filter_text;
     bool           filter_tests = false;
     int            unnamed      = 0;
 
@@ -325,8 +327,21 @@ void testing::log(const std::string & msg) {
     }
 }
 
+void testing::apply_env() {
+    if (const char * v = getenv("LLAMA_TEST_VERBOSE")) {
+        verbose = std::string(v) == "1";
+    }
+    if (const char * c = getenv("LLAMA_TEST_CAPTURE")) {
+        capture_output = std::string(c) != "0";
+    }
+    if (const char * f = getenv("LLAMA_TEST_FILTER")) {
+        set_filter(f);
+    }
+}
+
 void testing::set_filter(const std::string & re) {
     state->filter       = std::regex(re);
+    state->filter_text  = re;
     state->filter_tests = true;
 }
 
@@ -337,15 +352,6 @@ void testing::skip(const std::string & reason) {
 
 std::string testing::next_unnamed(const char * prefix) {
     return prefix + std::to_string(++state->unnamed);
-}
-
-bool testing::should_run(const std::string & full) const {
-    if (state->filter_tests) {
-        if (!std::regex_match(full, state->filter)) {
-            return false;
-        }
-    }
-    return true;
 }
 
 void testing::run_guarded(const std::function<void()> & body, const char * ctx) {
@@ -370,12 +376,21 @@ void testing::run_guarded(const std::function<void()> & body, const char * ctx) 
 
 testing * testing::begin(const std::string & test_name, const std::string & label) {
     std::string parent_name = full_name();
-    if (!should_run(parent_name.empty() ? test_name : parent_name + "." + test_name)) {
-        return nullptr;
+    std::string full        = parent_name.empty() ? test_name : parent_name + "." + test_name;
+
+    // under a matched ancestor everything runs; otherwise the test must match itself or lie on the path to a literal dotted filter
+    bool child_matched = matched;
+    if (state->filter_tests && !child_matched) {
+        if (std::regex_match(full, state->filter)) {
+            child_matched = true;
+        } else if (state->filter_text.compare(0, full.size() + 1, full + ".") != 0) {
+            return nullptr;
+        }
     }
 
     subtests.emplace_back(new testing(*this, test_name));
     testing * child = subtests.back().get();
+    child->matched = child_matched;
 
     stream() << child->indent() << label << "\n";
 

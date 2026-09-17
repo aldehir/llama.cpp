@@ -3,10 +3,12 @@
 #include "ggml-cpp.h"
 #include "../ggml/src/ggml-impl.h"
 #include "ggml.h"
+#include "testing.h"
 
 #include <algorithm>
 #include <exception>
 #include <memory>
+#include <string>
 #include <vector>
 
 //
@@ -203,34 +205,34 @@ static int get_node_id(ggml_cgraph * graph, const char * tensor_name) {
     return -1;
 }
 
-static ggml_gallocr_ptr allocate_graph(ggml_cgraph * graph, ggml_tensor * out, ggml_backend_buffer_type_t buft) {
+static ggml_gallocr_ptr allocate_graph(testing & t, ggml_cgraph * graph, ggml_tensor * out, ggml_backend_buffer_type_t buft) {
     ggml_set_output(out);
     ggml_build_forward_expand(graph, out);
 
     ggml_gallocr_ptr galloc = ggml_gallocr_ptr(ggml_gallocr_new(buft));
     bool             result = ggml_gallocr_alloc_graph(galloc.get(), graph);
-    GGML_ASSERT(result);
+    t.assert_true("ggml_gallocr_alloc_graph succeeds", result);
     return galloc;
 }
 
 //
 // correctness checks for result allocations
 
-static void check_all_allocated(ggml_cgraph * graph) {
+static void check_all_allocated(testing & t, ggml_cgraph * graph) {
     for (int i = 0; i < ggml_graph_n_nodes(graph); ++i) {
-        ggml_tensor * t = ggml_graph_node(graph, i);
-        GGML_ASSERT(t->buffer != nullptr);
-        GGML_ASSERT(t->data != nullptr);
+        ggml_tensor * tensor = ggml_graph_node(graph, i);
+        t.assert_true(std::string("node ") + tensor->name + " has a buffer and data", tensor->buffer != nullptr && tensor->data != nullptr);
     }
 }
 
-static void check_max_size(ggml_context * ctx) {
-    for (ggml_tensor * t = ggml_get_first_tensor(ctx); t; t = ggml_get_next_tensor(ctx, t)) {
-        auto   buft     = ggml_backend_buffer_get_type(t->buffer);
+static void check_max_size(testing & t, ggml_context * ctx) {
+    for (ggml_tensor * tensor = ggml_get_first_tensor(ctx); tensor; tensor = ggml_get_next_tensor(ctx, tensor)) {
+        auto   buft     = ggml_backend_buffer_get_type(tensor->buffer);
         size_t max_size = ggml_backend_buft_get_max_size(buft);
-        size_t offset   = (char *) t->data - (char *) ggml_backend_buffer_get_base(t->buffer);
-        GGML_ASSERT(t->data >= ggml_backend_buffer_get_base(t->buffer));
-        GGML_ASSERT((size_t) offset + ggml_nbytes(t) <= max_size);
+        size_t offset   = (char *) tensor->data - (char *) ggml_backend_buffer_get_base(tensor->buffer);
+        t.assert_true(std::string("tensor ") + tensor->name + " starts at or after the buffer base", tensor->data >= ggml_backend_buffer_get_base(tensor->buffer));
+        t.assert_true(std::string("tensor ") + tensor->name + " ends at offset " + std::to_string(offset + ggml_nbytes(tensor)) + " within max size " + std::to_string(max_size),
+                      (size_t) offset + ggml_nbytes(tensor) <= max_size);
     }
 }
 
@@ -274,21 +276,25 @@ static ggml_tensor * get_view_source(ggml_tensor * t) {
     return t;
 }
 
-static void check_no_overlap(ggml_cgraph * graph) {
+static void check_no_overlap(testing & t, ggml_cgraph * graph) {
     for (int i = 0; i < ggml_graph_n_nodes(graph); ++i) {
         for (int j = 0; j < i; ++j) {
-            ggml_tensor * t = ggml_graph_node(graph, i);
-            ggml_tensor * o = ggml_graph_node(graph, j);
-            GGML_ASSERT(t != o);
+            ggml_tensor * tensor = ggml_graph_node(graph, i);
+            ggml_tensor * o      = ggml_graph_node(graph, j);
+            GGML_ASSERT(tensor != o);
 
-            if (get_view_source(t) == get_view_source(o)) {
+            if (get_view_source(tensor) == get_view_source(o)) {
                 continue;
             }
-            if (memory_overlap(t, o)) {
-                GGML_ASSERT(can_reuse_memory(graph, i, t, o));
+            if (memory_overlap(tensor, o)) {
+                t.assert_true(std::string("node ") + tensor->name + " may reuse the memory of " + o->name, can_reuse_memory(graph, i, tensor, o));
             }
         }
     }
+}
+
+static std::string total_msg(const dummy_backend & backend, const char * cmp, size_t expected) {
+    return "allocated total " + std::to_string(backend.context->allocated_total()) + " " + cmp + " " + std::to_string(expected);
 }
 
 //
@@ -296,7 +302,7 @@ static void check_no_overlap(ggml_cgraph * graph) {
 
 // Scenario where the first backend buffer is completely exhausted and there are further
 // tensors which require a second buffer
-static void test_max_size_too_many_tensors() {
+static void test_max_size_too_many_tensors(testing & t) {
     dummy_backend backend      = dummy_backend_init(16);
     auto [ctx, graph, ctx_ptr] = make_context();
 
@@ -310,16 +316,16 @@ static void test_max_size_too_many_tensors() {
     x[6] = ggml_add(ctx, x[4], x[5]);
     assign_names(ctx);
 
-    ggml_gallocr_ptr galloc = allocate_graph(graph, x[6], &backend.buffer_type);
-    check_all_allocated(graph);
-    check_no_overlap(graph);
-    check_max_size(ctx);
-    GGML_ASSERT(backend.context->allocated_total() <= 16 + 16);
+    ggml_gallocr_ptr galloc = allocate_graph(t, graph, x[6], &backend.buffer_type);
+    check_all_allocated(t, graph);
+    check_no_overlap(t, graph);
+    check_max_size(t, ctx);
+    t.assert_true(total_msg(backend, "<=", 16 + 16), backend.context->allocated_total() <= 16 + 16);
 }
 
 // Scenario where there is some space left in the first buffer, but not enough to accommodate
 // a larger tensor, so a second buffer is required
-static void test_max_size_tensor_too_large() {
+static void test_max_size_tensor_too_large(testing & t) {
     dummy_backend backend      = dummy_backend_init(32);
     auto [ctx, graph, ctx_ptr] = make_context();
 
@@ -329,17 +335,17 @@ static void test_max_size_tensor_too_large() {
     x[2] = ggml_concat(ctx, x[0], x[1], 0);  // chunk 1, [0 , 24)
     assign_names(ctx);
 
-    ggml_gallocr_ptr galloc = allocate_graph(graph, x[2], &backend.buffer_type);
-    check_all_allocated(graph);
-    check_no_overlap(graph);
-    check_max_size(ctx);
-    GGML_ASSERT(backend.context->allocated_total() <= 32 + 24);
+    ggml_gallocr_ptr galloc = allocate_graph(t, graph, x[2], &backend.buffer_type);
+    check_all_allocated(t, graph);
+    check_no_overlap(t, graph);
+    check_max_size(t, ctx);
+    t.assert_true(total_msg(backend, "<=", 32 + 24), backend.context->allocated_total() <= 32 + 24);
 }
 
 // Scenario where a single tensor exceeds the max buffer size - in this case the allocator
 // should try to create a bigger buffer anyway, and wait for the backend to throw an error.
 // Backends may report an artificially lower max size in some cases for compatibility reasons.
-static void test_tensor_larger_than_max_size() {
+static void test_tensor_larger_than_max_size(testing & t) {
     dummy_backend backend      = dummy_backend_init(16);
     auto [ctx, graph, ctx_ptr] = make_context();
 
@@ -348,16 +354,16 @@ static void test_tensor_larger_than_max_size() {
     x[1] = ggml_scale(ctx, x[0], 2.0f);
     assign_names(ctx);
 
-    ggml_gallocr_ptr galloc = allocate_graph(graph, x[1], &backend.buffer_type);
-    check_all_allocated(graph);
-    check_no_overlap(graph);
-    GGML_ASSERT(backend.context->allocated_total() == 24);
+    ggml_gallocr_ptr galloc = allocate_graph(t, graph, x[1], &backend.buffer_type);
+    check_all_allocated(t, graph);
+    check_no_overlap(t, graph);
+    t.assert_true(total_msg(backend, "==", 24), backend.context->allocated_total() == 24);
 }
 
 // This test assumes a max of 16 buffer chunks, and tries to allocate tensors that would
 // require more. Expectation is that the last buffer should grow to fit everything,
 // leaving it to the backend to error out if it can't allocate that much.
-static void test_not_enough_chunks() {
+static void test_not_enough_chunks(testing & t) {
     const int max_chunks = 16;
     const int max_size   = 8;
 
@@ -374,15 +380,15 @@ static void test_not_enough_chunks() {
     }
     assign_names(ctx);
 
-    ggml_gallocr_ptr galloc = allocate_graph(graph, acc, &backend.buffer_type);
-    check_all_allocated(graph);
-    check_no_overlap(graph);
-    GGML_ASSERT(backend.context->allocated_total() > max_chunks * max_size);
+    ggml_gallocr_ptr galloc = allocate_graph(t, graph, acc, &backend.buffer_type);
+    check_all_allocated(t, graph);
+    check_no_overlap(t, graph);
+    t.assert_true(total_msg(backend, ">", max_chunks * max_size), backend.context->allocated_total() > max_chunks * max_size);
 }
 
 // Fill up leftover unallocated space of a chunk after allocating a large tensor that
 // requires a new chunk.
-static void test_fill_leftover_space() {
+static void test_fill_leftover_space(testing & t) {
     dummy_backend backend      = dummy_backend_init(16);
     auto [ctx, graph, ctx_ptr] = make_context();
 
@@ -392,15 +398,15 @@ static void test_fill_leftover_space() {
     x[3] = ggml_mean(ctx, x[1]);
     assign_names(ctx);
 
-    ggml_gallocr_ptr galloc = allocate_graph(graph, x[3], &backend.buffer_type);
-    check_all_allocated(graph);
-    check_no_overlap(graph);
-    check_max_size(ctx);
-    GGML_ASSERT(backend.context->allocated_total() <= 12 + 16);
+    ggml_gallocr_ptr galloc = allocate_graph(t, graph, x[3], &backend.buffer_type);
+    check_all_allocated(t, graph);
+    check_no_overlap(t, graph);
+    check_max_size(t, ctx);
+    t.assert_true(total_msg(backend, "<=", 12 + 16), backend.context->allocated_total() <= 12 + 16);
 }
 
 // Check that views don't require any extra memory
-static void test_view_inplace() {
+static void test_view_inplace(testing & t) {
     dummy_backend backend      = dummy_backend_init(32);
     auto [ctx, graph, ctx_ptr] = make_context();
 
@@ -413,14 +419,14 @@ static void test_view_inplace() {
     x[5] = ggml_add(ctx, x[3], x[4]);            // reuse (inplace add)
     assign_names(ctx);
 
-    ggml_gallocr_ptr galloc = allocate_graph(graph, x[5], &backend.buffer_type);
-    check_all_allocated(graph);
-    check_no_overlap(graph);
-    check_max_size(ctx);
-    GGML_ASSERT(backend.context->allocated_total() <= 24);
+    ggml_gallocr_ptr galloc = allocate_graph(t, graph, x[5], &backend.buffer_type);
+    check_all_allocated(t, graph);
+    check_no_overlap(t, graph);
+    check_max_size(t, ctx);
+    t.assert_true(total_msg(backend, "<=", 24), backend.context->allocated_total() <= 24);
 }
 
-static void test_reuse_and_free() {
+static void test_reuse_and_free(testing & t) {
     dummy_backend backend      = dummy_backend_init(40);
     auto [ctx, graph, ctx_ptr] = make_context();
 
@@ -436,14 +442,14 @@ static void test_reuse_and_free() {
     x[8] = ggml_add(ctx, x[3], x[7]);        // reuse
     assign_names(ctx);
 
-    ggml_gallocr_ptr galloc = allocate_graph(graph, x[8], &backend.buffer_type);
-    check_all_allocated(graph);
-    check_no_overlap(graph);
-    check_max_size(ctx);
-    GGML_ASSERT(backend.context->allocated_total() <= 40 + 32 + 32);
+    ggml_gallocr_ptr galloc = allocate_graph(t, graph, x[8], &backend.buffer_type);
+    check_all_allocated(t, graph);
+    check_no_overlap(t, graph);
+    check_max_size(t, ctx);
+    t.assert_true(total_msg(backend, "<=", 40 + 32 + 32), backend.context->allocated_total() <= 40 + 32 + 32);
 }
 
-static void test_merge_free_block(size_t max_buffer_size) {
+static void test_merge_free_block(testing & t, size_t max_buffer_size) {
     dummy_backend backend      = dummy_backend_init(max_buffer_size);
     auto [ctx, graph, ctx_ptr] = make_context();
 
@@ -459,16 +465,16 @@ static void test_merge_free_block(size_t max_buffer_size) {
     x[8] = ggml_add(ctx, x[5], x[7]);
     assign_names(ctx);
 
-    ggml_gallocr_ptr galloc = allocate_graph(graph, x[8], &backend.buffer_type);
-    check_all_allocated(graph);
-    check_no_overlap(graph);
-    check_max_size(ctx);
-    GGML_ASSERT(backend.context->allocated_total() <= 32 + 32 + 24);
+    ggml_gallocr_ptr galloc = allocate_graph(t, graph, x[8], &backend.buffer_type);
+    check_all_allocated(t, graph);
+    check_no_overlap(t, graph);
+    check_max_size(t, ctx);
+    t.assert_true(total_msg(backend, "<=", 32 + 32 + 24), backend.context->allocated_total() <= 32 + 32 + 24);
 }
 
 // Check that previously allocated but freed memory is preferred over allocating
 // additional memory, even if the remaining space in a chunk would match tensor size better
-static void test_prefer_already_allocated_memory() {
+static void test_prefer_already_allocated_memory(testing & t) {
     dummy_backend backend      = dummy_backend_init(32, /*align*/ 4);
     auto [ctx, graph, ctx_ptr] = make_context();
 
@@ -478,15 +484,15 @@ static void test_prefer_already_allocated_memory() {
     x[2] = ggml_mean(ctx, x[1]);           // should be allocated in the 24b block
     assign_names(ctx);
 
-    ggml_gallocr_ptr galloc = allocate_graph(graph, x[2], &backend.buffer_type);
-    check_all_allocated(graph);
-    check_no_overlap(graph);
-    GGML_ASSERT(backend.context->allocated_total() <= 28);
+    ggml_gallocr_ptr galloc = allocate_graph(t, graph, x[2], &backend.buffer_type);
+    check_all_allocated(t, graph);
+    check_no_overlap(t, graph);
+    t.assert_true(total_msg(backend, "<=", 28), backend.context->allocated_total() <= 28);
 }
 
 // test for allocating on multiple devices with some tensors in the graph
 // allocated externally (not by gallocr).
-static void test_multiple_buffer_types() {
+static void test_multiple_buffer_types(testing & t) {
     dummy_backend backend_a = dummy_backend_init(32);
     dummy_backend backend_b = dummy_backend_init(SIZE_MAX);
 
@@ -524,7 +530,9 @@ static void test_multiple_buffer_types() {
     ggml_set_output(x[8]);
     ggml_build_forward_expand(graph, x[8]);
 
-    GGML_ASSERT(graph->n_leafs == 5);
+    if (!t.assert_equal("graph leaf count", 5, graph->n_leafs) || !t.assert_equal("graph node count", 8, graph->n_nodes)) {
+        return;
+    }
     int leaf_buffer_ids[5];
     leaf_buffer_ids[get_leaf_id(graph, "a0")] = 0;
     leaf_buffer_ids[get_leaf_id(graph, "a1")] = 0;
@@ -532,7 +540,6 @@ static void test_multiple_buffer_types() {
     leaf_buffer_ids[get_leaf_id(graph, "b1")] = 1;
     leaf_buffer_ids[get_leaf_id(graph, "x0")] = 0;
 
-    GGML_ASSERT(graph->n_nodes == 8);
     int node_buffer_ids[8];
     node_buffer_ids[get_node_id(graph, "x1")] = 0;
     node_buffer_ids[get_node_id(graph, "x2")] = 0;
@@ -547,14 +554,14 @@ static void test_multiple_buffer_types() {
     ggml_gallocr_reserve_n(galloc.get(), graph, node_buffer_ids, leaf_buffer_ids);
     ggml_gallocr_alloc_graph(galloc.get(), graph);
 
-    check_all_allocated(graph);
-    check_no_overlap(graph);
-    check_max_size(ctx);
-    GGML_ASSERT(backend_a.context->allocated_total() <= 32 + 32 + 24);
-    GGML_ASSERT(backend_b.context->allocated_total() <= 32 + 24);
+    check_all_allocated(t, graph);
+    check_no_overlap(t, graph);
+    check_max_size(t, ctx);
+    t.assert_true(total_msg(backend_a, "<=", 32 + 32 + 24), backend_a.context->allocated_total() <= 32 + 32 + 24);
+    t.assert_true(total_msg(backend_b, "<=", 32 + 24), backend_b.context->allocated_total() <= 32 + 24);
 }
 
-static void test_buffer_size_zero() {
+static void test_buffer_size_zero(testing & t) {
     dummy_backend backend_a    = dummy_backend_init(SIZE_MAX);
     dummy_backend backend_b    = dummy_backend_init(SIZE_MAX);
     auto [ctx, graph, ctx_ptr] = make_context();
@@ -573,16 +580,17 @@ static void test_buffer_size_zero() {
     ggml_gallocr_ptr           galloc   = ggml_gallocr_ptr(ggml_gallocr_new_n(bufts, 2));
     bool                       res1     = ggml_gallocr_reserve_n(galloc.get(), graph, node_buffer_ids, leaf_buffer_ids);
     bool                       res2     = ggml_gallocr_alloc_graph(galloc.get(), graph);
-    GGML_ASSERT(res1 && res2);
+    t.assert_true("ggml_gallocr_reserve_n succeeds",    res1);
+    t.assert_true("ggml_gallocr_alloc_graph succeeds", res2);
 
-    check_all_allocated(graph);
-    GGML_ASSERT(backend_a.context->allocated_total() == 16);
-    GGML_ASSERT(backend_b.context->allocated_total() == 0);
+    check_all_allocated(t, graph);
+    t.assert_true(total_msg(backend_a, "==", 16), backend_a.context->allocated_total() == 16);
+    t.assert_true(total_msg(backend_b, "==", 0), backend_b.context->allocated_total() == 0);
 }
 
 // Test re-using gallocr for a different graph. The new graph has the same
 // total size, but one of the chunks is larger, so reallocation is required.
-static void test_reallocation() {
+static void test_reallocation(testing & t) {
     dummy_backend    backend = dummy_backend_init(32, /*align*/ 4);
     ggml_gallocr_ptr galloc;
     {
@@ -594,9 +602,9 @@ static void test_reallocation() {
         x[3] = ggml_add(ctx, x[2], x[1]);
         assign_names(ctx);
 
-        galloc = allocate_graph(graph, x[3], &backend.buffer_type);
-        check_all_allocated(graph);
-        GGML_ASSERT(backend.context->allocated_total() == 40);
+        galloc = allocate_graph(t, graph, x[3], &backend.buffer_type);
+        check_all_allocated(t, graph);
+        t.assert_true(total_msg(backend, "==", 40), backend.context->allocated_total() == 40);
     }
     {
         auto [ctx, graph, ctx_ptr] = make_context();
@@ -609,9 +617,9 @@ static void test_reallocation() {
         ggml_build_forward_expand(graph, x[2]);
 
         bool result = ggml_gallocr_alloc_graph(galloc.get(), graph);
-        GGML_ASSERT(result);
-        check_all_allocated(graph);
-        GGML_ASSERT(backend.context->allocated_total() == 40);
+        t.assert_true("ggml_gallocr_alloc_graph succeeds for the second graph", result);
+        check_all_allocated(t, graph);
+        t.assert_true(total_msg(backend, "==", 40), backend.context->allocated_total() == 40);
     }
 }
 
@@ -620,7 +628,7 @@ static void test_backend_graph_optimize(ggml_backend_t, ggml_cgraph * graph, ggm
     params->add_alloc_dep(params->user_data, graph->nodes[0], graph->nodes[2]);
 }
 
-static bool graph_reuses_allocation(bool add_alloc_dep) {
+static bool graph_reuses_allocation(testing & t, bool add_alloc_dep) {
     auto [ctx, graph, ctx_ptr] = make_context();
 
     ggml_tensor * x[4];
@@ -640,37 +648,41 @@ static bool graph_reuses_allocation(bool add_alloc_dep) {
     ggml_backend_t             backend_ptr = &backend.context->backend;
     ggml_backend_buffer_type_t buft        = &backend.buffer_type;
     ggml_backend_sched_ptr     sched(ggml_backend_sched_new(&backend_ptr, &buft, 1, 8, false, true));
-    GGML_ASSERT(ggml_backend_sched_alloc_graph(sched.get(), graph));
+    t.assert_true("ggml_backend_sched_alloc_graph succeeds", ggml_backend_sched_alloc_graph(sched.get(), graph));
 
     return x[1]->data == x[2]->data;
 }
 
-static void test_graph_optimize_alloc_dep() {
-    GGML_ASSERT(graph_reuses_allocation(false));
-    GGML_ASSERT(!graph_reuses_allocation(true));
+static void test_graph_optimize_alloc_dep(testing & t) {
+    t.assert_true("x1 and x2 share memory without an alloc dep",  graph_reuses_allocation(t, false));
+    t.assert_true("x1 and x2 do not share memory with an alloc dep", !graph_reuses_allocation(t, true));
 }
 
-static void run(const char * name, void (*f)()) {
-    printf("%s ", name);
-    fflush(stdout);
-    f();
-    printf("PASSED\n");
-}
+int main(int argc, char ** argv) {
+    testing t;
+    t.capture_output = true;
+    t.apply_env();
 
-int main() {
-    run("test_max_size_too_many_tensors", test_max_size_too_many_tensors);
-    run("test_max_size_tensor_too_large", test_max_size_tensor_too_large);
-    run("test_tensor_larger_than_max_size", test_tensor_larger_than_max_size);
-    run("test_not_enough_chunks", test_not_enough_chunks);
-    run("test_fill_leftover_space", test_fill_leftover_space);
-    run("test_view_inplace", test_view_inplace);
-    run("test_reuse_and_free", test_reuse_and_free);
-    run("test_merge_free_block(32)", []() { test_merge_free_block(32); });
-    run("test_merge_free_block(SIZE_MAX)", []() { test_merge_free_block(SIZE_MAX); });
-    run("test_prefer_already_allocated_memory", test_prefer_already_allocated_memory);
-    run("test_multiple_buffer_types", test_multiple_buffer_types);
-    run("test_buffer_size_zero", test_buffer_size_zero);
-    run("test_reallocation", test_reallocation);
-    run("test_graph_optimize_alloc_dep", test_graph_optimize_alloc_dep);
-    return 0;
+    if (argc > 1) {
+        t.set_filter(argv[1]);
+    }
+
+    t.test("max_size_too_many_tensors",        test_max_size_too_many_tensors);
+    t.test("max_size_tensor_too_large",        test_max_size_tensor_too_large);
+    t.test("tensor_larger_than_max_size",      test_tensor_larger_than_max_size);
+    t.test("not_enough_chunks",                test_not_enough_chunks);
+    t.test("fill_leftover_space",              test_fill_leftover_space);
+    t.test("view_inplace",                     test_view_inplace);
+    t.test("reuse_and_free",                   test_reuse_and_free);
+    t.test("merge_free_block", [](testing & t) {
+        t.test("32",       [](testing & t) { test_merge_free_block(t, 32); });
+        t.test("SIZE_MAX", [](testing & t) { test_merge_free_block(t, SIZE_MAX); });
+    });
+    t.test("prefer_already_allocated_memory",  test_prefer_already_allocated_memory);
+    t.test("multiple_buffer_types",            test_multiple_buffer_types);
+    t.test("buffer_size_zero",                 test_buffer_size_zero);
+    t.test("reallocation",                     test_reallocation);
+    t.test("graph_optimize_alloc_dep",         test_graph_optimize_alloc_dep);
+
+    return t.summary();
 }

@@ -1,5 +1,9 @@
 llama_add_compile_flags()
 
+# the test framework in testing.h; linked into every test target
+add_library(llama-testing STATIC testing.cpp)
+target_link_libraries(llama-testing PRIVATE llama-common)
+
 function(llama_build source)
     set(TEST_SOURCES ${source} ${ARGN})
 
@@ -10,7 +14,7 @@ function(llama_build source)
     endif()
 
     add_executable(${TEST_TARGET} ${TEST_SOURCES})
-    target_link_libraries(${TEST_TARGET} PRIVATE llama llama-common) # TODO: [TAG_TESTS_LLAMA_LINK]
+    target_link_libraries(${TEST_TARGET} PRIVATE llama llama-common llama-testing) # TODO: [TAG_TESTS_LLAMA_LINK]
     if (LLAMA_TESTS_INSTALL)
         install(TARGETS ${TEST_TARGET} RUNTIME)
     endif()
@@ -105,7 +109,7 @@ function(llama_build_and_test source)
     if (LLAMA_TESTS_INSTALL)
         install(TARGETS ${TEST_TARGET} RUNTIME)
     endif()
-    target_link_libraries(${TEST_TARGET} PRIVATE llama-common)
+    target_link_libraries(${TEST_TARGET} PRIVATE llama-common llama-testing)
 
     add_test(
         NAME ${TEST_TARGET}
@@ -159,7 +163,7 @@ if (NOT WIN32 OR NOT BUILD_SHARED_LIBS)
     llama_build_and_test(test-grammar-parser.cpp)
     llama_build_and_test(test-grammar-integration.cpp)
     llama_build_and_test(test-llama-grammar.cpp)
-    llama_build_and_test(test-batch-alloc.cpp testing.cpp)
+    llama_build_and_test(test-batch-alloc.cpp)
     llama_build_and_test(test-chat.cpp WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
     target_include_directories(test-chat PRIVATE ${PROJECT_SOURCE_DIR}/tools/server)
     target_link_libraries(test-chat PRIVATE server-context)
@@ -255,18 +259,17 @@ if (NOT WIN32 OR NOT BUILD_SHARED_LIBS)
     llama_build(test-fusion.cpp)
 endif()
 
-llama_build_and_test(test-chat-peg-parser.cpp peg-parser/simple-tokenize.cpp testing.cpp)
-llama_build_and_test(test-jinja.cpp testing.cpp)
+llama_build_and_test(test-chat-peg-parser.cpp peg-parser/simple-tokenize.cpp)
+llama_build_and_test(test-jinja.cpp)
 llama_test(test-jinja NAME test-jinja-py ARGS -py LABEL python)
-llama_build_and_test(test-json-schema.cpp testing.cpp)
-llama_build_and_test(test-chat-auto-parser.cpp testing.cpp WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
+llama_build_and_test(test-json-schema.cpp)
+llama_build_and_test(test-chat-auto-parser.cpp WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
 llama_build_and_test(test-chat-template.cpp)
 # debug tool for chat template differential analysis (not registered as a test, run it manually)
 llama_build(test-chat-analysis.cpp)
 llama_build_and_test(test-log.cpp)
 llama_build_and_test(
     test-peg-parser.cpp
-    testing.cpp
     peg-parser/simple-tokenize.cpp
     peg-parser/test-basic.cpp
     peg-parser/test-gbnf-generation.cpp
@@ -338,7 +341,7 @@ llama_build_and_test(test-mtmd-c-api.c)
 target_link_libraries(${LLAMA_TEST_NAME} PRIVATE mtmd)
 unset(LLAMA_TEST_NAME)
 
-llama_build_and_test(test-mtmd-impl.cpp testing.cpp)
+llama_build_and_test(test-mtmd-impl.cpp)
 target_link_libraries(test-mtmd-impl PRIVATE mtmd)
 
 # GGUF model data fetcher library for tests that need real model metadata
@@ -351,7 +354,7 @@ if (TARGET cpp-httplib)
         target_include_directories(gguf-model-data PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 
         add_executable(test-gguf-model-data test-gguf-model-data.cpp)
-        target_link_libraries(test-gguf-model-data PRIVATE gguf-model-data llama-common)
+        target_link_libraries(test-gguf-model-data PRIVATE gguf-model-data llama-common llama-testing)
         llama_test(test-gguf-model-data LABEL "model")
 
         # test-quant-type-selection requires gguf-model-data for remote model metadata

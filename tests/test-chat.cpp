@@ -13,6 +13,7 @@
 #include "common.h"
 #include "ggml.h"
 #include "log.h"
+#include "testing.h"
 
 #include <algorithm>
 #include <exception>
@@ -68,64 +69,18 @@ static std::ostream & operator<<(std::ostream & os, const common_chat_msg & msg)
     return os;
 }
 
-template <class T> static bool equals(const T & expected, const T & actual) {
-    return expected == actual;
+static bool assert_contains(testing & t, const std::string & haystack, const std::string & needle) {
+    return t.assert_true("expected to contain: " + needle + "\n  actual: " + haystack,
+                         haystack.find(needle) != std::string::npos);
 }
 
-static common_chat_msg normalize(const common_chat_msg & msg) {
-    common_chat_msg normalized = msg;
-    for (auto & tool_call : normalized.tool_calls) {
-        try {
-            tool_call.arguments = json::parse(tool_call.arguments).dump();
-        } catch (const std::exception &) {
-        }
-    }
-    return normalized;
+static bool assert_not_contains(testing & t, const std::string & haystack, const std::string & needle) {
+    return t.assert_true("expected NOT to contain: " + needle + "\n  actual: " + haystack,
+                         haystack.find(needle) == std::string::npos);
 }
 
-template <> bool equals(const common_chat_msg & expected, const common_chat_msg & actual) {
-    return normalize(expected) == normalize(actual);
-}
-
-template <class T> static void assert_equals(const T & expected, const T & actual) {
-    if (!equals(expected, actual)) {
-        std::ostringstream oss_expected;
-        oss_expected << expected;
-        std::ostringstream oss_actual;
-        oss_actual << actual;
-        LOG_ERR("Expected: %s\n", oss_expected.str().c_str());
-        LOG_ERR("Actual: %s\n", oss_actual.str().c_str());
-        common_log_flush(common_log_main());
-        throw std::runtime_error("Test failed");
-    }
-}
-
-static void assert_contains(const std::string & haystack, const std::string & needle) {
-    if (haystack.find(needle) == std::string::npos) {
-        LOG_ERR("Expected to contain: %s\n", needle.c_str());
-        LOG_ERR("Actual: %s\n", haystack.c_str());
-        common_log_flush(common_log_main());
-        throw std::runtime_error("Test failed");
-    }
-}
-
-static void assert_not_contains(const std::string & haystack, const std::string & needle) {
-    if (haystack.find(needle) != std::string::npos) {
-        LOG_ERR("Expected NOT to contain: %s\n", needle.c_str());
-        LOG_ERR("Actual: %s\n", haystack.c_str());
-        common_log_flush(common_log_main());
-        throw std::runtime_error("Test failed");
-    }
-}
-
-static void assert_ends_with(const std::string & str, const std::string & suffix) {
-    if (str.size() < suffix.size() ||
-        str.compare(str.size() - suffix.size(), suffix.size(), suffix) != 0) {
-        LOG_ERR("Expected to end with: %s\n", suffix.c_str());
-        LOG_ERR("Actual: %s\n", str.c_str());
-        common_log_flush(common_log_main());
-        throw std::runtime_error("Test failed");
-    }
+static bool assert_ends_with(testing & t, const std::string & str, const std::string & suffix) {
+    return t.assert_true("expected to end with: " + suffix + "\n  actual: " + str, string_ends_with(str, suffix));
 }
 
 static std::string read_file(const std::string & path) {
@@ -147,6 +102,34 @@ static std::string read_file(const std::string & path) {
 
 static common_chat_templates_ptr read_templates(const std::string & path) {
     return common_chat_templates_ptr(common_chat_templates_init(/* model= */ nullptr, read_file(path)));
+}
+
+// the template file name without directory or extension
+static std::string template_name(const std::string & path) {
+    auto name = path.substr(path.find_last_of("/\\") + 1);
+    if (string_ends_with(name, ".jinja")) {
+        name.resize(name.size() - 6);
+    }
+    return name;
+}
+
+// single-line preview of a test input, used to name the test cases
+static std::string preview(const std::string & input, size_t max_len = 40) {
+    std::string out;
+    for (char c : input) {
+        if (out.size() >= max_len && (c & 0xC0) != 0x80) {
+            out += "...";
+            break;
+        }
+        if (c == '\n') {
+            out += "\\n";
+        } else if (c == '\t') {
+            out += "\\t";
+        } else {
+            out += c;
+        }
+    }
+    return out;
 }
 
 static std::unique_ptr<llama_grammar> build_grammar(const std::string & grammar_str) {
@@ -387,39 +370,43 @@ static std::string renormalize_json(const std::string & json_str) {
     }
 }
 
-static void assert_msg_equals(const common_chat_msg & expected,
+static bool assert_msg_equals(testing &               t,
+                              const common_chat_msg & expected,
                               const common_chat_msg & actual,
                               bool                    ignore_whitespace_differences = false) {
-    assert_equals(expected.role, actual.role);
+    bool ok = t.assert_equal("role", expected.role, actual.role);
     if (ignore_whitespace_differences) {
-        assert_equals(string_strip(expected.content), string_strip(actual.content));
+        ok = t.assert_equal("content", string_strip(expected.content), string_strip(actual.content)) && ok;
     } else {
-        assert_equals(expected.content, actual.content);
+        ok = t.assert_equal("content", expected.content, actual.content) && ok;
     }
-    assert_equals(expected.content_parts.size(), actual.content_parts.size());
-    for (size_t i = 0; i < expected.content_parts.size(); i++) {
+    ok = t.assert_equal("content_parts.size()", expected.content_parts.size(), actual.content_parts.size()) && ok;
+    for (size_t i = 0; i < std::min(expected.content_parts.size(), actual.content_parts.size()); i++) {
         const auto & expected_part = expected.content_parts[i];
         const auto & actual_part   = actual.content_parts[i];
-        assert_equals(expected_part.type, actual_part.type);
+        const auto   label         = "content_parts[" + std::to_string(i) + "]";
+        ok = t.assert_equal(label + ".type", expected_part.type, actual_part.type) && ok;
         if (ignore_whitespace_differences) {
-            assert_equals(string_strip(expected_part.text), string_strip(actual_part.text));
+            ok = t.assert_equal(label + ".text", string_strip(expected_part.text), string_strip(actual_part.text)) && ok;
         } else {
-            assert_equals(expected_part.text, actual_part.text);
+            ok = t.assert_equal(label + ".text", expected_part.text, actual_part.text) && ok;
         }
     }
     if (ignore_whitespace_differences) {
-        assert_equals(string_strip(expected.reasoning_content), string_strip(actual.reasoning_content));
+        ok = t.assert_equal("reasoning_content", string_strip(expected.reasoning_content), string_strip(actual.reasoning_content)) && ok;
     } else {
-        assert_equals(expected.reasoning_content, actual.reasoning_content);
+        ok = t.assert_equal("reasoning_content", expected.reasoning_content, actual.reasoning_content) && ok;
     }
-    assert_equals(expected.tool_calls.size(), actual.tool_calls.size());
-    for (size_t i = 0; i < expected.tool_calls.size(); i++) {
+    ok = t.assert_equal("tool_calls.size()", expected.tool_calls.size(), actual.tool_calls.size()) && ok;
+    for (size_t i = 0; i < std::min(expected.tool_calls.size(), actual.tool_calls.size()); i++) {
         const auto & expected_tool_call = expected.tool_calls[i];
         const auto & actual_tool_call   = actual.tool_calls[i];
-        assert_equals(expected_tool_call.name, actual_tool_call.name);
-        assert_equals(renormalize_json(expected_tool_call.arguments), renormalize_json(actual_tool_call.arguments));
-        assert_equals(expected_tool_call.id, actual_tool_call.id);
+        const auto   label              = "tool_calls[" + std::to_string(i) + "]";
+        ok = t.assert_equal(label + ".name", expected_tool_call.name, actual_tool_call.name) && ok;
+        ok = t.assert_equal(label + ".arguments", renormalize_json(expected_tool_call.arguments), renormalize_json(actual_tool_call.arguments)) && ok;
+        ok = t.assert_equal(label + ".id", expected_tool_call.id, actual_tool_call.id) && ok;
     }
+    return ok;
 }
 
 static common_chat_tool special_function_tool{
@@ -1109,13 +1096,17 @@ struct make_peg_parser {
     }
 };
 
-// Global template filter for --template flag
-static std::string g_template_filter;
+// When true, dump the parser and enable its debug output
+static bool g_detailed_debug = false;
 
 // When true, run reconstruction test on every non-partial test and report results
 static bool g_force_reconstruction_test = false;
 
-static void test_peg_parser(common_chat_templates *                      tmpls,
+// When true, a test filter was given on the command line
+static bool g_has_filter = false;
+
+static void test_peg_parser(testing &                                    t,
+                            common_chat_templates *                      tmpls,
                             const std::function<void(peg_test_case &)> & init,
                             bool                                         detailed_debug) {
     // UTF-8-safe truncation helper (same as in test_parser_with_streaming)
@@ -1203,25 +1194,24 @@ static void test_peg_parser(common_chat_templates *                      tmpls,
                 }
             }
         }
-        try {
-            assert_msg_equals(msg_current, msg_accum, true);
-        } catch (std::exception & e) {
-            throw std::runtime_error((std::string("Error comparing accumulated message to current: ") + e.what()).c_str());
+        if (!assert_msg_equals(t, msg_current, msg_accum, true)) {
+            t.stream() << t.indent() << "  accumulated message diverged from the parsed message after " << prefix.size() << " bytes\n";
+            return;
         }
 
         msg_prev = msg_current;
     }
 
     if (!tc.is_partial) {
-        assert_msg_equals(tc.expect, parser.parse(tc.input, false), true);
+        assert_msg_equals(t, tc.expect, parser.parse(tc.input, false), true);
     }
-    assert_msg_equals(tc.expect, msg_accum, true);
+    assert_msg_equals(t, tc.expect, msg_accum, true);
 
     // Test grammar if present in params
     if (!parser.params_.grammar.empty()) {
         auto grammar = build_grammar(parser.params_.grammar);
-        if (!grammar) {
-            throw std::runtime_error("Failed to build grammar: " + parser.params_.grammar);
+        if (!t.assert_true("failed to build grammar: " + parser.params_.grammar, grammar != nullptr)) {
+            return;
         }
 
         // In production, grammar triggers match against the full generated text
@@ -1357,10 +1347,11 @@ static void test_peg_parser(common_chat_templates *                      tmpls,
             for (const auto & trigger : parser.params_.grammar_triggers) {
                 trigger_desc += "\n  [type=" + std::to_string(trigger.type) + "] " + trigger.value;
             }
-            throw std::runtime_error(
+            t.assert_true(
                 "Grammar trigger did not fire, but test expects tool calls (lazy grammar).\n"
                 ">>> Input: " + full_input + "\n"
-                ">>> Triggers (" + std::to_string(parser.params_.grammar_triggers.size()) + "):" + trigger_desc);
+                ">>> Triggers (" + std::to_string(parser.params_.grammar_triggers.size()) + "):" + trigger_desc, false);
+            return;
         }
 
         // Determine the constrained portion of input to test against grammar.
@@ -1405,7 +1396,7 @@ static void test_peg_parser(common_chat_templates *                      tmpls,
                         "\n\n>>> Expected: " + result.expected_description +
                         "\n\n>>> Grammar: " + parser.params_.grammar;
                 }
-                throw std::runtime_error(error_msg);
+                t.assert_true(error_msg, false);
             }
         }
     }
@@ -1442,21 +1433,17 @@ static void test_peg_parser(common_chat_templates *                      tmpls,
             size_t ctx_start = diff_pos > 60 ? diff_pos - 60 : 0;
             size_t ctx_end_e = std::min(expected_text.size(), diff_pos + 40);
             size_t ctx_end_r = std::min(reconstruction_params.prompt.size(), diff_pos + 40);
-            LOG_ERR("\x1b[31m[RECONSTRUCTION FAIL]\x1b[0m "
-                    "first diff at byte %zu (expected len=%zu, reconstructed len=%zu)\n"
-                    "  expected:      ...%s...\n"
-                    "  reconstructed: ...%s...\n",
-                    diff_pos, expected_text.size(), reconstruction_params.prompt.size(),
-                    expected_text.substr(ctx_start, ctx_end_e - ctx_start).c_str(),
-                    reconstruction_params.prompt.substr(ctx_start, ctx_end_r - ctx_start).c_str());
+            t.stream() << t.indent() << "  [RECONSTRUCTION FAIL] first diff at byte " << diff_pos
+                       << " (expected len=" << expected_text.size() << ", reconstructed len=" << reconstruction_params.prompt.size() << ")\n"
+                       << t.indent() << "    expected:      ..." << expected_text.substr(ctx_start, ctx_end_e - ctx_start) << "...\n"
+                       << t.indent() << "    reconstructed: ..." << reconstruction_params.prompt.substr(ctx_start, ctx_end_r - ctx_start) << "...\n";
         } else if (!match) {
-            std::string error_msg =
+            t.assert_true(
                 "Reconstruction mismatch:\n\n"
                 ">>> Expected (prompt + input):\n" + expected_text +
-                "\n\n>>> Reconstructed:\n" + reconstruction_params.prompt;
-            throw std::runtime_error(error_msg);
+                "\n\n>>> Reconstructed:\n" + reconstruction_params.prompt, false);
         } else if (g_force_reconstruction_test) {
-            LOG_INF("\x1b[32m[RECONSTRUCTION OK]\x1b[0m\n");
+            t.log("[RECONSTRUCTION OK]");
         }
     }
 }
@@ -1465,13 +1452,16 @@ static void test_peg_parser(common_chat_templates *                      tmpls,
 class peg_test_builder;
 
 class peg_tester {
+    testing &                 t_;
     common_chat_templates_ptr tmpls_;
     std::string               template_path_;
     bool                      detailed_debug_;
+    int                       n_cases_ = 0;
     friend class peg_test_builder;
 
   public:
-    explicit peg_tester(const std::string & template_path, const bool detailed_debug = false) :
+    peg_tester(testing & t, const std::string & template_path, const bool detailed_debug = false) :
+        t_(t),
         tmpls_(read_templates(template_path)),
         template_path_(template_path),
         detailed_debug_(detailed_debug) {}
@@ -1568,23 +1558,13 @@ class peg_test_builder {
         return *this;
     }
 
-    // Execute the test
+    // Execute the test as a subtest named after the input
     void run() {
-        // Check template filter
-        if (!g_template_filter.empty()) {
-            // Case-insensitive substring match
-            std::string template_path_lower = tester_.template_path();
-            std::string filter_lower        = g_template_filter;
-            std::transform(template_path_lower.begin(), template_path_lower.end(), template_path_lower.begin(),
-                           ::tolower);
-            std::transform(filter_lower.begin(), filter_lower.end(), filter_lower.begin(), ::tolower);
-            if (template_path_lower.find(filter_lower) == std::string::npos) {
-                // Skip this test
-                return;
-            }
-        }
-        LOG_INF("\n\x1b[38;5;126m[%s]\x1b[0m\n%s\n\n", tester_.template_path().c_str(), tc_.input.c_str());
-        test_peg_parser(tester_.tmpls_.get(), [this](peg_test_case & t) { t = tc_; }, tester_.detailed_debug_);
+        const auto name = "#" + std::to_string(++tester_.n_cases_) + " " + preview(tc_.input);
+        tester_.t_.test(name, [this](testing & t) {
+            LOG_INF("\n\x1b[38;5;126m[%s]\x1b[0m\n%s\n\n", tester_.template_path().c_str(), tc_.input.c_str());
+            test_peg_parser(t, tester_.tmpls_.get(), [this](peg_test_case & tc) { tc = tc_; }, tester_.detailed_debug_);
+        });
     }
 };
 
@@ -1592,8 +1572,7 @@ peg_test_builder peg_tester::test(const std::string & input) {
     return peg_test_builder(*this, input);
 }
 
-static void test_msgs_oaicompat_json_conversion() {
-    LOG_DBG("%s\n", __func__);
+static void test_msgs_oaicompat_json_conversion(testing & t) {
     std::vector<common_chat_msg> msgs{
         message_user,
         message_user_parts,
@@ -1605,14 +1584,19 @@ static void test_msgs_oaicompat_json_conversion() {
         message_assist_call_idx,
         message_assist_call_python,
     };
-    for (const auto & msg : msgs) {
-        auto oai_json = common_chat_msgs_to_json_oaicompat({ msg });
-        auto msgs2    = common_chat_msgs_parse_oaicompat(oai_json);
-        assert_equals((size_t) 1, msgs2.size());
-        const auto & msg2 = msgs2[0];
-        assert_msg_equals(msg, msg2);
+    for (size_t i = 0; i < msgs.size(); i++) {
+        t.test("round trip #" + std::to_string(i), [&](testing & t) {
+            const auto & msg = msgs[i];
+            auto oai_json = common_chat_msgs_to_json_oaicompat({ msg });
+            auto msgs2    = common_chat_msgs_parse_oaicompat(oai_json);
+            if (!t.assert_equal("message count", (size_t) 1, msgs2.size())) {
+                return;
+            }
+            const auto & msg2 = msgs2[0];
+            assert_msg_equals(t, msg, msg2);
+        });
     }
-    assert_equals(std::string("[\n"
+    t.assert_equal("message_user_parts json", std::string("[\n"
                               "  {\n"
                               "    \"role\": \"user\",\n"
                               "    \"content\": [\n"
@@ -1630,7 +1614,7 @@ static void test_msgs_oaicompat_json_conversion() {
                   common_chat_msgs_to_json_oaicompat({ message_user_parts }).dump(2));
 
     // Note: content is "" instead of null due to workaround for templates that render null as "None"
-    assert_equals(std::string("[\n"
+    t.assert_equal("message_assist_call_python json", std::string("[\n"
                               "  {\n"
                               "    \"role\": \"assistant\",\n"
                               "    \"content\": \"\",\n"
@@ -1648,24 +1632,22 @@ static void test_msgs_oaicompat_json_conversion() {
                   common_chat_msgs_to_json_oaicompat({ message_assist_call_python }).dump(2));
 
     auto res = common_chat_msgs_parse_oaicompat(json::parse("[{\"role\": \"assistant\", \"tool_calls\": []}]"));
-    assert_equals<size_t>(1, res.size());
-    assert_equals<std::string>(res[0].role, "assistant");
-    assert_equals(true, res[0].content.empty());
-    assert_equals(true, res[0].tool_calls.empty());
+    if (t.assert_equal<size_t>("empty tool_calls message count", 1, res.size())) {
+        t.assert_equal<std::string>("empty tool_calls role", res[0].role, "assistant");
+        t.assert_equal("empty tool_calls content empty", true, res[0].content.empty());
+        t.assert_equal("empty tool_calls tool_calls empty", true, res[0].tool_calls.empty());
+    }
 
+    std::string error;
     try {
         common_chat_msgs_parse_oaicompat(json::parse("[{\"role\": \"assistant\"}]"));
-        throw std::runtime_error("Expected exception");
     } catch (const std::exception & e) {
-        if (std::string(e.what()).find("'content'") == std::string::npos) {
-            throw std::runtime_error("Expected exception about missing 'content'");
-        }
+        error = e.what();
     }
+    t.assert_true("expected an exception about missing 'content', got: " + error, error.find("'content'") != std::string::npos);
 }
 
-static void test_msg_token_delimiters_split() {
-    LOG_DBG("%s\n", __func__);
-
+static void test_msg_token_delimiters_split(testing & t) {
     // Delimiters that share a leading token, distinguished by the second token,
     // to exercise the per-position token matching.
     const common_chat_msg_delimiters delims = {
@@ -1673,16 +1655,19 @@ static void test_msg_token_delimiters_split() {
           { COMMON_CHAT_ROLE_ASSISTANT, "", { 10, 12 } } }
     };
 
-    // Empty inputs
-    assert_equals<size_t>(0, common_chat_msg_delimiters{}.split({}).spans.size());
-    assert_equals<size_t>(0, common_chat_msg_delimiters{}.split({ 10, 11 }).spans.size());
-    assert_equals<size_t>(0, delims.split({}).spans.size());
+    t.test("empty inputs", [&](testing & t) {
+        t.assert_equal<size_t>("no delimiters, no tokens", 0, common_chat_msg_delimiters{}.split({}).spans.size());
+        t.assert_equal<size_t>("no delimiters", 0, common_chat_msg_delimiters{}.split({ 10, 11 }).spans.size());
+        t.assert_equal<size_t>("no tokens", 0, delims.split({}).spans.size());
+    });
 
     // No delimiters match -> no spans
-    assert_equals<size_t>(0, delims.split({ 100, 101, 102 }).spans.size());
+    t.test("no delimiter matches", [&](testing & t) {
+        t.assert_equal<size_t>("spans.size()", 0, delims.split({ 100, 101, 102 }).spans.size());
+    });
 
     // Multi-role conversation: <user>Hi<assistant>Hello<user>Bye
-    {
+    t.test("multi-role conversation", [&](testing & t) {
         const llama_tokens tokens = {
             10, 11,            // <user>
             100, 101,          // Hi
@@ -1694,28 +1679,30 @@ static void test_msg_token_delimiters_split() {
 
         const auto result = delims.split(tokens);
         const auto & spans = result.spans;
-        assert_equals<size_t>(3, spans.size());
+        if (!t.assert_equal<size_t>("spans.size()", 3, spans.size())) {
+            return;
+        }
 
-        assert_equals(COMMON_CHAT_ROLE_USER, spans[0].role);
-        assert_equals<size_t>(0, spans[0].pos);
-        assert_equals<size_t>(4, spans[0].len);
+        t.assert_equal("spans[0].role", COMMON_CHAT_ROLE_USER, spans[0].role);
+        t.assert_equal<size_t>("spans[0].pos", 0, spans[0].pos);
+        t.assert_equal<size_t>("spans[0].len", 4, spans[0].len);
 
-        assert_equals(COMMON_CHAT_ROLE_ASSISTANT, spans[1].role);
-        assert_equals<size_t>(4, spans[1].pos);
-        assert_equals<size_t>(5, spans[1].len);
+        t.assert_equal("spans[1].role", COMMON_CHAT_ROLE_ASSISTANT, spans[1].role);
+        t.assert_equal<size_t>("spans[1].pos", 4, spans[1].pos);
+        t.assert_equal<size_t>("spans[1].len", 5, spans[1].len);
 
-        assert_equals(COMMON_CHAT_ROLE_USER, spans[2].role);
-        assert_equals<size_t>(9, spans[2].pos);
-        assert_equals<size_t>(4, spans[2].len);
+        t.assert_equal("spans[2].role", COMMON_CHAT_ROLE_USER, spans[2].role);
+        t.assert_equal<size_t>("spans[2].pos", 9, spans[2].pos);
+        t.assert_equal<size_t>("spans[2].len", 4, spans[2].len);
 
         // is_user_start() is true at the token position where a user span begins
-        assert_equals(true,  result.is_user_start(0));
-        assert_equals(false, result.is_user_start(4));  // assistant span
-        assert_equals(true,  result.is_user_start(9));
-    }
+        t.assert_equal("is_user_start(0)", true,  result.is_user_start(0));
+        t.assert_equal("is_user_start(4)", false, result.is_user_start(4));  // assistant span
+        t.assert_equal("is_user_start(9)", true,  result.is_user_start(9));
+    });
 
     // Content before the first delimiter is not captured as a span
-    {
+    t.test("content before first delimiter", [&](testing & t) {
         const llama_tokens tokens = {
             500, 501,    // leading content (dropped)
             10, 11,      // <user>
@@ -1723,14 +1710,16 @@ static void test_msg_token_delimiters_split() {
         };
 
         const auto spans = delims.split(tokens).spans;
-        assert_equals<size_t>(1, spans.size());
-        assert_equals(COMMON_CHAT_ROLE_USER, spans[0].role);
-        assert_equals<size_t>(2, spans[0].pos);
-        assert_equals<size_t>(3, spans[0].len);
-    }
+        if (!t.assert_equal<size_t>("spans.size()", 1, spans.size())) {
+            return;
+        }
+        t.assert_equal("spans[0].role", COMMON_CHAT_ROLE_USER, spans[0].role);
+        t.assert_equal<size_t>("spans[0].pos", 2, spans[0].pos);
+        t.assert_equal<size_t>("spans[0].len", 3, spans[0].len);
+    });
 
     // Skipped regions (media chunks) are jumped over but still count as span content
-    {
+    t.test("skipped regions", [&](testing & t) {
         const llama_tokens tokens = {
             10, 11,             // <user>
             LLAMA_TOKEN_NULL,   // media chunk (3 tokens)
@@ -1743,19 +1732,21 @@ static void test_msg_token_delimiters_split() {
         const std::map<size_t, size_t> skips = { { 2, 3 } };
 
         const auto spans = delims.split(tokens, skips).spans;
-        assert_equals<size_t>(2, spans.size());
+        if (!t.assert_equal<size_t>("spans.size()", 2, spans.size())) {
+            return;
+        }
 
-        assert_equals(COMMON_CHAT_ROLE_USER, spans[0].role);
-        assert_equals<size_t>(0, spans[0].pos);
-        assert_equals<size_t>(6, spans[0].len);
+        t.assert_equal("spans[0].role", COMMON_CHAT_ROLE_USER, spans[0].role);
+        t.assert_equal<size_t>("spans[0].pos", 0, spans[0].pos);
+        t.assert_equal<size_t>("spans[0].len", 6, spans[0].len);
 
-        assert_equals(COMMON_CHAT_ROLE_ASSISTANT, spans[1].role);
-        assert_equals<size_t>(6, spans[1].pos);
-        assert_equals<size_t>(2, spans[1].len);
-    }
+        t.assert_equal("spans[1].role", COMMON_CHAT_ROLE_ASSISTANT, spans[1].role);
+        t.assert_equal<size_t>("spans[1].pos", 6, spans[1].pos);
+        t.assert_equal<size_t>("spans[1].len", 2, spans[1].len);
+    });
 
     // A delimiter sequence inside a skipped region is not matched
-    {
+    t.test("delimiter inside skipped region", [&](testing & t) {
         const llama_tokens tokens = {
             10, 11,      // <user>
             10, 12,      // skipped region that happens to contain delimiter tokens
@@ -1765,15 +1756,16 @@ static void test_msg_token_delimiters_split() {
         const std::map<size_t, size_t> skips = { { 2, 2 } };
 
         const auto spans = delims.split(tokens, skips).spans;
-        assert_equals<size_t>(1, spans.size());
-        assert_equals(COMMON_CHAT_ROLE_USER, spans[0].role);
-        assert_equals<size_t>(0, spans[0].pos);
-        assert_equals<size_t>(5, spans[0].len);
-    }
+        if (!t.assert_equal<size_t>("spans.size()", 1, spans.size())) {
+            return;
+        }
+        t.assert_equal("spans[0].role", COMMON_CHAT_ROLE_USER, spans[0].role);
+        t.assert_equal<size_t>("spans[0].pos", 0, spans[0].pos);
+        t.assert_equal<size_t>("spans[0].len", 5, spans[0].len);
+    });
 }
 
-static void test_tools_oaicompat_json_conversion() {
-    LOG_DBG("%s\n", __func__);
+static void test_tools_oaicompat_json_conversion(testing & t) {
     std::vector<common_chat_tool> tools{
         special_function_tool,
         python_tool,
@@ -1782,14 +1774,16 @@ static void test_tools_oaicompat_json_conversion() {
     for (const auto & tool : tools) {
         auto oai_json = common_chat_tools_to_json_oaicompat({ tool });
         auto tools2   = common_chat_tools_parse_oaicompat(oai_json);
-        assert_equals((size_t) 1, tools2.size());
+        if (!t.assert_equal(tool.name + " round trip count", (size_t) 1, tools2.size())) {
+            continue;
+        }
         auto tool2 = tools2[0];
-        assert_equals(tool.name, tool2.name);
-        assert_equals(tool.description, tool2.description);
-        assert_equals(json::parse(tool.parameters).dump(2), json::parse(tool2.parameters).dump(2));
+        t.assert_equal(tool.name + " name", tool.name, tool2.name);
+        t.assert_equal(tool.name + " description", tool.description, tool2.description);
+        t.assert_equal(tool.name + " parameters", json::parse(tool.parameters).dump(2), json::parse(tool2.parameters).dump(2));
     }
 
-    assert_equals(std::string("[\n"
+    t.assert_equal("special_function_tool json", std::string("[\n"
                               "  {\n"
                               "    \"type\": \"function\",\n"
                               "    \"function\": {\n"
@@ -1813,11 +1807,9 @@ static void test_tools_oaicompat_json_conversion() {
                   common_chat_tools_to_json_oaicompat({ special_function_tool }).dump(2));
 }
 
-static void test_convert_responses_to_chatcmpl() {
-    LOG_DBG("%s\n", __func__);
-
+static void test_convert_responses_to_chatcmpl(testing & t) {
     // Test basic conversion with input messages (user/assistant alternating)
-    {
+    t.test("input messages", [](testing & t) {
         json input = json::parse(R"({
             "input": [
                 {
@@ -1847,38 +1839,40 @@ static void test_convert_responses_to_chatcmpl() {
         json result = server_chat_convert_responses_to_chatcmpl(input);
 
         // Verify messages were converted correctly
-        assert_equals(true, result.contains("messages"));
-        assert_equals(true, result.at("messages").is_array());
-        assert_equals((size_t)3, result.at("messages").size());
+        t.assert_equal("has messages", true, result.contains("messages"));
+        t.assert_equal("messages is array", true, result.at("messages").is_array());
+        if (!t.assert_equal("messages.size()", (size_t)3, result.at("messages").size())) {
+            return;
+        }
 
         // Check first message (user)
         const auto & msg0 = result.at("messages")[0];
-        assert_equals(std::string("user"), msg0.at("role").get<std::string>());
-        assert_equals(true, msg0.at("content").is_array());
-        assert_equals(std::string("text"), msg0.at("content")[0].at("type").get<std::string>());
-        assert_equals(std::string("hi wassup"), msg0.at("content")[0].at("text").get<std::string>());
+        t.assert_equal("messages[0].role", std::string("user"), msg0.at("role").get<std::string>());
+        t.assert_equal("messages[0].content is array", true, msg0.at("content").is_array());
+        t.assert_equal("messages[0].content[0].type", std::string("text"), msg0.at("content")[0].at("type").get<std::string>());
+        t.assert_equal("messages[0].content[0].text", std::string("hi wassup"), msg0.at("content")[0].at("text").get<std::string>());
 
         // Check second message (assistant)
         const auto & msg1 = result.at("messages")[1];
-        assert_equals(std::string("assistant"), msg1.at("role").get<std::string>());
-        assert_equals(true, msg1.at("content").is_array());
-        assert_equals(std::string("text"), msg1.at("content")[0].at("type").get<std::string>());
-        assert_equals(std::string("Hey! 👋 Not much, just here ready to chat. What's up with you? Anything I can help you with today?"), msg1.at("content")[0].at("text").get<std::string>());
+        t.assert_equal("messages[1].role", std::string("assistant"), msg1.at("role").get<std::string>());
+        t.assert_equal("messages[1].content is array", true, msg1.at("content").is_array());
+        t.assert_equal("messages[1].content[0].type", std::string("text"), msg1.at("content")[0].at("type").get<std::string>());
+        t.assert_equal("messages[1].content[0].text", std::string("Hey! 👋 Not much, just here ready to chat. What's up with you? Anything I can help you with today?"), msg1.at("content")[0].at("text").get<std::string>());
 
         // Check third message (user)
         const auto & msg2 = result.at("messages")[2];
-        assert_equals(std::string("user"), msg2.at("role").get<std::string>());
-        assert_equals(true, msg2.at("content").is_array());
-        assert_equals(std::string("text"), msg2.at("content")[0].at("type").get<std::string>());
-        assert_equals(std::string("hi"), msg2.at("content")[0].at("text").get<std::string>());
+        t.assert_equal("messages[2].role", std::string("user"), msg2.at("role").get<std::string>());
+        t.assert_equal("messages[2].content is array", true, msg2.at("content").is_array());
+        t.assert_equal("messages[2].content[0].type", std::string("text"), msg2.at("content")[0].at("type").get<std::string>());
+        t.assert_equal("messages[2].content[0].text", std::string("hi"), msg2.at("content")[0].at("text").get<std::string>());
 
         // Verify other fields preserved
-        assert_equals(std::string("gpt-5-mini"), result.at("model").get<std::string>());
-        assert_equals(false, result.at("stream").get<bool>());
-    }
+        t.assert_equal("model", std::string("gpt-5-mini"), result.at("model").get<std::string>());
+        t.assert_equal("stream", false, result.at("stream").get<bool>());
+    });
 
     // Test string input
-    {
+    t.test("string input", [](testing & t) {
         json input = json::parse(R"({
             "input": "Hello, world!",
             "model": "test-model"
@@ -1886,14 +1880,16 @@ static void test_convert_responses_to_chatcmpl() {
 
         json result = server_chat_convert_responses_to_chatcmpl(input);
 
-        assert_equals((size_t)1, result.at("messages").size());
+        if (!t.assert_equal("messages.size()", (size_t)1, result.at("messages").size())) {
+            return;
+        }
         const auto & msg = result.at("messages")[0];
-        assert_equals(std::string("user"), msg.at("role").get<std::string>());
-        assert_equals(std::string("Hello, world!"), msg.at("content").get<std::string>());
-    }
+        t.assert_equal("messages[0].role", std::string("user"), msg.at("role").get<std::string>());
+        t.assert_equal("messages[0].content", std::string("Hello, world!"), msg.at("content").get<std::string>());
+    });
 
     // Test with instructions (system message)
-    {
+    t.test("instructions", [](testing & t) {
         json input = json::parse(R"({
             "input": "Hello",
             "instructions": "You are a helpful assistant.",
@@ -1902,14 +1898,16 @@ static void test_convert_responses_to_chatcmpl() {
 
         json result = server_chat_convert_responses_to_chatcmpl(input);
 
-        assert_equals((size_t)2, result.at("messages").size());
+        if (!t.assert_equal("messages.size()", (size_t)2, result.at("messages").size())) {
+            return;
+        }
         const auto & sys_msg = result.at("messages")[0];
-        assert_equals(std::string("system"), sys_msg.at("role").get<std::string>());
-        assert_equals(std::string("You are a helpful assistant."), sys_msg.at("content").get<std::string>());
-    }
+        t.assert_equal("messages[0].role", std::string("system"), sys_msg.at("role").get<std::string>());
+        t.assert_equal("messages[0].content", std::string("You are a helpful assistant."), sys_msg.at("content").get<std::string>());
+    });
 
     // Test with max_output_tokens conversion
-    {
+    t.test("max_output_tokens", [](testing & t) {
         json input = json::parse(R"({
             "input": "Hello",
             "model": "test-model",
@@ -1918,13 +1916,13 @@ static void test_convert_responses_to_chatcmpl() {
 
         json result = server_chat_convert_responses_to_chatcmpl(input);
 
-        assert_equals(true, result.contains("max_tokens"));
-        assert_equals(false, result.contains("max_output_tokens"));
-        assert_equals(100, result.at("max_tokens").get<int>());
-    }
+        t.assert_equal("has max_tokens", true, result.contains("max_tokens"));
+        t.assert_equal("has max_output_tokens", false, result.contains("max_output_tokens"));
+        t.assert_equal("max_tokens", 100, result.at("max_tokens").get<int>());
+    });
 
     // Test mixed Responses tools: convert only function tools
-    {
+    t.test("mixed tools", [](testing & t) {
         json input = json::parse(R"({
             "input": "Hello",
             "model": "test-model",
@@ -1962,18 +1960,20 @@ static void test_convert_responses_to_chatcmpl() {
 
         json result = server_chat_convert_responses_to_chatcmpl(input);
 
-        assert_equals(true, result.contains("tools"));
-        assert_equals(true, result.at("tools").is_array());
-        assert_equals((size_t)1, result.at("tools").size());
+        t.assert_equal("has tools", true, result.contains("tools"));
+        t.assert_equal("tools is array", true, result.at("tools").is_array());
+        if (!t.assert_equal("tools.size()", (size_t)1, result.at("tools").size())) {
+            return;
+        }
 
         const auto & tool = result.at("tools")[0];
-        assert_equals(std::string("function"), tool.at("type").get<std::string>());
-        assert_equals(std::string("get_weather"), tool.at("function").at("name").get<std::string>());
-        assert_equals(true, tool.at("function").at("strict").get<bool>());
-    }
+        t.assert_equal("tools[0].type", std::string("function"), tool.at("type").get<std::string>());
+        t.assert_equal("tools[0].function.name", std::string("get_weather"), tool.at("function").at("name").get<std::string>());
+        t.assert_equal("tools[0].function.strict", true, tool.at("function").at("strict").get<bool>());
+    });
 
     // Test non-function Responses tools are ignored
-    {
+    t.test("non-function tools", [](testing & t) {
         json input = json::parse(R"({
             "input": "Hello",
             "model": "test-model",
@@ -1997,13 +1997,13 @@ static void test_convert_responses_to_chatcmpl() {
 
         json result = server_chat_convert_responses_to_chatcmpl(input);
 
-        assert_equals(false, result.contains("tools"));
-    }
+        t.assert_equal("has tools", false, result.contains("tools"));
+    });
 }
 
 // Shared LFM2 parser cases - all variants use one output format and parser
-static void test_lfm2_parser(const std::string & template_path, bool detailed_debug) {
-    auto tst = peg_tester(template_path, detailed_debug);
+static void test_lfm2_parser(testing & t, const std::string & template_path, bool detailed_debug) {
+    auto tst = peg_tester(t, template_path, detailed_debug);
 
     // Basic content only
     tst.test("Hello, world!\nWhat's up?").expect(message_assist).run();
@@ -2117,8 +2117,8 @@ static void test_lfm2_parser(const std::string & template_path, bool detailed_de
 
 }
 
-static void test_template_output_peg_parsers(bool detailed_debug) {
-    LOG_DBG("%s\n", __func__);
+static void test_template_output_peg_parsers(testing & t) {
+    const bool detailed_debug = g_detailed_debug;
 
     // JSON schemas
     const char * invoice_schema = R"({
@@ -2133,9 +2133,9 @@ static void test_template_output_peg_parsers(bool detailed_debug) {
         "const": "42"
     })";
 
-    {
+    t.test("Qwen3.5-4B", [&](testing & t) {
         // Qwen3.5 (basically same as Nemotron, but keeping separate tests just in case)
-        auto tst = peg_tester("models/templates/Qwen3.5-4B.jinja", detailed_debug);
+        auto tst = peg_tester(t, "models/templates/Qwen3.5-4B.jinja", detailed_debug);
 
         tst.test("I'm\nthinking\n</think>\n\nHello, world!\nWhat's up?")
             .reasoning_format(COMMON_REASONING_FORMAT_AUTO)
@@ -2585,11 +2585,11 @@ static void test_template_output_peg_parsers(bool detailed_debug) {
                 })
                 .run();
         }
-    }
+    });
 
-    {
+    t.test("mistralai-Ministral-3-14B-Reasoning-2512", [&](testing & t) {
         // Ministral-3-14B-Reasoning-2512
-        auto tst = peg_tester("models/templates/mistralai-Ministral-3-14B-Reasoning-2512.jinja", detailed_debug);
+        auto tst = peg_tester(t, "models/templates/mistralai-Ministral-3-14B-Reasoning-2512.jinja", detailed_debug);
 
         tst.test("Hello, world!\nWhat's up?").expect(message_assist).expect_reconstruction().run();
 
@@ -2680,11 +2680,11 @@ static void test_template_output_peg_parsers(bool detailed_debug) {
             .expect_reasoning("I'm thinking")
             .expect_content("Hello, world!\nWhat's up?")
             .run();
-    }
+    });
 
-    {
+    t.test("NVIDIA-Nemotron-3-Nano-30B-A3B-BF16", [&](testing & t) {
         // NVIDIA Nemotron-3 Nano
-        auto tst = peg_tester("models/templates/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16.jinja", detailed_debug);
+        auto tst = peg_tester(t, "models/templates/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16.jinja", detailed_debug);
 
         tst.test("Hello, world!\nWhat's up?").
             enable_thinking(false).
@@ -2803,11 +2803,11 @@ static void test_template_output_peg_parsers(bool detailed_debug) {
             .expect_reasoning("I'm thinking")
             .expect_content("Hello, world!\nWhat's up?")
             .run();
-    }
+    });
 
-    {
+    t.test("CohereForAI-c4ai-command-r7b-12-2024-tool_use", [&](testing & t) {
         // CohereForAI Command-R 7B (2024-tool_use)
-        auto tst = peg_tester("models/templates/CohereForAI-c4ai-command-r7b-12-2024-tool_use.jinja", detailed_debug);
+        auto tst = peg_tester(t, "models/templates/CohereForAI-c4ai-command-r7b-12-2024-tool_use.jinja", detailed_debug);
 
         tst.test("<|START_RESPONSE|>Hello, world!\nWhat's up?<|END_RESPONSE|>").expect(message_assist).run();
 
@@ -2853,15 +2853,15 @@ static void test_template_output_peg_parsers(bool detailed_debug) {
             .tools({ special_function_tool })
             .expect(message_assist_call_idx)
             .run();
-    }
+    });
 
-    {
+    t.test("Cohere2MoE", [&](testing & t) {
         // Cohere2 MoE (North Code) - dedicated parser.
         // Marker-wrapped format: <|START_THINKING|>...<|END_THINKING|> then either
         // <|START_TEXT|>...<|END_TEXT|> (content) or <|START_ACTION|>[json]<|END_ACTION|> (tools).
         // The generation prompt forces a leading <|START_THINKING|>, so model output begins inside
         // the thinking block: test inputs start with the reasoning body, not the <|START_THINKING|> tag.
-        auto tst = peg_tester("models/templates/Cohere2MoE.jinja", detailed_debug);
+        auto tst = peg_tester(t, "models/templates/Cohere2MoE.jinja", detailed_debug);
 
         // Content with reasoning, extracted.
         tst.test("I'm\nthinking<|END_THINKING|><|START_TEXT|>Hello, world!\nWhat's up?<|END_TEXT|>")
@@ -2958,11 +2958,11 @@ static void test_template_output_peg_parsers(bool detailed_debug) {
             .is_partial(true)
             .expect(message_assist_thoughts_partial_call)
             .run();
-    }
+    });
 
-    {
+    t.test("google-gemma-2-2b-it", [&](testing & t) {
         // Google Gemma 2 2B - does not support tool calling
-        auto tst = peg_tester("models/templates/google-gemma-2-2b-it.jinja");
+        auto tst = peg_tester(t, "models/templates/google-gemma-2-2b-it.jinja");
 
         tst.test("Hello, world!").expect(simple_assist_msg("Hello, world!")).expect_reconstruction().run();
 
@@ -2975,11 +2975,11 @@ static void test_template_output_peg_parsers(bool detailed_debug) {
             .continue_final_message(COMMON_CHAT_CONTINUATION_CONTENT)
             .expect_content("Hello, world!\nWhat's up?")
             .run();
-    }
+    });
 
-    {
+    t.test("google-gemma-4-31B-it", [&](testing & t) {
         // Google Gemma 4 (tool calling with Gemma4 dict format)
-        auto tst = peg_tester("models/templates/google-gemma-4-31B-it.jinja");
+        auto tst = peg_tester(t, "models/templates/google-gemma-4-31B-it.jinja");
 
         tst.test("Hello, world!").expect(simple_assist_msg("Hello, world!")).run();
 
@@ -3167,7 +3167,7 @@ static void test_template_output_peg_parsers(bool detailed_debug) {
             .expect_content("Hello, world!\nWhat's up?")
             .run();
 
-        {
+        t.test("google-gemma-4-31B-it generation prompt after tool call", [](testing & t) {
             // additional tests for https://github.com/ggml-org/llama.cpp/pull/21760
             auto tmpls = read_templates("models/templates/google-gemma-4-31B-it.jinja");
 
@@ -3188,9 +3188,7 @@ static void test_template_output_peg_parsers(bool detailed_debug) {
 
                 auto params = common_chat_templates_apply(tmpls.get(), inputs);
 
-                if (!string_ends_with(params.prompt, "<turn|>\n<|turn>model\n")) {
-                    throw std::runtime_error("Missing generation prompt for Gemma 4");
-                }
+                assert_ends_with(t, params.prompt, "<turn|>\n<|turn>model\n");
             }
 
             {
@@ -3201,13 +3199,12 @@ static void test_template_output_peg_parsers(bool detailed_debug) {
 
                 auto params = common_chat_templates_apply(tmpls.get(), inputs);
 
-                if (string_ends_with(params.prompt, "<|turn>model\n")) {
-                    throw std::runtime_error("Gemma 4: generation prompt was modified despite add_generation_prompt=false");
-                }
+                t.assert_true("generation prompt was modified despite add_generation_prompt=false",
+                              !string_ends_with(params.prompt, "<|turn>model\n"));
             }
-        }
+        });
 
-        {
+        t.test("StepFun3.5-Flash trimming", [](testing & t) {
             // StepFun trimming regression test (see https://github.com/ggml-org/llama.cpp/pull/25238)
             auto tmpls = read_templates("models/templates/StepFun3.5-Flash.jinja");
 
@@ -3220,13 +3217,8 @@ static void test_template_output_peg_parsers(bool detailed_debug) {
 
                 auto params = common_chat_templates_apply(tmpls.get(), inputs);
 
-                if (params.prompt.find("Let me check.\n\n") != std::string::npos) {
-                    throw std::runtime_error("StepFun 3.5: content not trimmed");
-                }
-
-                if (params.prompt.find("I am thinking.\n\n") != std::string::npos) {
-                    throw std::runtime_error("StepFun 3.5: reasoning_content not trimmed");
-                }
+                assert_not_contains(t, params.prompt, "Let me check.\n\n");
+                assert_not_contains(t, params.prompt, "I am thinking.\n\n");
             }
 
             {
@@ -3246,24 +3238,20 @@ static void test_template_output_peg_parsers(bool detailed_debug) {
 
                 auto params = common_chat_templates_apply(tmpls.get(), inputs);
 
-                if (params.prompt.find("First part.\n\n") != std::string::npos ||
-                    params.prompt.find("Second part.\n\n") != std::string::npos) {
-                    throw std::runtime_error("StepFun 3.5: text content parts not trimmed");
-                }
+                assert_not_contains(t, params.prompt, "First part.\n\n");
+                assert_not_contains(t, params.prompt, "Second part.\n\n");
 
                 // the trimmed text itself must still be present
-                if (params.prompt.find("First part.") == std::string::npos ||
-                    params.prompt.find("Second part.") == std::string::npos) {
-                    throw std::runtime_error("StepFun 3.5: text content parts missing after trim");
-                }
+                assert_contains(t, params.prompt, "First part.");
+                assert_contains(t, params.prompt, "Second part.");
             }
-        }
+        });
 
-    }
+    });
 
-    {
+    t.test("Qwen-QwQ-32B", [&](testing & t) {
         // Qwen-QwQ-32B (reasoning model)
-        auto tst = peg_tester("models/templates/Qwen-QwQ-32B.jinja");
+        auto tst = peg_tester(t, "models/templates/Qwen-QwQ-32B.jinja");
 
         // QwQ always has thinking forced open - input starts after the <think>\n in the prompt
         tst.test("Let me think about this...\n</think>\nThe answer is 42.")
@@ -3294,10 +3282,10 @@ static void test_template_output_peg_parsers(bool detailed_debug) {
             .expect_reasoning("I'm thinking")
             .expect_content("Hello, world!\nWhat's up?")
             .run();
-    }
-    {
+    });
+    t.test("NousResearch-Hermes-2-Pro-Llama-3-8B-tool_use", [&](testing & t) {
         // NousResearch-Hermes-2-Pro and Hermes-3 (tool calling models)
-        auto tst = peg_tester("models/templates/NousResearch-Hermes-2-Pro-Llama-3-8B-tool_use.jinja", detailed_debug);
+        auto tst = peg_tester(t, "models/templates/NousResearch-Hermes-2-Pro-Llama-3-8B-tool_use.jinja", detailed_debug);
 
         tst.test(
                "<tool_call>\n"
@@ -3325,16 +3313,16 @@ static void test_template_output_peg_parsers(bool detailed_debug) {
             .continue_final_message(COMMON_CHAT_CONTINUATION_CONTENT)
             .expect_content("Hello, world!\nWhat's up?")
             .run();
-    }
-    {
+    });
+    t.test("google-gemma-2-2b-it", [&](testing & t) {
         // Test simple content-only template
-        auto tst = peg_tester("models/templates/google-gemma-2-2b-it.jinja", detailed_debug);
+        auto tst = peg_tester(t, "models/templates/google-gemma-2-2b-it.jinja", detailed_debug);
 
         tst.test("Hello, world!\nWhat's up?").expect(message_assist).expect_reconstruction().run();
-    }
-    {
+    });
+    t.test("ibm-granite-granite-3.3-2B-Instruct", [&](testing & t) {
         // IBM Granite (reasoning and tool calling model)
-        auto tst = peg_tester("models/templates/ibm-granite-granite-3.3-2B-Instruct.jinja", detailed_debug);
+        auto tst = peg_tester(t, "models/templates/ibm-granite-granite-3.3-2B-Instruct.jinja", detailed_debug);
 
         tst.test("Hello, world!\nWhat's up?").expect(message_assist).run();
 
@@ -3369,12 +3357,12 @@ static void test_template_output_peg_parsers(bool detailed_debug) {
             .expect_reasoning("I'm thinking")
             .expect_content("Hello, world!\nWhat's up?")
             .run();
-    }
+    });
 
-    {
+    t.test("ibm-granite-granite-4.0", [&](testing & t) {
         // IBM Granite 4.0 (production template shared by h-tiny, h-small, micro)
         // Uses <tool_call> XML tags for tool calls, tools in system message
-        auto tst = peg_tester("models/templates/ibm-granite-granite-4.0.jinja", detailed_debug);
+        auto tst = peg_tester(t, "models/templates/ibm-granite-granite-4.0.jinja", detailed_debug);
 
         tst.test("Hello, world!\nWhat's up?").expect(message_assist).run();
 
@@ -3393,11 +3381,11 @@ static void test_template_output_peg_parsers(bool detailed_debug) {
             .continue_final_message(COMMON_CHAT_CONTINUATION_CONTENT)
             .expect_content("Hello, world!\nWhat's up?")
             .run();
-    }
+    });
 
-    {
+    t.test("ibm-granite-granite-4.1", [&](testing & t) {
         // IBM Granite 4.1 (same format as 4.0)
-        auto tst = peg_tester("models/templates/ibm-granite-granite-4.1.jinja", detailed_debug);
+        auto tst = peg_tester(t, "models/templates/ibm-granite-granite-4.1.jinja", detailed_debug);
 
         tst.test("Hello, world!\nWhat's up?").expect(message_assist).run();
 
@@ -3408,11 +3396,11 @@ static void test_template_output_peg_parsers(bool detailed_debug) {
             .tools({ special_function_tool })
             .expect(message_assist_call)
             .run();
-    }
+    });
 
-    {
+    t.test("ByteDance-Seed-OSS", [&](testing & t) {
         // ByteDance-Seed-OSS (reasoning and tool calling model)
-        auto tst = peg_tester("models/templates/ByteDance-Seed-OSS.jinja", detailed_debug);
+        auto tst = peg_tester(t, "models/templates/ByteDance-Seed-OSS.jinja", detailed_debug);
 
         tst.test("Hello, world!\nWhat's up?").expect(message_assist).run();
 
@@ -3515,11 +3503,11 @@ static void test_template_output_peg_parsers(bool detailed_debug) {
             .expect_reasoning("I'm thinking")
             .expect_content("Hello, world!\nWhat's up?")
             .run();
-    }
+    });
 
-    {
+    t.test("Qwen3-Coder", [&](testing & t) {
         // Qwen3-Coder (tool calling with XML-style format)
-        auto tst = peg_tester("models/templates/Qwen3-Coder.jinja", detailed_debug);
+        auto tst = peg_tester(t, "models/templates/Qwen3-Coder.jinja", detailed_debug);
 
         tst.test("Hello, world!\nWhat's up?").expect(message_assist).expect_reconstruction().run();
 
@@ -3884,9 +3872,9 @@ static void test_template_output_peg_parsers(bool detailed_debug) {
             .continue_final_message(COMMON_CHAT_CONTINUATION_CONTENT)
             .expect_content("Hello, world!\nWhat's up?")
             .run();
-    }
-    {
-        auto tst = peg_tester("models/templates/deepseek-ai-DeepSeek-V3.1.jinja", detailed_debug);
+    });
+    t.test("deepseek-ai-DeepSeek-V3.1", [&](testing & t) {
+        auto tst = peg_tester(t, "models/templates/deepseek-ai-DeepSeek-V3.1.jinja", detailed_debug);
         tst.test(
                "<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>get_time<｜tool▁sep｜>{\"city\": "
                "\"XYZCITY\"}<｜tool▁call▁end｜><｜tool▁calls▁end｜>")
@@ -3916,10 +3904,7 @@ static void test_template_output_peg_parsers(bool detailed_debug) {
             .expect_reasoning("I'm thinking")
             .expect_content("Hello, world!\nWhat's up?")
             .run();
-    }
 
-    {
-        auto tst = peg_tester("models/templates/deepseek-ai-DeepSeek-V3.1.jinja", detailed_debug);
         tst.test(
                "REASONING</think><｜tool▁calls▁begin｜><｜tool▁call▁begin｜>get_time<｜tool▁sep｜>{\"city\": "
                "\"Tokyo\"}<｜tool▁call▁end｜><｜tool▁calls▁end｜>")
@@ -3928,10 +3913,7 @@ static void test_template_output_peg_parsers(bool detailed_debug) {
             .tools({ get_time_tool })
             .expect(message_with_tool_calls_and_reasoning("get_time", "{\"city\":\"Tokyo\"}", "REASONING"))
             .run();
-    }
 
-    {
-        auto tst = peg_tester("models/templates/deepseek-ai-DeepSeek-V3.1.jinja", detailed_debug);
         tst.test(
                "REASONING</think>CONTENT<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>get_time<｜tool▁sep｜>{\"city\": "
                "\"Paris\"}<｜tool▁call▁end｜><｜tool▁call▁begin｜>get_weather<｜tool▁sep｜>{\"city\": "
@@ -3946,22 +3928,16 @@ static void test_template_output_peg_parsers(bool detailed_debug) {
                 "REASONING", "CONTENT",
                 { { "get_time", "{\"city\":\"Paris\"}" }, { "get_weather", "{\"city\":\"Paris\"}" } }))
             .run();
-    }
 
-    {
-        auto tst = peg_tester("models/templates/deepseek-ai-DeepSeek-V3.1.jinja", detailed_debug);
         tst.test("REASONING</think>\nCONTENT")
             .enable_thinking(true)
             .reasoning_format(COMMON_REASONING_FORMAT_DEEPSEEK)
             .expect(simple_assist_msg("CONTENT", "REASONING\n"))
             .run();
-    }
 
-    {
-        auto tst = peg_tester("models/templates/deepseek-ai-DeepSeek-V3.1.jinja", detailed_debug);
         tst.test("CONTENT").enable_thinking(false).reasoning_format(COMMON_REASONING_FORMAT_DEEPSEEK).
             expect(simple_assist_msg("CONTENT", "")).run();
-    }
+    });
 
     // DeepSeek V3.2 tests - format uses DSML markup:
     //   <｜DSML｜function_calls>
@@ -3971,8 +3947,8 @@ static void test_template_output_peg_parsers(bool detailed_debug) {
     //   </｜DSML｜function_calls>
     // Reasoning uses <think>...</think>. The generation prompt ends in <think> (thinking mode)
     // or <think></think> (non-thinking mode).
-    {
-        auto tst = peg_tester("models/templates/deepseek-ai-DeepSeek-V3.2.jinja", detailed_debug);
+    t.test("deepseek-ai-DeepSeek-V3.2", [&](testing & t) {
+        auto tst = peg_tester(t, "models/templates/deepseek-ai-DeepSeek-V3.2.jinja", detailed_debug);
 
         // Pure content (non-thinking mode)
         tst.test("Hello, world!\nWhat's up?")
@@ -4192,13 +4168,13 @@ static void test_template_output_peg_parsers(bool detailed_debug) {
             .expect_reasoning("I'm thinking")
             .expect_content("Hello, world!\nWhat's up?")
             .run();
-    }
+    });
 
     // DeepSeek V4 tests - same DSML markup as V3.2, but the tool call block is named
     // "tool_calls" and the non-thinking generation prompt ends in a bare </think>
     // instead of an empty <think></think> pair.
-    {
-        auto tst = peg_tester("models/templates/deepseek-ai-DeepSeek-V4.jinja", detailed_debug);
+    t.test("deepseek-ai-DeepSeek-V4", [&](testing & t) {
+        auto tst = peg_tester(t, "models/templates/deepseek-ai-DeepSeek-V4.jinja", detailed_debug);
 
         // Pure content (non-thinking mode; generation prompt ends with </think>)
         tst.test("Hello, world!\nWhat's up?")
@@ -4333,11 +4309,11 @@ static void test_template_output_peg_parsers(bool detailed_debug) {
             .expect_reasoning("Let me check the time")
             .expect_tool_calls({ { "get_time", R"({"city": "Tokyo"})", {} } })
             .run();
-    }
+    });
 
-    {
+    t.test("deepseek-ai-DeepSeek-V4-Flash-0731", [&](testing & t) {
         // The DSML separator belongs to the tool call block, not assistant content.
-        auto tst = peg_tester("models/templates/deepseek-ai-DeepSeek-V4-Flash-0731.jinja", detailed_debug);
+        auto tst = peg_tester(t, "models/templates/deepseek-ai-DeepSeek-V4-Flash-0731.jinja", detailed_debug);
         tst.test(
                "\n\n"
                "<｜DSML｜tool_calls>\n"
@@ -4351,11 +4327,11 @@ static void test_template_output_peg_parsers(bool detailed_debug) {
             .expect(message_assist_call)
             .expect_reconstruction()
             .run();
-    }
+    });
 
     // GLM-4.6 tests - format: <tool_call>function_name\n<arg_key>...</arg_key>\n<arg_value>...</arg_value>\n</tool_call>
-    {
-        auto tst = peg_tester("models/templates/GLM-4.6.jinja", detailed_debug);
+    t.test("GLM-4.6", [&](testing & t) {
+        auto tst = peg_tester(t, "models/templates/GLM-4.6.jinja", detailed_debug);
         tst.test(
                "<tool_call>special_function\n"
                "<arg_key>arg1</arg_key>\n<arg_value>1</arg_value>\n"
@@ -4363,12 +4339,12 @@ static void test_template_output_peg_parsers(bool detailed_debug) {
             .tools({ special_function_tool })
             .expect(message_assist_call)
             .run();
-    }
+    });
 
     // GLM-4.7-Flash tests - format: <tool_call>function_name<arg_key>...</arg_key><arg_value>...</arg_value></tool_call>
     // Note: Template uses forced-open thinking mode (prompt ends with <think>)
-    {
-        auto tst = peg_tester("models/templates/GLM-4.7-Flash.jinja", detailed_debug);
+    t.test("GLM-4.7-Flash", [&](testing & t) {
+        auto tst = peg_tester(t, "models/templates/GLM-4.7-Flash.jinja", detailed_debug);
 
         // Pure content (no reasoning)
         tst.test("Hello, world!\nWhat's up?")
@@ -4468,11 +4444,11 @@ static void test_template_output_peg_parsers(bool detailed_debug) {
             .expect_reasoning("I'm thinking")
             .expect_content("Hello, world!\nWhat's up?")
             .run();
-    }
+    });
 
     // Spark2.5 uses tagged arguments with forced-open thinking.
-    {
-        auto tst = peg_tester("models/templates/Spark2.5.jinja", detailed_debug);
+    t.test("Spark2.5", [&](testing & t) {
+        auto tst = peg_tester(t, "models/templates/Spark2.5.jinja", detailed_debug);
 
         tst.test("Hello, world!\nWhat's up?")
             .enable_thinking(false)
@@ -4562,70 +4538,73 @@ static void test_template_output_peg_parsers(bool detailed_debug) {
             })
             .expect_reconstruction()
             .run();
-    }
+    });
 
     // Verify the throw path produces a readable error message, not std::out_of_range.
     // #20424 introduced effective_input = generation_prompt + input, but the throw
     // uses input.substr(result.end) where result.end is in effective_input space.
-    {
-        if (!g_template_filter.empty() && std::string("models/templates/GLM-4.7-Flash.jinja").find(g_template_filter) != std::string::npos) {
-            auto tmpls = common_chat_templates_ptr(
-                common_chat_templates_init(nullptr, read_file("models/templates/GLM-4.7-Flash.jinja")));
-
-            static common_chat_tool weather_tool{
-                "get_weather", "Get weather",
-                R"({"type":"object","properties":{"city":{"type":"string"}},"required":["city"]})",
-            };
-
-            common_chat_templates_inputs inputs;
-            inputs.tools = { weather_tool };
-            inputs.enable_thinking = true;
-            inputs.reasoning_format = COMMON_REASONING_FORMAT_AUTO;
-            inputs.add_generation_prompt = true;
-            inputs.use_jinja = true;
-            common_chat_msg msg;
-            msg.role = "user";
-            msg.content = "get_weather";
-            inputs.messages = { msg };
-
-            auto params = common_chat_templates_apply(tmpls.get(), inputs);
-            common_peg_arena arena;
-            arena.load(params.parser);
-            common_chat_parser_params pp(params);
-
-            // generation_prompt is non-empty for thinking models, so result.end
-            // will be offset by generation_prompt.size() into effective_input space.
-            assert(!pp.generation_prompt.empty());
-
-            std::string bad_input =
-                "Thinking.\n"
-                "</think>"
-                "<tool_call>get_weather"
-                "<arg_key>city</arg_key><arg_value>Tokyo</arg_value>"
-                "</tool_call>\n";
-
-            bool got_runtime_error = false;
-            bool got_out_of_range = false;
-            std::string error_msg;
-            try {
-                common_chat_peg_parse(arena, bad_input, /*is_partial=*/false, pp);
-            } catch (const std::out_of_range & e) {
-                got_out_of_range = true;
-                error_msg = e.what();
-            } catch (const std::runtime_error & e) {
-                got_runtime_error = true;
-                error_msg = e.what();
-            }
-            GGML_ASSERT(!got_out_of_range && "throw path crashed with out_of_range (input.substr in effective_input space)");
-            GGML_ASSERT(got_runtime_error  && "throw path should produce std::runtime_error with parse position");
+    t.test("GLM-4.7-Flash throw path", [](testing & t) {
+        // opt-in as it was behind --template, the input below no longer fails to parse
+        if (!g_has_filter) {
+            t.skip("select it with a filter to run");
+            return;
         }
-    }
+
+        auto tmpls = read_templates("models/templates/GLM-4.7-Flash.jinja");
+
+        static common_chat_tool weather_tool{
+            "get_weather", "Get weather",
+            R"({"type":"object","properties":{"city":{"type":"string"}},"required":["city"]})",
+        };
+
+        common_chat_templates_inputs inputs;
+        inputs.tools = { weather_tool };
+        inputs.enable_thinking = true;
+        inputs.reasoning_format = COMMON_REASONING_FORMAT_AUTO;
+        inputs.add_generation_prompt = true;
+        inputs.use_jinja = true;
+        common_chat_msg msg;
+        msg.role = "user";
+        msg.content = "get_weather";
+        inputs.messages = { msg };
+
+        auto params = common_chat_templates_apply(tmpls.get(), inputs);
+        common_peg_arena arena;
+        arena.load(params.parser);
+        common_chat_parser_params pp(params);
+
+        // generation_prompt is non-empty for thinking models, so result.end
+        // will be offset by generation_prompt.size() into effective_input space.
+        t.assert_true("generation prompt is not empty", !pp.generation_prompt.empty());
+
+        std::string bad_input =
+            "Thinking.\n"
+            "</think>"
+            "<tool_call>get_weather"
+            "<arg_key>city</arg_key><arg_value>Tokyo</arg_value>"
+            "</tool_call>\n";
+
+        bool got_runtime_error = false;
+        bool got_out_of_range = false;
+        std::string error_msg;
+        try {
+            common_chat_peg_parse(arena, bad_input, /*is_partial=*/false, pp);
+        } catch (const std::out_of_range & e) {
+            got_out_of_range = true;
+            error_msg = e.what();
+        } catch (const std::runtime_error & e) {
+            got_runtime_error = true;
+            error_msg = e.what();
+        }
+        t.assert_true("throw path crashed with out_of_range (input.substr in effective_input space): " + error_msg, !got_out_of_range);
+        t.assert_true("throw path should produce std::runtime_error with parse position", got_runtime_error);
+    });
 
     // Kimi-K3 tests - custom parser
     // Unique feature: XTML tags built from <|open|>/<|close|>/<|sep|>, and a
     // generation prompt that leaves the think section already open.
-    {
-        auto tst = peg_tester("models/templates/Kimi-K3.jinja", detailed_debug);
+    t.test("Kimi-K3", [&](testing & t) {
+        auto tst = peg_tester(t, "models/templates/Kimi-K3.jinja", detailed_debug);
 
         // Content only. The response section is explicit even with no reasoning.
         tst.test("<|open|>response<|sep|>Hello, world!\nWhat's up?<|close|>response<|sep|>"
@@ -4722,12 +4701,12 @@ static void test_template_output_peg_parsers(bool detailed_debug) {
                 { "python", R"JSON({"code":"print('hey')"})JSON", "" },
             })
             .run();
-    }
+    });
 
     // Kimi-K2-Thinking tests - custom parser
     // Unique feature: tool call ID embeds function name as functions.<name>:<counter>
-    {
-        auto tst = peg_tester("models/templates/Kimi-K2-Thinking.jinja", detailed_debug);
+    t.test("Kimi-K2-Thinking", [&](testing & t) {
+        auto tst = peg_tester(t, "models/templates/Kimi-K2-Thinking.jinja", detailed_debug);
 
         // Basic content only
         tst.test("Hello, world!\nWhat's up?").expect(message_assist).run();
@@ -4936,14 +4915,14 @@ static void test_template_output_peg_parsers(bool detailed_debug) {
             .expect_reasoning("I'm thinking")
             .expect_content("Hello, world!\nWhat's up?")
             .run();
-    }
+    });
 
-    {
+    t.test("moonshotai-Kimi-K2", [&](testing & t) {
         auto kimi_id_special_func_tool_call =
             simple_assist_msg("", "", "special_function", "{\"arg1\": 1}", "functions.special_function:0");
 
         // Kimi-K2 old template
-        auto tst = peg_tester("models/templates/moonshotai-Kimi-K2.jinja", detailed_debug);
+        auto tst = peg_tester(t, "models/templates/moonshotai-Kimi-K2.jinja", detailed_debug);
         tst.test("Hello, world!\nWhat's up?").expect(message_assist).expect_reconstruction().run();
         tst.test(
                "<|tool_calls_section_begin|><|tool_call_begin|>functions.special_function:0<|tool_call_argument_begin|>"
@@ -4954,7 +4933,7 @@ static void test_template_output_peg_parsers(bool detailed_debug) {
             .run();
 
         // Kimi-K2-Instruct
-        auto tst2 = peg_tester("models/templates/Kimi-K2-Instruct.jinja", detailed_debug);
+        auto tst2 = peg_tester(t, "models/templates/Kimi-K2-Instruct.jinja", detailed_debug);
         tst2.test("Hello, world!\nWhat's up?").expect(message_assist).expect_reconstruction().run();
         tst2.test(
                "<|tool_calls_section_begin|><|tool_call_begin|>functions.special_function:0<|tool_call_argument_begin|>"
@@ -4984,19 +4963,19 @@ static void test_template_output_peg_parsers(bool detailed_debug) {
             .expect_reasoning("I'm thinking")
             .expect_content("Hello, world!\nWhat's up?")
             .run();
-    }
+    });
 
     for (const char * tmpl : {
              "models/templates/LFM2-8B-A1B.jinja",
              "models/templates/LFM2.5-Instruct.jinja",
              "models/templates/LFM2.5-8B-A1B.jinja",
          }) {
-        test_lfm2_parser(tmpl, detailed_debug);
+        t.test(template_name(tmpl), [&](testing & t) { test_lfm2_parser(t, tmpl, detailed_debug); });
     }
 
     // Thinking cases only apply to LFM2.5-8B-A1B, the one LFM2 template that emits <think>
-    {
-        auto tst = peg_tester("models/templates/LFM2.5-8B-A1B.jinja", detailed_debug);
+    t.test("LFM2.5-8B-A1B", [&](testing & t) {
+        auto tst = peg_tester(t, "models/templates/LFM2.5-8B-A1B.jinja", detailed_debug);
 
         // Reasoning is parsed independent of enable_thinking
 
@@ -5063,11 +5042,11 @@ static void test_template_output_peg_parsers(bool detailed_debug) {
             .expect_reasoning("I'm thinking")
             .expect_content("Hello, world!\nWhat's up?")
             .run();
-    }
+    });
 
     // Reka-Edge tests - uses native JSON format with per-call wrapper
-    {
-        auto tst = peg_tester("models/templates/Reka-Edge.jinja", detailed_debug);
+    t.test("Reka-Edge", [&](testing & t) {
+        auto tst = peg_tester(t, "models/templates/Reka-Edge.jinja", detailed_debug);
 
         // Basic content only
         tst.test("Hello, world!\nWhat's up?").enable_thinking(false).expect(message_assist).run();
@@ -5176,13 +5155,13 @@ static void test_template_output_peg_parsers(bool detailed_debug) {
             .expect_reasoning("I'm thinking")
             .expect_content("Hello, world!\nWhat's up?")
             .run();
-    }
+    });
 
 
     // Apertus-8B-Instruct tests - FUNC_NAME_AS_KEY format
     // Format: <|tools_prefix|>[{"function_name": {...arguments...}}]<|tools_suffix|>
-    {
-        auto tst = peg_tester("models/templates/Apertus-8B-Instruct.jinja", detailed_debug);
+    t.test("Apertus-8B-Instruct", [&](testing & t) {
+        auto tst = peg_tester(t, "models/templates/Apertus-8B-Instruct.jinja", detailed_debug);
         tst.test("<|tools_prefix|>[{\"special_function\": {\"arg1\": 1}}]<|tools_suffix|>")
             .tools({ special_function_tool })
             .expect(message_assist_call)
@@ -5196,12 +5175,12 @@ static void test_template_output_peg_parsers(bool detailed_debug) {
             .continue_final_message(COMMON_CHAT_CONTINUATION_CONTENT)
             .expect_content("Hello, world!\nWhat's up?")
             .run();
-    }
+    });
 
     // MiniMax-M2 tests - XML invoke format with parameter tags
     // Format: <minimax:tool_call><invoke name="func"><parameter name="key">value</parameter></invoke></minimax:tool_call>
-    {
-        auto tst = peg_tester("models/templates/MiniMax-M2.jinja", detailed_debug);
+    t.test("MiniMax-M2", [&](testing & t) {
+        auto tst = peg_tester(t, "models/templates/MiniMax-M2.jinja", detailed_debug);
         tst.test("\n</think>\n\nHello, world!\nWhat's up?").enable_thinking(true).reasoning_format(COMMON_REASONING_FORMAT_AUTO).expect(message_assist).run();
 
         tst.test("I'm\nthinking\n</think>\n\nHello, world!\nWhat's up?").enable_thinking(true).reasoning_format(COMMON_REASONING_FORMAT_AUTO).expect(message_assist_thoughts).run();
@@ -5241,7 +5220,7 @@ static void test_template_output_peg_parsers(bool detailed_debug) {
             .expect_reasoning("I'm thinking")
             .expect_content("Hello, world!\nWhat's up?")
             .run();
-    }
+    });
 
     // MiniMax-M3 tests - namespaced XML invoke format, the parameter name is the tag
     // Format:
@@ -5250,8 +5229,8 @@ static void test_template_output_peg_parsers(bool detailed_debug) {
     //   ]<]minimax[>[</tool_call>
     // Reasoning uses <mm:think>...</mm:think>. The generation prompt is only "]~b]ai\n", so the model
     // opens the thinking block itself; a turn without reasoning is prefixed with a bare </mm:think>.
-    {
-        auto tst = peg_tester("models/templates/MiniMax-M3.jinja", detailed_debug);
+    t.test("MiniMax-M3", [&](testing & t) {
+        auto tst = peg_tester(t, "models/templates/MiniMax-M3.jinja", detailed_debug);
 
         // Content only (bare </mm:think> prefix)
         tst.test("</mm:think>Hello, world!\nWhat's up?")
@@ -5605,12 +5584,12 @@ static void test_template_output_peg_parsers(bool detailed_debug) {
             .expect_reasoning("I'm thinking")
             .expect_content("Hello, world!\nWhat's up?")
             .run();
-    }
+    });
 
     // NVIDIA-Nemotron-Nano-v2 tests - <TOOLCALL>...</TOOLCALL> format
     // Format: <TOOLCALL>[{"name": "func", "arguments": {...}}]</TOOLCALL>
-    {
-        auto tst = peg_tester("models/templates/NVIDIA-Nemotron-Nano-v2.jinja", detailed_debug);
+    t.test("NVIDIA-Nemotron-Nano-v2", [&](testing & t) {
+        auto tst = peg_tester(t, "models/templates/NVIDIA-Nemotron-Nano-v2.jinja", detailed_debug);
         tst.test("I'm\nthinking\n</think>\n<TOOLCALL>[{\"name\": \"special_function\", \"arguments\": {\"arg1\": 1}}]</TOOLCALL>")
             .reasoning_format(COMMON_REASONING_FORMAT_AUTO)
             .tools({ special_function_tool })
@@ -5633,11 +5612,11 @@ static void test_template_output_peg_parsers(bool detailed_debug) {
             .expect_reasoning("I'm thinking")
             .expect_content("Hello, world!\nWhat's up?")
             .run();
-    }
+    });
 
     // CohereForAI-c4ai-command-r7b (uses START_RESPONSE/END_RESPONSE, START_THINKING/END_THINKING, START_ACTION/END_ACTION)
-    {
-        auto tst = peg_tester("models/templates/CohereForAI-c4ai-command-r7b-12-2024-tool_use.jinja", detailed_debug);
+    t.test("CohereForAI-c4ai-command-r7b-12-2024-tool_use", [&](testing & t) {
+        auto tst = peg_tester(t, "models/templates/CohereForAI-c4ai-command-r7b-12-2024-tool_use.jinja", detailed_debug);
         tst.test("<|START_RESPONSE|>Hello, world!\nWhat's up?<|END_RESPONSE|>").expect(message_assist).run();
         tst.test(
                "<|START_THINKING|>I'm\nthinking<|END_THINKING|>"
@@ -5648,10 +5627,10 @@ static void test_template_output_peg_parsers(bool detailed_debug) {
             .tools({ special_function_tool })
             .expect(message_assist_thoughts_call_idx)
             .run();
-    }
+    });
     // CohereForAI-c4ai-command-r-plus (uses markdown code block format)
-    {
-        auto tst = peg_tester("models/templates/CohereForAI-c4ai-command-r-plus-tool_use.jinja", detailed_debug);
+    t.test("CohereForAI-c4ai-command-r-plus-tool_use", [&](testing & t) {
+        auto tst = peg_tester(t, "models/templates/CohereForAI-c4ai-command-r-plus-tool_use.jinja", detailed_debug);
         tst.test("<|CHATBOT_TOKEN|>Hello, world!\nWhat's up?<|END_OF_TURN_TOKEN|>").expect(message_assist).run();
         // Tool calls: Action: followed by JSON code block
         tst.test(
@@ -5670,11 +5649,11 @@ static void test_template_output_peg_parsers(bool detailed_debug) {
             .continue_final_message(COMMON_CHAT_CONTINUATION_CONTENT)
             .expect_content("Hello, world!\nWhat's up?")
             .run();
-    }
+    });
 
     // mistralai-Mistral-Nemo-Instruct-2407.jinja
-    {
-        auto tst = peg_tester("models/templates/mistralai-Mistral-Nemo-Instruct-2407.jinja", detailed_debug);
+    t.test("mistralai-Mistral-Nemo-Instruct-2407", [&](testing & t) {
+        auto tst = peg_tester(t, "models/templates/mistralai-Mistral-Nemo-Instruct-2407.jinja", detailed_debug);
         tst.test("Hello, world!\nWhat's up?").expect(message_assist).expect_reconstruction().run();
         tst.test("[TOOL_CALLS][{\"name\": \"special_function\", \"arguments\": {\"arg1\": 1}, \"id\": \"123456789\"}]")
             .tools({ special_function_tool })
@@ -5689,9 +5668,9 @@ static void test_template_output_peg_parsers(bool detailed_debug) {
             .continue_final_message(COMMON_CHAT_CONTINUATION_CONTENT)
             .expect_content("Hello, world!\nWhat's up?")
             .run();
-    }
-    {
-        auto tst = peg_tester("models/templates/meetkai-functionary-medium-v3.1.jinja", detailed_debug);
+    });
+    t.test("meetkai-functionary-medium-v3.1", [&](testing & t) {
+        auto tst = peg_tester(t, "models/templates/meetkai-functionary-medium-v3.1.jinja", detailed_debug);
         tst.test("Hello, world!\nWhat's up?").expect(message_assist).expect_reconstruction().run();
         tst.test("<function=special_function>{\"arg1\": 1}</function>")
             .tools({ special_function_tool })
@@ -5706,10 +5685,10 @@ static void test_template_output_peg_parsers(bool detailed_debug) {
             .continue_final_message(COMMON_CHAT_CONTINUATION_CONTENT)
             .expect_content("Hello, world!\nWhat's up?")
             .run();
-    }
+    });
     // Functionary v3.2 - recipient-based format: >>>recipient\n{content}
-    {
-        auto tst = peg_tester("models/templates/meetkai-functionary-medium-v3.2.jinja", detailed_debug);
+    t.test("meetkai-functionary-medium-v3.2", [&](testing & t) {
+        auto tst = peg_tester(t, "models/templates/meetkai-functionary-medium-v3.2.jinja", detailed_debug);
         tst.test("all\nHello, world!\nWhat's up?").expect(message_assist).expect_reconstruction().run();
         tst.test("special_function\n{\"arg1\": 1}")
             .tools({ special_function_tool })
@@ -5724,11 +5703,11 @@ static void test_template_output_peg_parsers(bool detailed_debug) {
             .continue_final_message(COMMON_CHAT_CONTINUATION_CONTENT)
             .expect_content("Hello, world!\nWhat's up?")
             .run();
-    }
+    });
 
     // FireFunction
-    {
-        auto tst = peg_tester("models/templates/fireworks-ai-llama-3-firefunction-v2.jinja", detailed_debug);
+    t.test("fireworks-ai-llama-3-firefunction-v2", [&](testing & t) {
+        auto tst = peg_tester(t, "models/templates/fireworks-ai-llama-3-firefunction-v2.jinja", detailed_debug);
         tst.test("Hello, world!\nWhat's up?").expect(message_assist).expect_reconstruction().run();
         tst.test(" functools[{\"name\": \"special_function\", \"arguments\": {\"arg1\": 1}}]")
             .tools({ special_function_tool })
@@ -5743,12 +5722,12 @@ static void test_template_output_peg_parsers(bool detailed_debug) {
             .continue_final_message(COMMON_CHAT_CONTINUATION_CONTENT)
             .expect_content("Hello, world!\nWhat's up?")
             .run();
-    }
+    });
 
     // DeepSeek R1 Distill Llama 8B - reasoning tests only (forced open thinking)
     // Note: Template uses forced-open mode (prompt ends with <think>), so input shouldn't include opening tag
-    {
-        auto tst = peg_tester("models/templates/deepseek-ai-DeepSeek-R1-Distill-Llama-8B.jinja", detailed_debug);
+    t.test("deepseek-ai-DeepSeek-R1-Distill-Llama-8B", [&](testing & t) {
+        auto tst = peg_tester(t, "models/templates/deepseek-ai-DeepSeek-R1-Distill-Llama-8B.jinja", detailed_debug);
         tst.test("</think>Hello, world!\nWhat's up?")
             .reasoning_format(COMMON_REASONING_FORMAT_DEEPSEEK)
             .expect(message_assist)
@@ -5779,10 +5758,10 @@ static void test_template_output_peg_parsers(bool detailed_debug) {
             .expect_reasoning("I'm thinking")
             .expect_content("Hello, world!\nWhat's up?")
             .run();
-    }
+    });
     // llama-cpp DeepSeek R1 template (always forced-open thinking)
-    {
-        auto tst = peg_tester("models/templates/llama-cpp-deepseek-r1.jinja", detailed_debug);
+    t.test("llama-cpp-deepseek-r1", [&](testing & t) {
+        auto tst = peg_tester(t, "models/templates/llama-cpp-deepseek-r1.jinja", detailed_debug);
         tst.test("</think>Hello, world!\nWhat's up?").expect(message_assist).reasoning_format(COMMON_REASONING_FORMAT_DEEPSEEK).run();
         tst.test("I'm\nthinking</think>Hello, world!\nWhat's up?")
             .reasoning_format(COMMON_REASONING_FORMAT_DEEPSEEK)
@@ -5817,11 +5796,11 @@ static void test_template_output_peg_parsers(bool detailed_debug) {
             .expect_reasoning("I'm thinking")
             .expect_content("Hello, world!\nWhat's up?")
             .run();
-    }
+    });
     // DeepSeek R1 Distill Qwen 32B - reasoning tests only (forced open thinking)
     // Note: Template uses forced-open mode (prompt ends with <think>), so input shouldn't include opening tag
-    {
-        auto tst = peg_tester("models/templates/deepseek-ai-DeepSeek-R1-Distill-Qwen-32B.jinja", detailed_debug);
+    t.test("deepseek-ai-DeepSeek-R1-Distill-Qwen-32B", [&](testing & t) {
+        auto tst = peg_tester(t, "models/templates/deepseek-ai-DeepSeek-R1-Distill-Qwen-32B.jinja", detailed_debug);
         tst.test("</think>Hello, world!\nWhat's up?").enable_thinking(true).
             reasoning_format(COMMON_REASONING_FORMAT_DEEPSEEK).
             expect(message_assist).run();
@@ -5858,32 +5837,34 @@ static void test_template_output_peg_parsers(bool detailed_debug) {
             .expect_reasoning("I'm thinking")
             .expect_content("Hello, world!\nWhat's up?")
             .run();
-    }
+    });
 
     // MiMo-VL / Hermes 3 / Qwen 2.5 (Common <tool_call> JSON format)
     for (const auto & path :
          { "models/templates/MiMo-VL.jinja", "models/templates/NousResearch-Hermes-3-Llama-3.1-8B-tool_use.jinja",
            "models/templates/Qwen-Qwen2.5-7B-Instruct.jinja" }) {
-        auto tst = peg_tester(path, detailed_debug);
-        tst.test("Hello, world!\nWhat's up?").expect(message_assist).expect_reconstruction().run();
-        tst.test("<tool_call>\n{\"name\": \"special_function\", \"arguments\": {\"arg1\": 1}}\n</tool_call>")
-            .tools({ special_function_tool })
-            .expect(message_assist_call)
-            .expect_reconstruction()
-            .run();
+        t.test(template_name(path), [&](testing & t) {
+            auto tst = peg_tester(t, path, detailed_debug);
+            tst.test("Hello, world!\nWhat's up?").expect(message_assist).expect_reconstruction().run();
+            tst.test("<tool_call>\n{\"name\": \"special_function\", \"arguments\": {\"arg1\": 1}}\n</tool_call>")
+                .tools({ special_function_tool })
+                .expect(message_assist_call)
+                .expect_reconstruction()
+                .run();
 
-        // Continuation tests
-        tst.test("world!\nWhat's up?")
-            .messages({ message_user, message_assist_prefill_content })
-            .add_generation_prompt(false)
-            .continue_final_message(COMMON_CHAT_CONTINUATION_CONTENT)
-            .expect_content("Hello, world!\nWhat's up?")
-            .run();
+            // Continuation tests
+            tst.test("world!\nWhat's up?")
+                .messages({ message_user, message_assist_prefill_content })
+                .add_generation_prompt(false)
+                .continue_final_message(COMMON_CHAT_CONTINUATION_CONTENT)
+                .expect_content("Hello, world!\nWhat's up?")
+                .run();
+        });
     }
 
     // Reka Edge
-    {
-        auto tst = peg_tester("models/templates/Reka-Edge.jinja", detailed_debug);
+    t.test("Reka-Edge", [&](testing & t) {
+        auto tst = peg_tester(t, "models/templates/Reka-Edge.jinja", detailed_debug);
         tst.test("Hello, world!\nWhat's up?")
             .enable_thinking(false)
             .expect(message_assist)
@@ -5945,11 +5926,11 @@ static void test_template_output_peg_parsers(bool detailed_debug) {
             .expect_reasoning("I'm thinking")
             .expect_content("Hello, world!\nWhat's up?")
             .run();
-    }
+    });
 
     // Apriel 1.5
-    {
-        auto tst = peg_tester("models/templates/unsloth-Apriel-1.5.jinja", detailed_debug);
+    t.test("unsloth-Apriel-1.5", [&](testing & t) {
+        auto tst = peg_tester(t, "models/templates/unsloth-Apriel-1.5.jinja", detailed_debug);
         tst.test("Hello, world!\nWhat's up?").expect(message_assist).run();
         tst.test("<tool_calls>[{\"name\": \"special_function\", \"arguments\": {\"arg1\": 1}}]</tool_calls>")
             .tools({ special_function_tool })
@@ -5963,11 +5944,11 @@ static void test_template_output_peg_parsers(bool detailed_debug) {
             .continue_final_message(COMMON_CHAT_CONTINUATION_CONTENT)
             .expect_content("Hello, world!\nWhat's up?")
             .run();
-    }
+    });
 
     // Apriel 1.6 Thinker (reasoning-only support)
-    {
-        auto tst = peg_tester("models/templates/Apriel-1.6-15b-Thinker-fixed.jinja", detailed_debug);
+    t.test("Apriel-1.6-15b-Thinker-fixed", [&](testing & t) {
+        auto tst = peg_tester(t, "models/templates/Apriel-1.6-15b-Thinker-fixed.jinja", detailed_debug);
 
         // Implicit reasoning start (forced open)
         tst.test("I'm\nthinking\n[BEGIN FINAL RESPONSE]\nHello, world!\nWhat's up?")
@@ -6007,11 +5988,11 @@ static void test_template_output_peg_parsers(bool detailed_debug) {
             .expect_reasoning("I'm thinking")
             .expect_content("Hello, world!\nWhat's up?")
             .run();
-    }
+    });
 
     // Mistral Small 3.2 - FUNC_BRACKET_TAG format: [TOOL_CALLS]func_name[CALL_ID]id[ARGS]{...}
-    {
-        auto tst = peg_tester("models/templates/Mistral-Small-3.2-24B-Instruct-2506.jinja", detailed_debug);
+    t.test("Mistral-Small-3.2-24B-Instruct-2506", [&](testing & t) {
+        auto tst = peg_tester(t, "models/templates/Mistral-Small-3.2-24B-Instruct-2506.jinja", detailed_debug);
         tst.test("Hello, world!\nWhat's up?").expect(message_assist).expect_reconstruction().run();
         tst.test("[TOOL_CALLS]special_function[CALL_ID]123456789[ARGS]{\"arg1\": 1}")
             .tools({ special_function_tool })
@@ -6039,10 +6020,10 @@ static void test_template_output_peg_parsers(bool detailed_debug) {
             .continue_final_message(COMMON_CHAT_CONTINUATION_CONTENT)
             .expect_content("Hello, world!\nWhat's up?")
             .run();
-    }
+    });
     // Devstral
-    {
-        auto tst = peg_tester("models/templates/unsloth-mistral-Devstral-Small-2507.jinja", detailed_debug);
+    t.test("unsloth-mistral-Devstral-Small-2507", [&](testing & t) {
+        auto tst = peg_tester(t, "models/templates/unsloth-mistral-Devstral-Small-2507.jinja", detailed_debug);
         tst.test("Hello, world!\nWhat's up?").expect(message_assist).expect_reconstruction().run();
         tst.test("[TOOL_CALLS]special_function[ARGS]{\"arg1\": 1}")
             .tools({ special_function_tool })
@@ -6054,11 +6035,11 @@ static void test_template_output_peg_parsers(bool detailed_debug) {
             .expect(message_assist_call_content)
             .expect_reconstruction()
             .run();
-    }
+    });
 
-    {
+    t.test("meta-llama-Llama-3.1-8B-Instruct", [&](testing & t) {
         // Llama 3.1
-        auto tst = peg_tester("models/templates/meta-llama-Llama-3.1-8B-Instruct.jinja", detailed_debug);
+        auto tst = peg_tester(t, "models/templates/meta-llama-Llama-3.1-8B-Instruct.jinja", detailed_debug);
         tst.test("Hello, world!\nWhat's up?").tools({ special_function_tool }).expect(message_assist).expect_reconstruction().run();
 
         tst.test(
@@ -6082,11 +6063,11 @@ static void test_template_output_peg_parsers(bool detailed_debug) {
             .continue_final_message(COMMON_CHAT_CONTINUATION_CONTENT)
             .expect_content("Hello, world!\nWhat's up?")
             .run();
-    }
+    });
 
-    {
+    t.test("meta-llama-Llama-3.2-3B-Instruct", [&](testing & t) {
         // Llama 3.2
-        auto tst = peg_tester("models/templates/meta-llama-Llama-3.2-3B-Instruct.jinja", detailed_debug);
+        auto tst = peg_tester(t, "models/templates/meta-llama-Llama-3.2-3B-Instruct.jinja", detailed_debug);
         tst.test("Hello, world!\nWhat's up?").tools({ special_function_tool }).expect(message_assist).expect_reconstruction().run();
 
         // Continuation tests
@@ -6096,11 +6077,11 @@ static void test_template_output_peg_parsers(bool detailed_debug) {
             .continue_final_message(COMMON_CHAT_CONTINUATION_CONTENT)
             .expect_content("Hello, world!\nWhat's up?")
             .run();
-    }
+    });
 
-    {
+    t.test("meta-llama-Llama-3.3-70B-Instruct", [&](testing & t) {
         // Llama 3.3
-        auto tst = peg_tester("models/templates/meta-llama-Llama-3.3-70B-Instruct.jinja", detailed_debug);
+        auto tst = peg_tester(t, "models/templates/meta-llama-Llama-3.3-70B-Instruct.jinja", detailed_debug);
         tst.test("Hello, world!\nWhat's up?").tools({ python_tool }).expect(message_assist).expect_reconstruction().run();
 
         // Continuation tests
@@ -6110,11 +6091,11 @@ static void test_template_output_peg_parsers(bool detailed_debug) {
             .continue_final_message(COMMON_CHAT_CONTINUATION_CONTENT)
             .expect_content("Hello, world!\nWhat's up?")
             .run();
-    }
+    });
 
     // Muse Glimmer format tests
-    {
-        auto tst = peg_tester("models/templates/muse-glimmer.jinja", detailed_debug);
+    t.test("muse-glimmer", [&](testing & t) {
+        auto tst = peg_tester(t, "models/templates/muse-glimmer.jinja", detailed_debug);
 
         const std::string call_markup =
             "<atem:function_calls>\n"
@@ -6156,11 +6137,11 @@ static void test_template_output_peg_parsers(bool detailed_debug) {
             .expect_reasoning("I could use " + call_markup + " here")
             .expect_content("Hello!")
             .run();
-    }
+    });
 
     // GPT-OSS format tests
-    {
-        auto tst = peg_tester("models/templates/openai-gpt-oss-120b.jinja", detailed_debug);
+    t.test("openai-gpt-oss-120b", [&](testing & t) {
+        auto tst = peg_tester(t, "models/templates/openai-gpt-oss-120b.jinja", detailed_debug);
 
         // Basic content only - final channel
         tst.test("<|channel|>final<|message|>Hello, world!\nWhat's up?").expect(message_assist).run();
@@ -6337,10 +6318,10 @@ static void test_template_output_peg_parsers(bool detailed_debug) {
             .expect_reasoning("I'm thinking")
             .expect_content("Hello, world!\nWhat's up?")
             .run();
-    }
+    });
 
-    {
-        auto tst = peg_tester("models/templates/StepFun3.5-Flash.jinja", detailed_debug);
+    t.test("StepFun3.5-Flash", [&](testing & t) {
+        auto tst = peg_tester(t, "models/templates/StepFun3.5-Flash.jinja", detailed_debug);
 
         tst.test("I was thinking\n</think>\nNow I'm not.").
             enable_thinking(true).
@@ -6547,11 +6528,11 @@ static void test_template_output_peg_parsers(bool detailed_debug) {
             .expect_reasoning("I'm thinking")
             .expect_content("Hello, world!\nWhat's up?")
             .run();
-    }
+    });
 
     // GigaChat V3
-    {
-        auto tst = peg_tester("models/templates/GigaChat3-10B-A1.8B.jinja", detailed_debug);
+    t.test("GigaChat3-10B-A1.8B", [&](testing & t) {
+        auto tst = peg_tester(t, "models/templates/GigaChat3-10B-A1.8B.jinja", detailed_debug);
         tst.test("Hello, world!\nWhat's up?").expect(message_assist).expect_reconstruction().run();
         tst.test("<|message_sep|>\n\nfunction call<|role_sep|>\n{\"name\": \"special_function\", \"arguments\": {\"arg1\": 1}}")
             .tools({ special_function_tool })
@@ -6575,11 +6556,11 @@ static void test_template_output_peg_parsers(bool detailed_debug) {
             .continue_final_message(COMMON_CHAT_CONTINUATION_CONTENT)
             .expect_content("Hello, world!\nWhat's up?")
             .run();
-    }
+    });
 
     // GigaChat V3.1
-    {
-        auto tst = peg_tester("models/templates/GigaChat3.1-10B-A1.8B.jinja", detailed_debug);
+    t.test("GigaChat3.1-10B-A1.8B", [&](testing & t) {
+        auto tst = peg_tester(t, "models/templates/GigaChat3.1-10B-A1.8B.jinja", detailed_debug);
         tst.test("Hello, world!\nWhat's up?").expect(message_assist).expect_reconstruction().run();
         tst.test("<|function_call|>{\"name\": \"special_function\", \"arguments\": {\"arg1\": 1}}")
             .tools({ special_function_tool })
@@ -6603,11 +6584,11 @@ static void test_template_output_peg_parsers(bool detailed_debug) {
             .continue_final_message(COMMON_CHAT_CONTINUATION_CONTENT)
             .expect_content("Hello, world!\nWhat's up?")
             .run();
-    }
+    });
 
     // MiniCPM5 - XML tool calls with <function name="..."><param name="...">...</param></function>
-    {
-        auto tst = peg_tester("models/templates/openbmb-MiniCPM5-1B.jinja", detailed_debug);
+    t.test("openbmb-MiniCPM5-1B", [&](testing & t) {
+        auto tst = peg_tester(t, "models/templates/openbmb-MiniCPM5-1B.jinja", detailed_debug);
 
         tst.test("Hello, world!\nWhat's up?")
             .enable_thinking(false)
@@ -6674,10 +6655,10 @@ static void test_template_output_peg_parsers(bool detailed_debug) {
             .expect_reasoning("I'm thinking")
             .expect_content("Hello, world!\nWhat's up?")
             .run();
-    }
+    });
 }
 
-static void test_template_generation_prompt() {
+static void test_template_generation_prompt(testing & t) {
     common_chat_msg system_msg;
     system_msg.role = "system";
     system_msg.content ="You are a helpful assistant.";
@@ -6719,7 +6700,8 @@ static void test_template_generation_prompt() {
         return opts;
     };
 
-    auto check = [&](const common_chat_templates_ptr & tmpls,
+    auto check = [&](testing & t,
+                     const common_chat_templates_ptr & tmpls,
                      const test_case_options & opts,
                      const std::string & expected_generation_prompt) {
         common_chat_templates_inputs inputs;
@@ -6730,140 +6712,142 @@ static void test_template_generation_prompt() {
 
         auto params = common_chat_templates_apply(tmpls.get(), inputs);
 
-        assert_contains(params.prompt, system_msg.content);
-        assert_contains(params.prompt, message_user.content);
-        assert_equals(expected_generation_prompt, params.generation_prompt);
-        assert_ends_with(params.prompt, expected_generation_prompt);
+        assert_contains(t, params.prompt, system_msg.content);
+        assert_contains(t, params.prompt, message_user.content);
+        t.assert_equal("generation_prompt", expected_generation_prompt, params.generation_prompt);
+        assert_ends_with(t, params.prompt, expected_generation_prompt);
     };
 
-    {
+    t.test("Qwen3.5-4B", [&](testing & t) {
         auto tmpls = read_templates("models/templates/Qwen3.5-4B.jinja");
-        check(tmpls, basic(),                  "<|im_start|>assistant\n<think>\n");
-        check(tmpls, continuation_content(),   "<|im_start|>assistant\n<think>\nI'm thinking\n</think>\n\nHello, ");
-        check(tmpls, continuation_reasoning(), "<|im_start|>assistant\n<think>\nI'm");
-    }
+        check(t, tmpls, basic(),                  "<|im_start|>assistant\n<think>\n");
+        check(t, tmpls, continuation_content(),   "<|im_start|>assistant\n<think>\nI'm thinking\n</think>\n\nHello, ");
+        check(t, tmpls, continuation_reasoning(), "<|im_start|>assistant\n<think>\nI'm");
+    });
 
-    {
+    t.test("openai-gpt-oss-120b", [&](testing & t) {
         auto tmpls = read_templates("models/templates/openai-gpt-oss-120b.jinja");
-        check(tmpls, basic(),                  "<|start|>assistant");
-        check(tmpls, continuation_content(),   "<|start|>assistant<|channel|>analysis<|message|>I'm thinking<|end|><|start|>assistant<|channel|>final<|message|>Hello, ");
-        check(tmpls, continuation_reasoning(), "<|start|>assistant<|channel|>analysis<|message|>I'm");
-    }
+        check(t, tmpls, basic(),                  "<|start|>assistant");
+        check(t, tmpls, continuation_content(),   "<|start|>assistant<|channel|>analysis<|message|>I'm thinking<|end|><|start|>assistant<|channel|>final<|message|>Hello, ");
+        check(t, tmpls, continuation_reasoning(), "<|start|>assistant<|channel|>analysis<|message|>I'm");
+    });
 
-    {
+    t.test("mistralai-Ministral-3-14B-Reasoning-2512", [&](testing & t) {
         auto tmpls = read_templates("models/templates/mistralai-Ministral-3-14B-Reasoning-2512.jinja");
-        check(tmpls, basic(),                  "");
-        check(tmpls, continuation_content(),   "[THINK]I'm thinking[/THINK]Hello, ");
-        check(tmpls, continuation_reasoning(), "[THINK]I'm");
-    }
+        check(t, tmpls, basic(),                  "");
+        check(t, tmpls, continuation_content(),   "[THINK]I'm thinking[/THINK]Hello, ");
+        check(t, tmpls, continuation_reasoning(), "[THINK]I'm");
+    });
 
-    {
+    t.test("google-gemma-4-31B-it", [&](testing & t) {
         auto tmpls = read_templates("models/templates/google-gemma-4-31B-it.jinja");
-        check(tmpls, basic(),                  "<|turn>model\n");
-        check(tmpls, continuation_content(),   "<|turn>model\n<|channel>thought\nI'm thinking<channel|>Hello, ");
-        check(tmpls, continuation_reasoning(), "<|turn>model\n<|channel>thought\nI'm");
+        check(t, tmpls, basic(),                  "<|turn>model\n");
+        check(t, tmpls, continuation_content(),   "<|turn>model\n<|channel>thought\nI'm thinking<channel|>Hello, ");
+        check(t, tmpls, continuation_reasoning(), "<|turn>model\n<|channel>thought\nI'm");
 
         // Special case when last message is a tool response
         test_case_options after_tool_call = continuation_reasoning();
         after_tool_call.messages          = { system_msg, message_user, tool_call_msg, tool_msg, message_assist_prefill_reasoning };
-        check(tmpls, after_tool_call, "<|channel>thought\nI'm");
-    }
+        check(t, tmpls, after_tool_call, "<|channel>thought\nI'm");
+    });
 
-    {
+    t.test("meetkai-functionary-medium-v3.2", [&](testing & t) {
         auto tmpls = read_templates("models/templates/meetkai-functionary-medium-v3.2.jinja");
-        check(tmpls, basic(),                  "<|start_header_id|>assistant<|end_header_id|>\n\n>>>");
-        check(tmpls, continuation_content(),   "<|start_header_id|>assistant<|end_header_id|>\n\n>>>all\nHello, ");
-        check(tmpls, continuation_reasoning(), "<|start_header_id|>assistant<|end_header_id|>\n\n>>>all\n");
-    }
+        check(t, tmpls, basic(),                  "<|start_header_id|>assistant<|end_header_id|>\n\n>>>");
+        check(t, tmpls, continuation_content(),   "<|start_header_id|>assistant<|end_header_id|>\n\n>>>all\nHello, ");
+        check(t, tmpls, continuation_reasoning(), "<|start_header_id|>assistant<|end_header_id|>\n\n>>>all\n");
+    });
 
-    {
+    t.test("Reka-Edge", [&](testing & t) {
         auto tmpls = read_templates("models/templates/Reka-Edge.jinja");
-        check(tmpls, basic(),                  "assistant: <think>\n");
-        check(tmpls, continuation_content(),   "assistant: <think>\nI'm thinking\n</think>\n\nHello, ");
-        check(tmpls, continuation_reasoning(), "assistant: <think>\nI'm");
-    }
+        check(t, tmpls, basic(),                  "assistant: <think>\n");
+        check(t, tmpls, continuation_content(),   "assistant: <think>\nI'm thinking\n</think>\n\nHello, ");
+        check(t, tmpls, continuation_reasoning(), "assistant: <think>\nI'm");
+    });
 
-    {
+    t.test("moonshotai-Kimi-K2", [&](testing & t) {
         auto tmpls = read_templates("models/templates/moonshotai-Kimi-K2.jinja");
-        check(tmpls, basic(),                  "<|im_assistant|>assistant<|im_middle|>");
-        check(tmpls, continuation_content(),   "<|im_assistant|>assistant<|im_middle|><think>I'm thinking</think>Hello, ");
-        check(tmpls, continuation_reasoning(), "<|im_assistant|>assistant<|im_middle|><think>I'm");
-    }
+        check(t, tmpls, basic(),                  "<|im_assistant|>assistant<|im_middle|>");
+        check(t, tmpls, continuation_content(),   "<|im_assistant|>assistant<|im_middle|><think>I'm thinking</think>Hello, ");
+        check(t, tmpls, continuation_reasoning(), "<|im_assistant|>assistant<|im_middle|><think>I'm");
+    });
 
     for (const char * tmpl : {
              "models/templates/LFM2-8B-A1B.jinja",
              "models/templates/LFM2.5-Instruct.jinja",
              "models/templates/LFM2.5-8B-A1B.jinja",
          }) {
-        auto tmpls = read_templates(tmpl);
-        check(tmpls, basic(),                  "<|im_start|>assistant\n");
-        check(tmpls, continuation_content(),   "<|im_start|>assistant\n<think>I'm thinking</think>Hello, ");
-        check(tmpls, continuation_reasoning(), "<|im_start|>assistant\n<think>I'm");
+        t.test(template_name(tmpl), [&](testing & t) {
+            auto tmpls = read_templates(tmpl);
+            check(t, tmpls, basic(),                  "<|im_start|>assistant\n");
+            check(t, tmpls, continuation_content(),   "<|im_start|>assistant\n<think>I'm thinking</think>Hello, ");
+            check(t, tmpls, continuation_reasoning(), "<|im_start|>assistant\n<think>I'm");
+        });
     }
 
-    {
+    t.test("LFM2.5-8B-A1B thinking field", [&](testing & t) {
         // 8B-A1B renders prior-turn reasoning via the "thinking" field
         auto tmpls = read_templates("models/templates/LFM2.5-8B-A1B.jinja");
         common_chat_templates_inputs inputs;
         inputs.messages              = { message_user, message_assist_call_thoughts, tool_msg };
         inputs.add_generation_prompt = true;
         auto params = common_chat_templates_apply(tmpls.get(), inputs);
-        assert_contains(params.prompt, "<think>I'm\nthinking</think>");
-    }
+        assert_contains(t, params.prompt, "<think>I'm\nthinking</think>");
+    });
 
-    {
+    t.test("GigaChat3-10B-A1.8B", [&](testing & t) {
         auto tmpls = read_templates("models/templates/GigaChat3-10B-A1.8B.jinja");
-        check(tmpls, basic(),                  "assistant<|role_sep|>\n");
-        check(tmpls, continuation_content(),   "assistant<|role_sep|>\nHello, ");
-        check(tmpls, continuation_reasoning(), "assistant<|role_sep|>\n");
-    }
+        check(t, tmpls, basic(),                  "assistant<|role_sep|>\n");
+        check(t, tmpls, continuation_content(),   "assistant<|role_sep|>\nHello, ");
+        check(t, tmpls, continuation_reasoning(), "assistant<|role_sep|>\n");
+    });
 
-    {
+    t.test("deepseek-ai-DeepSeek-V3.2", [&](testing & t) {
         auto tmpls = read_templates("models/templates/deepseek-ai-DeepSeek-V3.2.jinja");
-        check(tmpls, basic(),                  "<｜Assistant｜><think>");
-        check(tmpls, continuation_content(),   "<｜Assistant｜><think>I'm thinking</think>Hello, ");
-        check(tmpls, continuation_reasoning(), "<｜Assistant｜><think>I'm");
-    }
+        check(t, tmpls, basic(),                  "<｜Assistant｜><think>");
+        check(t, tmpls, continuation_content(),   "<｜Assistant｜><think>I'm thinking</think>Hello, ");
+        check(t, tmpls, continuation_reasoning(), "<｜Assistant｜><think>I'm");
+    });
 
     const std::string deepseek_v4_reasoning_effort_max = "Reasoning Effort: Absolute maximum";
     const std::string deepseek_v4_flash_0731_reasoning_effort_max = "Reasoning Effort: Beyond maximum";
 
-    {
+    t.test("deepseek-ai-DeepSeek-V4", [&](testing & t) {
         auto tmpls = read_templates("models/templates/deepseek-ai-DeepSeek-V4.jinja");
-        check(tmpls, basic(),                  "<｜Assistant｜><think>");
-        check(tmpls, continuation_content(),   "<｜Assistant｜><think>I'm thinking</think>Hello, ");
-        check(tmpls, continuation_reasoning(), "<｜Assistant｜><think>I'm");
+        check(t, tmpls, basic(),                  "<｜Assistant｜><think>");
+        check(t, tmpls, continuation_content(),   "<｜Assistant｜><think>I'm thinking</think>Hello, ");
+        check(t, tmpls, continuation_reasoning(), "<｜Assistant｜><think>I'm");
 
         auto continuation_content_no_thinking = continuation_content();
         continuation_content_no_thinking.messages = { system_msg, message_user, simple_assist_msg("Hello, ") };
         continuation_content_no_thinking.enable_thinking = false;
-        check(tmpls, continuation_content_no_thinking, "<｜Assistant｜></think>Hello, ");
+        check(t, tmpls, continuation_content_no_thinking, "<｜Assistant｜></think>Hello, ");
 
         common_chat_templates_inputs max_inputs;
         max_inputs.messages = { system_msg, message_user };
         max_inputs.chat_template_kwargs["reasoning_effort"] = R"("max")";
         auto max_params = common_chat_templates_apply(tmpls.get(), max_inputs);
-        assert_contains(max_params.prompt, deepseek_v4_reasoning_effort_max);
+        assert_contains(t, max_params.prompt, deepseek_v4_reasoning_effort_max);
 
         auto high_inputs = max_inputs;
         high_inputs.chat_template_kwargs["reasoning_effort"] = R"("high")";
         auto high_params = common_chat_templates_apply(tmpls.get(), high_inputs);
-        assert_not_contains(high_params.prompt, deepseek_v4_reasoning_effort_max);
+        assert_not_contains(t, high_params.prompt, deepseek_v4_reasoning_effort_max);
 
         auto low_inputs = max_inputs;
         low_inputs.chat_template_kwargs["reasoning_effort"] = R"("low")";
         auto low_params = common_chat_templates_apply(tmpls.get(), low_inputs);
-        assert_not_contains(low_params.prompt, deepseek_v4_reasoning_effort_max);
+        assert_not_contains(t, low_params.prompt, deepseek_v4_reasoning_effort_max);
 
         common_chat_templates_inputs default_effort_inputs;
         default_effort_inputs.messages = { system_msg, message_user };
         auto default_effort_params = common_chat_templates_apply(tmpls.get(), default_effort_inputs);
-        assert_not_contains(default_effort_params.prompt, deepseek_v4_reasoning_effort_max);
+        assert_not_contains(t, default_effort_params.prompt, deepseek_v4_reasoning_effort_max);
 
         auto non_thinking_max_inputs = max_inputs;
         non_thinking_max_inputs.enable_thinking = false;
         auto non_thinking_max_params = common_chat_templates_apply(tmpls.get(), non_thinking_max_inputs);
-        assert_not_contains(non_thinking_max_params.prompt, deepseek_v4_reasoning_effort_max);
+        assert_not_contains(t, non_thinking_max_params.prompt, deepseek_v4_reasoning_effort_max);
 
         common_chat_templates_inputs response_format_inputs;
         response_format_inputs.messages = { system_msg, message_user };
@@ -6874,16 +6858,13 @@ static void test_template_generation_prompt() {
         const auto tools_pos = response_format_params.prompt.find("## Tools");
         const auto response_format_pos = response_format_params.prompt.find(
             "## Response Format:\n\nYou MUST strictly adhere to the following schema to reply:\n");
-        if (tools_pos == std::string::npos || response_format_pos == std::string::npos || tools_pos > response_format_pos) {
-            LOG_ERR("Expected response format after tools\nActual: %s\n", response_format_params.prompt.c_str());
-            common_log_flush(common_log_main());
-            throw std::runtime_error("Test failed");
-        }
-        assert_contains(response_format_params.prompt, R"("answer": {"type": "string"})");
+        t.assert_true("expected response format after tools\n  actual: " + response_format_params.prompt,
+                      tools_pos != std::string::npos && response_format_pos != std::string::npos && tools_pos < response_format_pos);
+        assert_contains(t, response_format_params.prompt, R"("answer": {"type": "string"})");
 
         response_format_inputs.json_schema = "{}";
         auto json_object_params = common_chat_templates_apply(tmpls.get(), response_format_inputs);
-        assert_contains(json_object_params.prompt,
+        assert_contains(t, json_object_params.prompt,
                         "## Response Format:\n\nYou MUST strictly adhere to the following schema to reply:\n{}");
 
         common_chat_msg assistant_history;
@@ -6898,71 +6879,71 @@ static void test_template_generation_prompt() {
         common_chat_templates_inputs default_history_inputs;
         default_history_inputs.messages = { message_user, assistant_history, user_followup };
         auto default_history_params = common_chat_templates_apply(tmpls.get(), default_history_inputs);
-        assert_contains(default_history_params.prompt, "<｜Assistant｜></think>Previous answer");
+        assert_contains(t, default_history_params.prompt, "<｜Assistant｜></think>Previous answer");
 
         auto drop_thinking_inputs = default_history_inputs;
         drop_thinking_inputs.chat_template_kwargs["drop_thinking"] = "false";
         auto drop_thinking_params = common_chat_templates_apply(tmpls.get(), drop_thinking_inputs);
-        assert_contains(drop_thinking_params.prompt, "<｜Assistant｜><think>Previous reasoning</think>Previous answer");
+        assert_contains(t, drop_thinking_params.prompt, "<｜Assistant｜><think>Previous reasoning</think>Previous answer");
 
         auto preserve_reasoning_inputs = default_history_inputs;
         preserve_reasoning_inputs.chat_template_kwargs["preserve_reasoning"] = "true";
         auto preserve_reasoning_params = common_chat_templates_apply(tmpls.get(), preserve_reasoning_inputs);
-        assert_contains(preserve_reasoning_params.prompt, "<｜Assistant｜><think>Previous reasoning</think>Previous answer");
-        assert_equals(true, common_chat_templates_get_caps(tmpls.get()).at("supports_preserve_reasoning"));
+        assert_contains(t, preserve_reasoning_params.prompt, "<｜Assistant｜><think>Previous reasoning</think>Previous answer");
+        t.assert_equal("supports_preserve_reasoning", true, common_chat_templates_get_caps(tmpls.get()).at("supports_preserve_reasoning"));
 
         auto no_preserve_reasoning_inputs = default_history_inputs;
         no_preserve_reasoning_inputs.chat_template_kwargs["preserve_reasoning"] = "false";
         auto no_preserve_reasoning_params = common_chat_templates_apply(tmpls.get(), no_preserve_reasoning_inputs);
-        assert_contains(no_preserve_reasoning_params.prompt, "<｜Assistant｜></think>Previous answer");
+        assert_contains(t, no_preserve_reasoning_params.prompt, "<｜Assistant｜></think>Previous answer");
 
         common_chat_msg empty_tool_call = simple_assist_msg("", "", "empty_args", "{}");
         common_chat_templates_inputs empty_tool_inputs;
         empty_tool_inputs.messages = { message_user, empty_tool_call };
         empty_tool_inputs.tools    = { empty_args_tool };
         auto empty_tool_params = common_chat_templates_apply(tmpls.get(), empty_tool_inputs);
-        assert_contains(empty_tool_params.prompt,
+        assert_contains(t, empty_tool_params.prompt,
                         "<｜DSML｜invoke name=\"empty_args\">\n\n</｜DSML｜invoke>");
-    }
+    });
 
-    {
+    t.test("deepseek-ai-DeepSeek-V4-Flash-0731", [&](testing & t) {
         auto tmpls = read_templates("models/templates/deepseek-ai-DeepSeek-V4-Flash-0731.jinja");
-        check(tmpls, basic(),                  "<｜Assistant｜><think>");
-        check(tmpls, continuation_content(),   "<｜Assistant｜><think>I'm thinking</think>Hello, ");
-        check(tmpls, continuation_reasoning(), "<｜Assistant｜><think>I'm");
+        check(t, tmpls, basic(),                  "<｜Assistant｜><think>");
+        check(t, tmpls, continuation_content(),   "<｜Assistant｜><think>I'm thinking</think>Hello, ");
+        check(t, tmpls, continuation_reasoning(), "<｜Assistant｜><think>I'm");
 
         auto continuation_content_no_thinking = continuation_content();
         continuation_content_no_thinking.messages = { system_msg, message_user, simple_assist_msg("Hello, ") };
         continuation_content_no_thinking.enable_thinking = false;
-        check(tmpls, continuation_content_no_thinking, "<｜Assistant｜></think>Hello, ");
+        check(t, tmpls, continuation_content_no_thinking, "<｜Assistant｜></think>Hello, ");
 
         common_chat_templates_inputs high_inputs;
         high_inputs.messages = { system_msg, message_user };
         high_inputs.chat_template_kwargs["reasoning_effort"] = R"("high")";
         auto high_params = common_chat_templates_apply(tmpls.get(), high_inputs);
-        assert_contains(high_params.prompt, deepseek_v4_reasoning_effort_max);
+        assert_contains(t, high_params.prompt, deepseek_v4_reasoning_effort_max);
 
         auto max_inputs = high_inputs;
         max_inputs.chat_template_kwargs["reasoning_effort"] = R"("max")";
         auto max_params = common_chat_templates_apply(tmpls.get(), max_inputs);
-        assert_contains(max_params.prompt, deepseek_v4_flash_0731_reasoning_effort_max);
+        assert_contains(t, max_params.prompt, deepseek_v4_flash_0731_reasoning_effort_max);
 
         auto low_inputs = high_inputs;
         low_inputs.chat_template_kwargs["reasoning_effort"] = R"("low")";
         auto low_params = common_chat_templates_apply(tmpls.get(), low_inputs);
-        assert_not_contains(low_params.prompt, deepseek_v4_reasoning_effort_max);
-        assert_not_contains(low_params.prompt, deepseek_v4_flash_0731_reasoning_effort_max);
+        assert_not_contains(t, low_params.prompt, deepseek_v4_reasoning_effort_max);
+        assert_not_contains(t, low_params.prompt, deepseek_v4_flash_0731_reasoning_effort_max);
 
         common_chat_templates_inputs default_effort_inputs;
         default_effort_inputs.messages = { system_msg, message_user };
         auto default_effort_params = common_chat_templates_apply(tmpls.get(), default_effort_inputs);
-        assert_not_contains(default_effort_params.prompt, deepseek_v4_reasoning_effort_max);
-        assert_not_contains(default_effort_params.prompt, deepseek_v4_flash_0731_reasoning_effort_max);
+        assert_not_contains(t, default_effort_params.prompt, deepseek_v4_reasoning_effort_max);
+        assert_not_contains(t, default_effort_params.prompt, deepseek_v4_flash_0731_reasoning_effort_max);
 
         auto non_thinking_max_inputs = max_inputs;
         non_thinking_max_inputs.enable_thinking = false;
         auto non_thinking_max_params = common_chat_templates_apply(tmpls.get(), non_thinking_max_inputs);
-        assert_not_contains(non_thinking_max_params.prompt, deepseek_v4_flash_0731_reasoning_effort_max);
+        assert_not_contains(t, non_thinking_max_params.prompt, deepseek_v4_flash_0731_reasoning_effort_max);
 
         common_chat_templates_inputs response_format_inputs;
         response_format_inputs.messages = { system_msg, message_user };
@@ -6970,23 +6951,21 @@ static void test_template_generation_prompt() {
         response_format_inputs.json_schema =
             R"({"type":"object","properties":{"answer":{"type":"string"}}})";
         auto response_format_params = common_chat_templates_apply(tmpls.get(), response_format_inputs);
-        assert_contains(response_format_params.prompt,
+        assert_contains(t, response_format_params.prompt,
                         "## Response Format:\n\nYou MUST strictly adhere to the following schema to reply:\n");
-        assert_contains(response_format_params.prompt, R"("answer": {"type": "string"})");
-    }
+        assert_contains(t, response_format_params.prompt, R"("answer": {"type": "string"})");
+    });
 
-    {
+    t.test("openbmb-MiniCPM5-1B", [&](testing & t) {
         auto tmpls = read_templates("models/templates/openbmb-MiniCPM5-1B.jinja");
-        check(tmpls, basic(),                  "<|im_start|>assistant\n<think>\n");
-        check(tmpls, continuation_content(),   "<|im_start|>assistant\n<think>\nI'm thinking\n</think>\n\nHello, ");
-        check(tmpls, continuation_reasoning(), "<|im_start|>assistant\n<think>\nI'm");
-    }
+        check(t, tmpls, basic(),                  "<|im_start|>assistant\n<think>\n");
+        check(t, tmpls, continuation_content(),   "<|im_start|>assistant\n<think>\nI'm thinking\n</think>\n\nHello, ");
+        check(t, tmpls, continuation_reasoning(), "<|im_start|>assistant\n<think>\nI'm");
+    });
 }
 
 // Test the developer role to system workaround with a simple mock template
-static void test_developer_role_to_system_workaround() {
-    LOG_DBG("%s\n", __func__);
-
+static void test_developer_role_to_system_workaround(testing & t) {
     // Simple mock template that supports system role
     const std::string mock_template =
         "{%- for message in messages -%}\n"
@@ -7011,13 +6990,8 @@ static void test_developer_role_to_system_workaround() {
         auto params = common_chat_templates_apply(tmpls.get(), inputs);
 
         // The developer role should have been changed to system
-        if (params.prompt.find("<|developer|>") != std::string::npos) {
-            throw std::runtime_error("Test failed: developer role was not changed to system");
-        }
-        if (params.prompt.find("<|system|>You are a helpful developer assistant.<|end|>") == std::string::npos) {
-            throw std::runtime_error("Test failed: system message not found in output");
-        }
-        LOG_ERR("Test 1 passed: developer role changed to system\n");
+        assert_not_contains(t, params.prompt, "<|developer|>");
+        assert_contains(t, params.prompt, "<|system|>You are a helpful developer assistant.<|end|>");
     }
 }
 
@@ -7025,9 +6999,7 @@ static void test_developer_role_to_system_workaround() {
 // all traces are retained unless drop_thinking is true AND the conversation
 // has no tool calls, in which case only the last (after-final-user) trace is
 // kept and earlier ones are dropped.
-static void test_deepseek_v4_thinking_retention() {
-    LOG_DBG("%s\n", __func__);
-
+static void test_deepseek_v4_thinking_retention(testing & t) {
     auto tmpls = read_templates("models/templates/deepseek-ai-DeepSeek-V4.jinja");
 
     common_chat_msg user_q1; user_q1.role = "user"; user_q1.content = "Question 1";
@@ -7061,59 +7033,57 @@ static void test_deepseek_v4_thinking_retention() {
     };
 
     // No tools, drop_thinking=false: all reasoning is retained.
-    {
+    t.test("no tools, keep thinking", [&](testing & t) {
         auto prompt = render({ user_q1, asst_a1, user_q2, asst_a2 }, /* drop_thinking = */ false);
-        assert_contains(prompt, think_a1);
-        assert_contains(prompt, think_a2);
-    }
+        assert_contains(t, prompt, think_a1);
+        assert_contains(t, prompt, think_a2);
+    });
 
     // No tools, drop_thinking=true: only the last reasoning trace is kept,
     // earlier ones are dropped (the assistant block emits just the end token).
-    {
+    t.test("no tools, drop thinking", [&](testing & t) {
         auto prompt = render({ user_q1, asst_a1, user_q2, asst_a2 }, /* drop_thinking = */ true);
-        assert_not_contains(prompt, think_a1);
-        assert_contains(prompt, think_a2);
+        assert_not_contains(t, prompt, think_a1);
+        assert_contains(t, prompt, think_a2);
         // The dropped assistant turn still opens with the marker + bare end token.
-        assert_contains(prompt, asst_no_think + "Answer 1");
-    }
+        assert_contains(t, prompt, asst_no_think + "Answer 1");
+    });
 
     // Single assistant turn, drop_thinking=true: the only trace is the last
     // one, so it must be retained even with drop_thinking set.
-    {
+    t.test("single turn, drop thinking", [&](testing & t) {
         auto prompt = render({ user_q1, asst_a1 }, /* drop_thinking = */ true);
-        assert_contains(prompt, think_a1);
-    }
+        assert_contains(t, prompt, think_a1);
+    });
 
     // Single assistant turn, drop_thinking=false: reasoning is retained.
-    {
+    t.test("single turn, keep thinking", [&](testing & t) {
         auto prompt = render({ user_q1, asst_a1 }, /* drop_thinking = */ false);
-        assert_contains(prompt, think_a1);
-    }
+        assert_contains(t, prompt, think_a1);
+    });
 
     // With tool calls, drop_thinking=true: tool presence forces all reasoning
     // to be retained, including the pre-tool-call trace.
-    {
+    t.test("tool calls, drop thinking", [&](testing & t) {
         auto prompt = render({ user_q1, asst_a1, user_q2, tool_assist, tool_result, asst_a2 },
                              /* drop_thinking = */ true);
-        assert_contains(prompt, think_a1);
-        assert_contains(prompt, think_a2);
-    }
+        assert_contains(t, prompt, think_a1);
+        assert_contains(t, prompt, think_a2);
+    });
 
     // With tool calls, drop_thinking=false: all reasoning retained.
-    {
+    t.test("tool calls, keep thinking", [&](testing & t) {
         auto prompt = render({ user_q1, asst_a1, user_q2, tool_assist, tool_result, asst_a2 },
                              /* drop_thinking = */ false);
-        assert_contains(prompt, think_a1);
-        assert_contains(prompt, think_a2);
-    }
+        assert_contains(t, prompt, think_a1);
+        assert_contains(t, prompt, think_a2);
+    });
 }
 
 // Verify that consecutive tool results are rendered in the tool call order of the
 // preceding assistant message (matched by tool call id), as required by the reference
 // DeepSeek-V4 implementation.
-static void test_deepseek_v4_tool_result_ordering() {
-    LOG_DBG("%s\n", __func__);
-
+static void test_deepseek_v4_tool_result_ordering(testing & t) {
     auto tmpls = read_templates("models/templates/deepseek-ai-DeepSeek-V4.jinja");
 
     common_chat_msg user_q; user_q.role = "user"; user_q.content = "Question";
@@ -7136,31 +7106,30 @@ static void test_deepseek_v4_tool_result_ordering() {
     };
 
     // Results sent out of order are reordered to match the tool call order.
-    {
+    t.test("out of order", [&](testing & t) {
         auto prompt = render({ user_q, assist_calls, weather_result, time_result });
-        assert_contains(prompt, "<tool_result>12:00</tool_result>\n\n<tool_result>sunny</tool_result>");
-    }
+        assert_contains(t, prompt, "<tool_result>12:00</tool_result>\n\n<tool_result>sunny</tool_result>");
+    });
 
     // Results already in call order stay put.
-    {
+    t.test("in order", [&](testing & t) {
         auto prompt = render({ user_q, assist_calls, time_result, weather_result });
-        assert_contains(prompt, "<tool_result>12:00</tool_result>\n\n<tool_result>sunny</tool_result>");
-    }
+        assert_contains(t, prompt, "<tool_result>12:00</tool_result>\n\n<tool_result>sunny</tool_result>");
+    });
 
     // Without tool call ids there is nothing to match against; order is preserved.
-    {
+    t.test("without ids", [&](testing & t) {
         auto no_id_calls = assist_calls;
         no_id_calls.tool_calls[0].id = "";
         no_id_calls.tool_calls[1].id = "";
         auto no_id_weather = weather_result; no_id_weather.tool_call_id = "";
         auto no_id_time    = time_result;    no_id_time.tool_call_id = "";
         auto prompt = render({ user_q, no_id_calls, no_id_weather, no_id_time });
-        assert_contains(prompt, "<tool_result>sunny</tool_result>\n\n<tool_result>12:00</tool_result>");
-    }
+        assert_contains(t, prompt, "<tool_result>sunny</tool_result>\n\n<tool_result>12:00</tool_result>");
+    });
 }
 
-static void test_reasoning_budget_tokens_per_request() {
-    LOG_DBG("%s\n", __func__);
+static void test_reasoning_budget_tokens_per_request(testing & t) {
     // Use Qwen3 template which has <think>...</think> reasoning markers.
     // The autoparser detects them and sets thinking_start/end_tag, which enables
     // the reasoning-budget code path in oaicompat_chat_params_parse.
@@ -7182,17 +7151,13 @@ static void test_reasoning_budget_tokens_per_request() {
     auto llama_params = oaicompat_chat_params_parse(body, opt, out_files);
 
     // The per-request value must win over the server default (-1).
-    if (!llama_params.contains("reasoning_budget_tokens")) {
-        throw std::runtime_error("reasoning_budget_tokens missing from llama_params (thinking_end_tag may be empty for this template)");
-    }
-    int got = llama_params["reasoning_budget_tokens"].get<int>();
-    if (got != 0) {
-        throw std::runtime_error(std::string("Expected reasoning_budget_tokens=0, got ") + std::to_string(got));
+    if (t.assert_true("reasoning_budget_tokens missing from llama_params (thinking_end_tag may be empty for this template)",
+                      llama_params.contains("reasoning_budget_tokens"))) {
+        t.assert_equal("reasoning_budget_tokens", 0, llama_params["reasoning_budget_tokens"].get<int>());
     }
 }
 
-static void test_reasoning_budget_message_per_request() {
-    LOG_DBG("%s\n", __func__);
+static void test_reasoning_budget_message_per_request(testing & t) {
     // Same code path as test_reasoning_budget_tokens_per_request: the Qwen3 template's
     // <think>...</think> markers enable the reasoning-budget block in oaicompat_chat_params_parse.
     auto tmpls = read_templates("models/templates/Qwen-Qwen3-0.6B.jinja");
@@ -7215,21 +7180,16 @@ static void test_reasoning_budget_message_per_request() {
     auto llama_params = oaicompat_chat_params_parse(body, opt, out_files);
 
     // The per-request value must win over the server default.
-    if (!llama_params.contains("reasoning_budget_message")) {
-        throw std::runtime_error("reasoning_budget_message missing from llama_params (thinking_end_tag may be empty for this template)");
-    }
-    std::string got = llama_params["reasoning_budget_message"].get<std::string>();
-    if (got != per_request_message) {
-        throw std::runtime_error("Expected reasoning_budget_message='" + per_request_message + "', got '" + got + "'");
+    if (t.assert_true("reasoning_budget_message missing from llama_params (thinking_end_tag may be empty for this template)",
+                      llama_params.contains("reasoning_budget_message"))) {
+        t.assert_equal("reasoning_budget_message", per_request_message, llama_params["reasoning_budget_message"].get<std::string>());
     }
 }
 
-static void test_reasoning_effort_caps() {
-    LOG_DBG("%s\n", __func__);
-
-    auto assert_supports_effort = [](const std::string & path, bool expected) {
+static void test_reasoning_effort_caps(testing & t) {
+    auto assert_supports_effort = [&](const std::string & path, bool expected) {
         auto tmpls = read_templates(path);
-        assert_equals(expected, common_chat_templates_get_caps(tmpls.get()).at("supports_reasoning_effort"));
+        t.assert_equal(path + " supports_reasoning_effort", expected, common_chat_templates_get_caps(tmpls.get()).at("supports_reasoning_effort"));
     };
 
     assert_supports_effort("models/templates/deepseek-ai-DeepSeek-V4.jinja", true);
@@ -7242,9 +7202,8 @@ static void test_reasoning_effort_caps() {
     assert_supports_effort("models/templates/Qwen-Qwen3-0.6B.jinja", false);
 }
 
-static void test_msg_diffs_compute() {
-    LOG_DBG("%s\n", __func__);
-    {
+static void test_msg_diffs_compute(testing & t) {
+    t.test("content from empty", [](testing & t) {
         common_chat_msg msg1;
 
         common_chat_msg msg2;
@@ -7253,9 +7212,9 @@ static void test_msg_diffs_compute() {
         common_chat_msg_diff diff;
         diff.content_delta = "Hello, world!";
 
-        assert_equals({ diff }, common_chat_msg_diff::compute_diffs(msg1, msg2));
-    }
-    {
+        t.assert_equal("diffs", std::vector<common_chat_msg_diff>{ diff }, common_chat_msg_diff::compute_diffs(msg1, msg2));
+    });
+    t.test("content appended", [](testing & t) {
         common_chat_msg msg1;
         msg1.content = "Hello,";
 
@@ -7265,9 +7224,9 @@ static void test_msg_diffs_compute() {
         common_chat_msg_diff diff;
         diff.content_delta = " world!";
 
-        assert_equals({ diff }, common_chat_msg_diff::compute_diffs(msg1, msg2));
-    }
-    {
+        t.assert_equal("diffs", std::vector<common_chat_msg_diff>{ diff }, common_chat_msg_diff::compute_diffs(msg1, msg2));
+    });
+    t.test("tool call arguments streamed", [](testing & t) {
         common_chat_msg msg0;
 
         common_chat_msg msg1;
@@ -7286,16 +7245,16 @@ static void test_msg_diffs_compute() {
         diff01.tool_call_delta.id        = "123";
         diff01.tool_call_delta.arguments = "{\"ar";
 
-        assert_equals({ diff01 }, common_chat_msg_diff::compute_diffs(msg0, msg1));
+        t.assert_equal("diffs msg0 -> msg1", std::vector<common_chat_msg_diff>{ diff01 }, common_chat_msg_diff::compute_diffs(msg0, msg1));
 
         common_chat_msg_diff diff12;
         diff12.tool_call_index           = 0;
         // Note: neither id nor name change here.
         diff12.tool_call_delta.arguments = "g1\": 1}";
 
-        assert_equals({ diff12 }, common_chat_msg_diff::compute_diffs(msg1, msg2));
-    }
-    {
+        t.assert_equal("diffs msg1 -> msg2", std::vector<common_chat_msg_diff>{ diff12 }, common_chat_msg_diff::compute_diffs(msg1, msg2));
+    });
+    t.test("two tool calls", [](testing & t) {
         common_chat_msg msg0;
 
         common_chat_msg msg2;
@@ -7316,53 +7275,61 @@ static void test_msg_diffs_compute() {
         diff2.tool_call_delta.id        = "222";
         diff2.tool_call_delta.arguments = "{\"arg2\": 2}";
 
-        assert_equals({ diff1, diff2 }, common_chat_msg_diff::compute_diffs(msg0, msg2));
+        t.assert_equal("diffs", std::vector<common_chat_msg_diff>{ diff1, diff2 }, common_chat_msg_diff::compute_diffs(msg0, msg2));
+    });
+}
+
+// --template <name> selects the template groups whose name contains <name>, case-insensitive
+static std::string template_filter_regex(const std::string & name) {
+    std::string re = "templates(\\..*";
+    for (char c : name) {
+        if (isalpha((unsigned char) c)) {
+            re += std::string("[") + (char) tolower((unsigned char) c) + (char) toupper((unsigned char) c) + "]";
+        } else if (isdigit((unsigned char) c)) {
+            re += c;
+        } else {
+            re += std::string("\\") + c;
+        }
     }
+    return re + ".*)?";
 }
 
 int main(int argc, char ** argv) {
-    bool detailed_debug    = false;
-    bool only_run_filtered = false;
+    testing t(std::cout);
+    t.capture_output = true;
+    t.apply_env();
 
-    // Check for --template and --detailed flags
+    // usage: test-chat [--detailed] [--force-reconstruction-test] [--template <name>] [filter_regex]
+    //        test-chat <template.jinja>... (prints a Markdown table of the detected formats)
+    std::string              filter;
+    std::vector<std::string> jinja_files;
     for (int i = 1; i < argc; i++) {
         std::string arg = argv[i];
         if (arg == "--template" && i + 1 < argc) {
-            g_template_filter = argv[++i];
-            // Only run PEG parser tests with the filter
-            only_run_filtered = true;
-        }
-        if (arg == "--detailed") {
-            detailed_debug = true;
+            filter = template_filter_regex(argv[++i]);
+        } else if (arg == "--detailed") {
+            g_detailed_debug = true;
+            t.verbose        = true;
             common_log_set_verbosity_thold(999);
-        }
-        if (arg == "--force-reconstruction-test") {
+        } else if (arg == "--force-reconstruction-test") {
             g_force_reconstruction_test = true;
-            only_run_filtered          = true;
+        } else if (string_ends_with(arg, ".jinja")) {
+            jinja_files.push_back(arg);
+        } else {
+            filter = arg;
         }
     }
-
-    if (only_run_filtered) {
-        test_template_output_peg_parsers(detailed_debug);
-        std::cout << "\n[chat] All template tests passed!" << '\n';
-        return 0;
+    // the reconstruction flag only affects the template tests, so run just those as before
+    if (filter.empty() && g_force_reconstruction_test) {
+        filter = "templates.*";
+    }
+    if (!filter.empty()) {
+        t.set_filter(filter);
+        g_has_filter = true;
     }
 
 #ifndef _WIN32
-    // Check if any argument is a .jinja file (for template format detection mode)
-    bool has_jinja_files = false;
-    for (int i = 1; i < argc; i++) {
-        std::string arg = argv[i];
-        if (arg == "--detailed") {
-            continue;
-        }
-        if (arg.size() >= 6 && arg.rfind(".jinja") == arg.size() - 6) {
-            has_jinja_files = true;
-            break;
-        }
-    }
-
-    if (has_jinja_files) {
+    if (!jinja_files.empty()) {
         common_chat_templates_inputs inputs;
         common_chat_msg              msg;
         msg.role        = "user";
@@ -7373,39 +7340,34 @@ int main(int argc, char ** argv) {
         std::cout << "| Template | Format |\n";
         std::cout << "|----------|--------|\n";
 
-        for (int i = 1; i < argc; i++) {
+        for (const auto & path : jinja_files) {
             try {
-                std::string path = argv[i];
-                if (path.rfind(".jinja") != path.size() - 6) {
-                    std::cerr << "Skipping non-jinja file: " << path << '\n';
-                    continue;
-                }
                 auto         tmpls  = read_templates(path);
                 auto         parts  = string_split(path, "/");
                 const auto & name   = parts[parts.size() - 1];
                 const auto * format = common_chat_format_name(common_chat_templates_apply(tmpls.get(), inputs).format);
                 std::cout << "| " << name << " | " << format << " |\n";
             } catch (const std::exception & e) {
-                std::cerr << "Failed to process " << argv[i] << ": " << e.what() << '\n';
+                std::cerr << "Failed to process " << path << ": " << e.what() << '\n';
             }
         }
-    } else
-#endif
-    {
-        test_msg_diffs_compute();
-        test_msgs_oaicompat_json_conversion();
-        test_msg_token_delimiters_split();
-        test_tools_oaicompat_json_conversion();
-        test_convert_responses_to_chatcmpl();
-        test_developer_role_to_system_workaround();
-        test_deepseek_v4_thinking_retention();
-        test_deepseek_v4_tool_result_ordering();
-        test_template_generation_prompt();
-        test_reasoning_effort_caps();
-        test_reasoning_budget_tokens_per_request();
-        test_reasoning_budget_message_per_request();
-        test_template_output_peg_parsers(detailed_debug);
-        std::cout << "\n[chat] All tests passed!" << '\n';
+        return 0;
     }
-    return 0;
+#endif
+
+    t.test("msg diffs compute", test_msg_diffs_compute);
+    t.test("msgs oaicompat json conversion", test_msgs_oaicompat_json_conversion);
+    t.test("msg token delimiters split", test_msg_token_delimiters_split);
+    t.test("tools oaicompat json conversion", test_tools_oaicompat_json_conversion);
+    t.test("convert responses to chatcmpl", test_convert_responses_to_chatcmpl);
+    t.test("developer role to system workaround", test_developer_role_to_system_workaround);
+    t.test("deepseek v4 thinking retention", test_deepseek_v4_thinking_retention);
+    t.test("deepseek v4 tool result ordering", test_deepseek_v4_tool_result_ordering);
+    t.test("template generation prompt", test_template_generation_prompt);
+    t.test("reasoning effort caps", test_reasoning_effort_caps);
+    t.test("reasoning budget tokens per request", test_reasoning_budget_tokens_per_request);
+    t.test("reasoning budget message per request", test_reasoning_budget_message_per_request);
+    t.test("templates", test_template_output_peg_parsers);
+
+    return t.summary();
 }
