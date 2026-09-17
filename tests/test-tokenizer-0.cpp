@@ -1,8 +1,11 @@
+#include "testing.h"
+
 #include "llama.h"
 #include "common.h"
 #include "console.h"
 
 #include <cstdio>
+#include <cstdlib>
 #include <string>
 #include <map>
 #include <vector>
@@ -123,6 +126,158 @@ static llama_tests read_tests(const std::string & fname_inp, const std::string &
     return tests;
 }
 
+static std::string tokens_to_str(const std::vector<llama_token> & tokens) {
+    std::string res;
+    for (const auto & tok : tokens) {
+        res += std::to_string(tok) + " ";
+    }
+    return res;
+}
+
+static void check_tokens(testing & t, llama_context * ctx, const std::string & src, const std::vector<llama_token> & expected, const std::vector<llama_token> & res) {
+    printf("\n");
+    printf("src: '%s'\n", src.c_str());
+    printf("res: '%s'\n", common_detokenize(ctx, res).c_str());
+    printf("tok: %s\n", tokens_to_str(res).c_str());
+
+    bool correct = res.size() == expected.size();
+    for (int i = 0; i < (int) res.size() && correct; ++i) {
+        if (expected[i] != res[i]) {
+            correct = false;
+        }
+    }
+
+    if (!correct) {
+        fprintf(stderr, "%s : failed test:    '%s'\n", __func__, src.c_str());
+        fprintf(stderr, "%s : detokenized to: '%s' instead of '%s'\n", __func__,
+            common_detokenize(ctx, res).c_str(),
+            common_detokenize(ctx, expected).c_str());
+        fprintf(stderr, "%s : expected tokens: ", __func__);
+        for (const auto & tok : expected) {
+            fprintf(stderr, "%6d '%s', ", tok, common_token_to_piece(ctx, tok).c_str());
+        }
+        fprintf(stderr, "\n");
+        fprintf(stderr, "%s : got tokens:      ", __func__);
+        for (const auto & tok : res) {
+            fprintf(stderr, "%6d '%s', ", tok, common_token_to_piece(ctx, tok).c_str());
+        }
+        fprintf(stderr, "\n");
+    }
+
+    t.assert_equal("tokens for '" + src + "'", tokens_to_str(expected), tokens_to_str(res));
+}
+
+// every thread tokenizes every input, only the results of the first thread are checked
+static void test_tokenize(testing & t, llama_context * ctx, const llama_tests & k_tests) {
+    const bool add_special = false;
+
+    std::vector<std::vector<llama_token>> results(k_tests.size());
+
+    const int nthread = std::thread::hardware_concurrency();
+    std::vector<std::thread> threads(nthread);
+
+    t.log("tokenizing " + std::to_string(k_tests.size()) + " inputs on " + std::to_string(nthread) + " threads");
+
+    for (int i = 0; i < nthread; i++) {
+        threads[i] = std::thread([&, i]() {
+            size_t idx = 0;
+            for (const auto & test_kv : k_tests) {
+                std::vector<llama_token> res = common_tokenize(ctx, test_kv.first, add_special, false);
+                if (i == 0) {
+                    results[idx] = std::move(res);
+                }
+                ++idx;
+            }
+        });
+    }
+
+    for (int i = 0; i < nthread; i++) {
+        threads[i].join();
+    }
+
+    size_t idx = 0;
+    for (const auto & test_kv : k_tests) {
+        t.test("text_" + std::to_string(idx), [&](testing & t) {
+            check_tokens(t, ctx, test_kv.first, test_kv.second, results[idx]);
+        });
+
+        ++idx;
+    }
+}
+
+static void load_vocab(testing & t, const std::string & fname, llama_model *& model, llama_context *& ctx) {
+    fprintf(stderr, "%s : reading vocab from: '%s'\n", __func__, fname.c_str());
+
+    auto mparams = llama_model_default_params();
+
+    mparams.vocab_only = true;
+
+    model = llama_model_load_from_file(fname.c_str(), mparams);
+
+    if (!t.assert_true("load vocab '" + fname + "'", model != NULL)) {
+        fprintf(stderr, "%s: error: failed to load vocab '%s'\n", __func__, fname.c_str());
+        return;
+    }
+
+    auto cparams = llama_context_default_params();
+
+    ctx = llama_init_from_model(model, cparams);
+
+    if (!t.assert_true("create context for '" + fname + "'", ctx != NULL)) {
+        fprintf(stderr, "%s: error: failed to load vocab '%s'\n", __func__, fname.c_str());
+    }
+}
+
+// single threaded tokenization of a text file, the tokens are written next to it
+static void test_text_file(testing & t, llama_context * ctx, const std::string & fname_text) {
+    const bool add_special = false;
+
+    fprintf(stderr, "%s : tokenizing: '%s'\n", __func__, fname_text.c_str());
+
+    std::string text;
+    {
+        std::ifstream ifs(fname_text);
+        if (!t.assert_true("open text file '" + fname_text + "'", (bool) ifs)) {
+            fprintf(stderr, "%s : error: could not open file '%s'\n", __func__, fname_text.c_str());
+            return;
+        }
+        text = std::string(std::istreambuf_iterator<char>(ifs), std::istreambuf_iterator<char>());
+    }
+
+    fprintf(stderr, "%s : text size: %zu\n", __func__, text.size());
+
+    std::vector<llama_token> res;
+
+    {
+        const auto t_start = ggml_time_us();
+
+        res = common_tokenize(ctx, text, add_special, false);
+
+        const auto t_end = ggml_time_us();
+
+        fprintf(stderr, "%s : tokenized in %.3f ms (cpp)\n", __func__, (t_end - t_start) / 1000.0);
+    }
+
+    fprintf(stderr, "%s : tokens: %zu\n", __func__, res.size());
+
+    {
+        const std::string fname_out = fname_text + ".tokcpp";
+
+        std::ofstream ofs(fname_out);
+        if (!t.assert_true("open output file '" + fname_out + "'", (bool) ofs)) {
+            fprintf(stderr, "%s : error: could not open file '%s'\n", __func__, fname_out.c_str());
+            return;
+        }
+
+        for (const auto & tok : res) {
+            //ofs << tok << " '" << string_strip(llama_detokenize(ctx, std::vector<int>{tok})) << "'" << std::endl;
+            ofs << tok << "\n";
+        }
+    }
+
+    fprintf(stderr, "%s : tokens written to '%s'\n", __func__, (fname_text + ".tokcpp").c_str());
+}
+
 int main(int argc, char **argv) {
     if (argc < 2) {
         fprintf(stderr, "Usage: %s vocab-file [text-file]\n", argv[0]);
@@ -139,36 +294,19 @@ int main(int argc, char **argv) {
         fname_text = argv[2];
     }
 
-    fprintf(stderr, "%s : reading vocab from: '%s'\n", __func__, fname.c_str());
+    testing t;
+    t.capture_output = true;
+    t.apply_env();
 
-    llama_model * model;
-    llama_context * ctx;
+    // both positional arguments are taken, so the filter comes from the environment
+    if (const char * filter = getenv("LLAMA_TEST_FILTER")) {
+        t.set_filter(filter);
+    }
+
+    llama_model * model = nullptr;
+    llama_context * ctx = nullptr;
 
     llama_backend_init();
-
-    // load the vocab
-    {
-        auto mparams = llama_model_default_params();
-
-        mparams.vocab_only = true;
-
-        model = llama_model_load_from_file(fname.c_str(), mparams);
-
-        if (model == NULL) {
-            fprintf(stderr, "%s: error: failed to load vocab '%s'\n", __func__, fname.c_str());
-            return 1;
-        }
-
-        auto cparams = llama_context_default_params();
-
-        ctx = llama_init_from_model(model, cparams);
-
-        if (ctx == NULL) {
-            fprintf(stderr, "%s: error: failed to load vocab '%s'\n", __func__, fname.c_str());
-            llama_model_free(model);
-            return 1;
-        }
-    }
 
 #ifdef _WIN32
     // We need this for unicode console support
@@ -176,128 +314,27 @@ int main(int argc, char **argv) {
     atexit([]() { console::cleanup(); });
 #endif
 
-    bool success = true;
+    t.test("load", [&](testing & t) {
+        load_vocab(t, fname, model, ctx);
+    });
 
-    const auto k_tests = [&]() -> llama_tests {
-        if (!fname_text.empty()) {
-            return {};
-        }
+    if (ctx != nullptr) {
+        if (fname_text.empty()) {
+            t.test("tokenize", [&](testing & t) {
+                const auto k_tests = read_tests(fname_inp, fname_out);
 
-        const auto res = read_tests(fname_inp, fname_out);
-
-        if (res.empty()) {
-            fprintf(stderr, "%s : error: no tests found\n", __func__);
-            exit(1);
-        }
-
-        return res;
-    }();
-
-    const bool add_special = false;
-
-    // multi-threaded tokenization
-    const int nthread = std::thread::hardware_concurrency();
-    std::vector<std::thread> threads(nthread);
-
-    for (int i = 0; i < nthread; i++) {
-        threads[i] = std::thread([&, i]() {
-            for (const auto & test_kv : k_tests) {
-                const std::vector<llama_token> res = common_tokenize(ctx, test_kv.first, add_special, false);
-
-                // here only print the result of the first thread
-                // because the other threads are running the same tests
-                if (i != 0) {
-                    continue;
+                if (!t.assert_true("tests found in '" + fname_inp + "' and '" + fname_out + "'", !k_tests.empty())) {
+                    fprintf(stderr, "%s : error: no tests found\n", __func__);
+                    return;
                 }
 
-                printf("\n");
-                printf("src: '%s'\n", test_kv.first.c_str());
-                printf("res: '%s'\n", common_detokenize(ctx, res).c_str());
-                printf("tok: ");
-                for (const auto & tok : res) {
-                    printf("%d ", tok);
-                }
-                printf("\n");
-
-                bool correct = res.size() == test_kv.second.size();
-                for (int i = 0; i < (int) res.size() && correct; ++i) {
-                    if (test_kv.second[i] != res[i]) {
-                        correct = false;
-                    }
-                }
-
-                if (!correct) {
-                    fprintf(stderr, "%s : failed test:    '%s'\n", __func__, test_kv.first.c_str());
-                    fprintf(stderr, "%s : detokenized to: '%s' instead of '%s'\n", __func__,
-                        common_detokenize(ctx, res).c_str(),
-                        common_detokenize(ctx, test_kv.second).c_str());
-                    fprintf(stderr, "%s : expected tokens: ", __func__);
-                    for (const auto & t : test_kv.second) {
-                        fprintf(stderr, "%6d '%s', ", t, common_token_to_piece(ctx, t).c_str());
-                    }
-                    fprintf(stderr, "\n");
-                    fprintf(stderr, "%s : got tokens:      ", __func__);
-                    for (const auto & t : res) {
-                        fprintf(stderr, "%6d '%s', ", t, common_token_to_piece(ctx, t).c_str());
-                    }
-                    fprintf(stderr, "\n");
-
-                    success = false;
-                }
-            }
-        });
-    }
-
-    for (int i = 0; i < nthread; i++) {
-        threads[i].join();
-    }
-
-    // single threaded tokenization
-    if (!fname_text.empty()) {
-        fprintf(stderr, "%s : tokenizing: '%s'\n", __func__, fname_text.c_str());
-
-        std::string text;
-        {
-            std::ifstream ifs(fname_text);
-            if (!ifs) {
-                fprintf(stderr, "%s : error: could not open file '%s'\n", __func__, fname_text.c_str());
-                return 1;
-            }
-            text = std::string(std::istreambuf_iterator<char>(ifs), std::istreambuf_iterator<char>());
+                test_tokenize(t, ctx, k_tests);
+            });
+        } else {
+            t.test("text_file", [&](testing & t) {
+                test_text_file(t, ctx, fname_text);
+            });
         }
-
-        fprintf(stderr, "%s : text size: %zu\n", __func__, text.size());
-
-        std::vector<llama_token> res;
-
-        {
-            const auto t_start = ggml_time_us();
-
-            res = common_tokenize(ctx, text, add_special, false);
-
-            const auto t_end = ggml_time_us();
-
-            fprintf(stderr, "%s : tokenized in %.3f ms (cpp)\n", __func__, (t_end - t_start) / 1000.0);
-        }
-
-        fprintf(stderr, "%s : tokens: %zu\n", __func__, res.size());
-
-        {
-            const std::string fname_out = fname_text + ".tokcpp";
-
-            std::ofstream ofs(fname_out);
-            if (!ofs) {
-                fprintf(stderr, "%s : error: could not open file '%s'\n", __func__, fname_out.c_str());
-                return 1;
-            }
-
-            for (const auto & tok : res) {
-                //ofs << tok << " '" << string_strip(llama_detokenize(ctx, std::vector<int>{tok})) << "'" << std::endl;
-                ofs << tok << "\n";
-            }
-        }
-
-        fprintf(stderr, "%s : tokens written to '%s'\n", __func__, (fname_text + ".tokcpp").c_str());
     }
 
     llama_free(ctx);
@@ -305,8 +342,5 @@ int main(int argc, char **argv) {
 
     llama_backend_free();
 
-    printf("\n");
-    printf("Tests %s\n", success ? "passed" : "failed");
-
-    return success ? 0 : 3;
+    return t.summary();
 }
