@@ -653,13 +653,8 @@ static void test_mrope(testing & t) {
 int main(int argc, char ** argv) {
     testing t;
 
-    const char * verbose = getenv("LLAMA_TEST_VERBOSE");
-    if (verbose) {
-        t.verbose = std::string(verbose) == "1";
-    }
-    if (!t.verbose) {
-        llama_log_set([](ggml_log_level, const char *, void *) {}, nullptr);
-    }
+    t.capture_output = true;
+    t.apply_env();
 
     if (argc > 1) {
         t.set_filter(argv[1]);

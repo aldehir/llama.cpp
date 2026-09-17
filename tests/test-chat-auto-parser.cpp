@@ -539,7 +539,9 @@ int main(int argc, char * argv[]) {
     }
 
     testing t(std::cout);
-    t.verbose = true;
+    t.verbose        = true;
+    t.capture_output = true;
+    t.apply_env();
 
     // usage: test-chat-auto-parser [filter_regex]
 
