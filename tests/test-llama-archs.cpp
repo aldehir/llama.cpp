@@ -1,3 +1,5 @@
+#include "testing.h"
+
 #include "common.h"
 #include "log.h"
 #include "ggml-backend.h"
@@ -65,7 +67,7 @@ static void set_tensor_data(struct ggml_tensor * tensor, void * userdata) {
 }
 
 static void usage(char ** argv) {
-    printf("Usage: %s [-a/--arch arch] [-s/--seed seed] [-o/--out dir] [-v N] [-h/--help]\n", argv[0]);
+    printf("Usage: %s [-a/--arch arch] [-s/--seed seed] [-o/--out dir] [-v N] [-f/--filter regex] [-h/--help]\n", argv[0]);
 }
 
 static std::vector<llama_token> get_tokens(const uint32_t n_tokens, const uint32_t n_vocab, const size_t seed){
@@ -596,28 +598,34 @@ static bool arch_supported(const llm_arch arch) {
     return true;
 }
 
-static int save_models(const llm_arch target_arch, const size_t seed, const int verbosity, const std::string & dir) {
-    struct user_data_t {
-        struct {
-            ggml_log_callback callback;
-            void * user_data;
-        } log_old;
+// forwards llama log messages at or below the requested verbosity to the previous callback
+struct log_filter {
+    ggml_log_callback callback;
+    void *            user_data;
 
-        int verbosity;
+    int verbosity;
 
-        user_data_t(int verbosity) : verbosity(verbosity) {
-            llama_log_get(&log_old.callback, &log_old.user_data);
-        }
-    };
-    user_data_t ud(verbosity);
+    log_filter(int verbosity) : verbosity(verbosity) {
+        llama_log_get(&callback, &user_data);
+        llama_log_set([](ggml_log_level level, const char * text, void * ud) {
+            const log_filter * lf = (const log_filter *) ud;
+            if (common_log_get_verbosity(level) <= lf->verbosity) {
+                lf->callback(level, text, lf->user_data);
+            }
+        }, this);
+    }
 
-    llama_log_set([](ggml_log_level level, const char * text, void * user_data) {
-        const user_data_t * ud = (const user_data_t *) user_data;
-        int verbosity = common_log_get_verbosity(level);
-        if (verbosity <= ud->verbosity) {
-            ud->log_old.callback(level, text, ud->log_old.user_data);
-        }
-    }, &ud);
+    ~log_filter() {
+        llama_log_set(callback, user_data);
+    }
+};
+
+static std::string model_name(const llm_arch arch, const bool moe) {
+    return std::string(llm_arch_name(arch)) + (moe ? "-moe" : "-dense");
+}
+
+static void save_models(testing & t, const llm_arch target_arch, const size_t seed, const int verbosity, const std::string & dir) {
+    log_filter lf(verbosity);
 
     for (const llm_arch & arch : llm_arch_all()) {
         if (arch == LLM_ARCH_UNKNOWN) {
@@ -639,65 +647,115 @@ static int save_models(const llm_arch target_arch, const size_t seed, const int 
             if (!moe && moe_mandatory(arch)) {
                 continue;
             }
-            if (!llama_model_saver_supports_arch(arch) || !arch_supported(arch)) {
-                LOG_INF("%s: %s model (%s) is unsupported, skipping\n", __func__, llm_arch_name(arch), moe ? "MoE" : "dense");
-                continue;
-            }
-            gguf_context_ptr gguf_ctx = get_gguf_ctx(arch, moe);
-            auto model_and_ctx = get_model_and_ctx(gguf_ctx.get(), nullptr, seed, {});
-            const std::string path = dir + "/" + llm_arch_name(arch) + (moe ? "-moe.gguf" : "-dense.gguf");
-            LOG_INF("%s: Saving %s model (%s) to %s...\n", __func__, llm_arch_name(arch), moe ? "MoE" : "dense", path.c_str());
-            llama_model_save_to_file(model_and_ctx.first.get(), path.c_str());
+            t.test(model_name(arch, moe), [&](testing & t) {
+                if (!llama_model_saver_supports_arch(arch) || !arch_supported(arch)) {
+                    LOG_INF("%s: %s model (%s) is unsupported, skipping\n", __func__, llm_arch_name(arch), moe ? "MoE" : "dense");
+                    t.skip("unsupported");
+                    return;
+                }
+                gguf_context_ptr gguf_ctx = get_gguf_ctx(arch, moe);
+                auto model_and_ctx = get_model_and_ctx(gguf_ctx.get(), nullptr, seed, {});
+                const std::string path = dir + "/" + model_name(arch, moe) + ".gguf";
+                LOG_INF("%s: Saving %s model (%s) to %s...\n", __func__, llm_arch_name(arch), moe ? "MoE" : "dense", path.c_str());
+                llama_model_save_to_file(model_and_ctx.first.get(), path.c_str());
+            });
         }
     }
-    llama_log_set(ud.log_old.callback, ud.log_old.user_data);
-    return 0;
 }
 
-static int test_backends(const llm_arch target_arch, const size_t seed, const int verbosity) {
-    struct user_data_t {
-        struct {
-            ggml_log_callback callback;
-            void * user_data;
-        } log_old;
+struct device_config {
+    std::vector<ggml_backend_dev_t> devs;
+    std::string                     label;
+    llama_split_mode                split_mode;
 
-        int verbosity;
+    device_config(std::vector<ggml_backend_dev_t> devs, std::string name, llama_split_mode split_mode)
+        : devs(std::move(devs)), label(std::move(name)), split_mode(split_mode) {}
+};
 
-        user_data_t(int verbosity) : verbosity(verbosity) {
-            llama_log_get(&log_old.callback, &log_old.user_data);
+// compares the logits of one device config against the CPU logits and checks that they survive a save/load roundtrip
+static void test_device(
+        testing & t, const llm_arch arch, gguf_context * gguf_ctx, const device_config & dc, const size_t seed, const bool encode,
+        const std::vector<llama_token> & tokens, std::pair<llama_model_ptr, llama_context_ptr> & model_and_ctx_cpu, std::vector<float> & logits_cpu) {
+    if (!arch_supported(arch)) {
+        t.skip("unsupported arch");
+        return;
+    }
+    if (dc.split_mode == LLAMA_SPLIT_MODE_TENSOR && dc.devs.empty()) {
+        t.skip("no devices for tensor split");
+        return;
+    }
+    if (dc.split_mode == LLAMA_SPLIT_MODE_TENSOR && !llm_arch_supports_sm_tensor(arch)) {
+        t.skip("tensor split not supported by this arch");
+        return;
+    }
+
+    if (logits_cpu.empty()) {
+        model_and_ctx_cpu = get_model_and_ctx(gguf_ctx, nullptr, seed, {}, LLAMA_SPLIT_MODE_LAYER, encode);
+        logits_cpu = get_logits(model_and_ctx_cpu.first.get(), model_and_ctx_cpu.second.get(), tokens, encode);
+    }
+
+    auto model_and_ctx_dev = get_model_and_ctx(gguf_ctx, nullptr, seed, dc.devs, dc.split_mode, encode);
+    const std::vector<float> logits_dev = get_logits(model_and_ctx_dev.first.get(), model_and_ctx_dev.second.get(), tokens, encode);
+    const double nmse_val = nmse(logits_cpu, logits_dev);
+    char nmse_str[12] = {0};
+    snprintf(nmse_str, sizeof(nmse_str), "(%.2e)", nmse_val);
+    t.log(std::string("nmse vs. CPU ") + nmse_str);
+    t.assert_true(std::string("nmse vs. CPU ") + nmse_str + " is at most 1e-4", !(nmse_val > 1e-4));
+
+    FILE * file = tmpfile(); // Can be null on Windows without administrator privileges.
+    // FIXME: when adding a tensor to a gguf_context a copy is made, this changes the pointer which the meta backend
+    //     in turn uses to map the tensors to their simple equivalents - this is fundamentally incompatible
+    if (file == nullptr) {
+        t.log("roundtrip skipped, tmpfile() failed");
+        return;
+    }
+    if (!llama_model_saver_supports_arch(arch)) {
+        t.log("roundtrip skipped, the model saver does not support this arch");
+        return;
+    }
+    if (dc.split_mode == LLAMA_SPLIT_MODE_TENSOR) {
+        t.log("roundtrip skipped, tensor split");
+        return;
+    }
+
+    GGML_ASSERT(model_and_ctx_dev.first && model_and_ctx_dev.second);
+    llama_model_saver ms = llama_model_saver(model_and_ctx_dev.first.get());
+    ms.add_kv_from_model();
+    ms.add_tensors_from_model();
+    ms.save(file);
+    rewind(file);
+
+    auto model_and_ctx_roundtrip = get_model_and_ctx(nullptr, file, seed, dc.devs, dc.split_mode, encode);
+    const std::vector<float> logits_roundtrip = get_logits(
+        model_and_ctx_roundtrip.first.get(), model_and_ctx_roundtrip.second.get(), tokens, encode);
+    GGML_ASSERT(logits_roundtrip.size() == logits_dev.size());
+    size_t i_mismatch = logits_roundtrip.size();
+    for (size_t i = 0; i < logits_roundtrip.size(); i++) {
+        if (logits_roundtrip[i] != logits_dev[i]) {
+            i_mismatch = i;
+            break;
         }
-    };
-    user_data_t ud(verbosity);
+    }
+    std::string msg = "logits are identical after a save/load roundtrip";
+    if (i_mismatch < logits_roundtrip.size()) {
+        msg += ", first mismatch at " + std::to_string(i_mismatch) + ": " + std::to_string(logits_dev[i_mismatch]) + " vs " + std::to_string(logits_roundtrip[i_mismatch]);
+    }
+    t.assert_true(msg, i_mismatch == logits_roundtrip.size());
+}
 
-    llama_log_set([](ggml_log_level level, const char * text, void * user_data) {
-        const user_data_t * ud = (const user_data_t *) user_data;
-        int verbosity = common_log_get_verbosity(level);
-        if (verbosity <= ud->verbosity) {
-            ud->log_old.callback(level, text, ud->log_old.user_data);
-        }
-    }, &ud);
+static void test_backends(testing & t, const llm_arch target_arch, const size_t seed, const int verbosity) {
+    log_filter lf(verbosity);
 
     const std::vector<llama_token> tokens = get_tokens(128, 128, seed);
 
-    struct device_config {
-        std::vector<ggml_backend_dev_t> devs;
-        std::string                     label;
-        llama_split_mode                split_mode;
-
-        device_config(std::vector<ggml_backend_dev_t> devs, std::string name, llama_split_mode split_mode)
-            : devs(std::move(devs)), label(std::move(name)), split_mode(split_mode) {}
-    };
-
     std::vector<device_config> dev_configs;
-    size_t max_device_label_length = 4;
     {
         std::vector<ggml_backend_dev_t> devices_meta;
         {
             const size_t device_count = ggml_backend_dev_count();
             for (size_t i = 0; i < device_count; i++) {
                 ggml_backend_dev_t dev = ggml_backend_dev_get(i);
-                dev_configs.emplace_back(std::vector<ggml_backend_dev_t>{dev}, ggml_backend_dev_description(dev), LLAMA_SPLIT_MODE_LAYER);
-                max_device_label_length = std::max(max_device_label_length, dev_configs.back().label.length());
+                dev_configs.emplace_back(std::vector<ggml_backend_dev_t>{dev}, ggml_backend_dev_name(dev), LLAMA_SPLIT_MODE_LAYER);
 
                 // cpu-based devices cannot be used in tensor split mode
                 if (ggml_backend_dev_buffer_type(dev) != ggml_backend_cpu_buffer_type()) {
@@ -709,27 +767,6 @@ static int test_backends(const llm_arch target_arch, const size_t seed, const in
         dev_configs.emplace_back(devices_meta, "Meta", LLAMA_SPLIT_MODE_TENSOR);
     }
 
-    size_t max_arch_name_length = 0;
-    for (const llm_arch & arch : llm_arch_all()) {
-        max_arch_name_length = std::max(max_arch_name_length, strlen(llm_arch_name(arch)));
-    }
-
-    const std::string template_header  = std::string("|%" + std::to_string(max_arch_name_length) + "s|%") + std::to_string(max_device_label_length) + "s|%6s|%15s|%9s|\n";
-    const std::string template_row_cfg = std::string("|%" + std::to_string(max_arch_name_length) + "s|%") + std::to_string(max_device_label_length) + "s|%6s|";
-    const std::string template_row_res = "%15s %10s|%20s|\n";
-
-    bool all_ok = true;
-    common_log_flush(common_log_main());
-    printf(template_header.c_str(), "Model arch.", "Device", "Config", "NMSE vs. CPU", "Roundtrip");
-    printf("|");
-    for (size_t i = 0; i < max_arch_name_length; i++) {
-        printf("-");
-    }
-    printf("|");
-    for (size_t i = 0; i < max_device_label_length; i++) {
-        printf("-");
-    }
-    printf("|------|---------------|---------|\n");
     for (const llm_arch & arch : llm_arch_all()) {
         if (arch == LLM_ARCH_UNKNOWN) {
             continue;
@@ -752,77 +789,21 @@ static int test_backends(const llm_arch target_arch, const size_t seed, const in
             if (!moe && moe_mandatory(arch)) {
                 continue;
             }
-            const std::string config_name = moe ? "MoE" : "Dense";
-            gguf_context_ptr gguf_ctx = get_gguf_ctx(arch, moe);
-            if (arch == LLM_ARCH_BAILINGMOE3) {
-                GGML_ASSERT(gguf_remove_key(gguf_ctx.get(), "bailingmoe3.kda.safe_gate") >= 0);
-            }
-            std::pair<llama_model_ptr, llama_context_ptr> model_and_ctx_cpu;
-            std::vector<float> logits_cpu;
-            for (device_config & dc : dev_configs) {
-                // print test config first; should anything fail during model loading or inference, at least we know which test case caused it
-                printf(template_row_cfg.c_str(),
-                    llm_arch_name(arch), dc.label.c_str(), config_name.c_str());
-                fflush(stdout);
-
-                std::pair<llama_model_ptr, llama_context_ptr> model_and_ctx_dev;
-                std::vector<float> logits_dev;
-                std::string status_nmse      = "\033[1;33mSKIP\033[0m";
-                std::string status_roundtrip = "\033[1;33mSKIP\033[0m";
-                char nmse_str[12] = {0};
-
-                bool skip = !arch_supported(arch) || (dc.split_mode == LLAMA_SPLIT_MODE_TENSOR && dc.devs.empty());
-                if (!skip) {
-                    if (logits_cpu.empty()) {
-                        model_and_ctx_cpu = get_model_and_ctx(gguf_ctx.get(), nullptr, seed, {}, LLAMA_SPLIT_MODE_LAYER, encode);
-                        logits_cpu = get_logits(model_and_ctx_cpu.first.get(), model_and_ctx_cpu.second.get(), tokens, encode);
-                    }
-                    if (dc.split_mode != LLAMA_SPLIT_MODE_TENSOR || llm_arch_supports_sm_tensor(arch)) {
-                        model_and_ctx_dev = get_model_and_ctx(gguf_ctx.get(), nullptr, seed, dc.devs, dc.split_mode, encode);
-                        logits_dev = get_logits(model_and_ctx_dev.first.get(), model_and_ctx_dev.second.get(), tokens, encode);
-                        const double nmse_val = nmse(logits_cpu, logits_dev);
-                        snprintf(nmse_str, sizeof(nmse_str), "(%.2e)", nmse_val);
-                        status_nmse = "\033[1;32mOK\033[0m";
-                        if (nmse_val > 1e-4) {
-                            all_ok = false;
-                            status_nmse = "\033[1;31mFAIL\033[0m";
-                        }
-                    }
-
-                    FILE * file = tmpfile(); // Can be null on Windows without administrator privileges.
-                    // FIXME: when adding a tensor to a gguf_context a copy is made, this changes the pointer which the meta backend
-                    //     in turn uses to map the tensors to their simple equivalents - this is fundamentally incompatible
-                    if (file != nullptr && llama_model_saver_supports_arch(arch) && dc.split_mode != LLAMA_SPLIT_MODE_TENSOR) {
-                        GGML_ASSERT(model_and_ctx_dev.first && model_and_ctx_dev.second);
-                        llama_model_saver ms = llama_model_saver(model_and_ctx_dev.first.get());
-                        ms.add_kv_from_model();
-                        ms.add_tensors_from_model();
-                        ms.save(file);
-                        rewind(file);
-
-                        auto model_and_ctx_roundtrip = get_model_and_ctx(nullptr, file, seed, dc.devs, dc.split_mode, encode);
-                        const std::vector<float> logits_roundtrip = get_logits(
-                            model_and_ctx_roundtrip.first.get(), model_and_ctx_roundtrip.second.get(), tokens, encode);
-                        status_roundtrip = "\033[1;32mOK\033[0m";
-                        GGML_ASSERT(logits_roundtrip.size() == logits_dev.size());
-                        for (size_t i = 0; i < logits_roundtrip.size(); i++) {
-                            if (logits_roundtrip[i] != logits_dev[i]) {
-                                all_ok = false;
-                                status_roundtrip = "\033[1;31mFAIL\033[0m";
-                                break;
-                            }
-                        }
-                    }
+            t.test(model_name(arch, moe), [&](testing & t) {
+                gguf_context_ptr gguf_ctx = get_gguf_ctx(arch, moe);
+                if (arch == LLM_ARCH_BAILINGMOE3) {
+                    GGML_ASSERT(gguf_remove_key(gguf_ctx.get(), "bailingmoe3.kda.safe_gate") >= 0);
                 }
-
-                // log the results for this test case
-                printf(template_row_res.c_str(),
-                    status_nmse.c_str(), nmse_str, status_roundtrip.c_str());
-            }
+                std::pair<llama_model_ptr, llama_context_ptr> model_and_ctx_cpu;
+                std::vector<float> logits_cpu;
+                for (const device_config & dc : dev_configs) {
+                    t.test(dc.label, [&](testing & t) {
+                        test_device(t, arch, gguf_ctx.get(), dc, seed, encode, tokens, model_and_ctx_cpu, logits_cpu);
+                    });
+                }
+            });
         }
     }
-    llama_log_set(ud.log_old.callback, ud.log_old.user_data);
-    return all_ok ? 0 : 1;
 }
 
 int main(int argc, char ** argv) {
@@ -835,6 +816,7 @@ int main(int argc, char ** argv) {
     llm_arch arch = LLM_ARCH_UNKNOWN;
     size_t seed = rd();
     std::string out;
+    std::string filter;
 
     int verbosity = LOG_LEVEL_ERROR;
 
@@ -880,16 +862,33 @@ int main(int argc, char ** argv) {
                 return 1;
             }
         }
+        if (strcmp(argv[i], "-f") == 0 || strcmp(argv[i], "--filter") == 0) {
+            if (i + 1 < argc) {
+                filter = argv[++i];
+            } else {
+                usage(argv);
+                return 1;
+            }
+        }
     }
     printf("%s: using seed %zu\n", __func__, seed);
 
-    try {
-        if (!out.empty()) {
-            return save_models(arch, seed, verbosity, out);
-        }
-        return test_backends(arch, seed, verbosity);
-    } catch (const std::exception & err) {
-        fprintf(stderr, "encountered runtime error: %s\n", err.what());
-        return -1;
+    testing t;
+    t.capture_output = true;
+    t.apply_env();
+    if (!filter.empty()) {
+        t.set_filter(filter);
     }
+
+    if (!out.empty()) {
+        t.test("save", [&](testing & t) {
+            save_models(t, arch, seed, verbosity, out);
+        });
+    } else {
+        t.test("backends", [&](testing & t) {
+            test_backends(t, arch, seed, verbosity);
+        });
+    }
+
+    return t.summary();
 }
