@@ -1,5 +1,7 @@
 #include "testing.h"
 
+#include "log.h"
+
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
@@ -166,6 +168,16 @@ struct testing_capture {
             flush_std();
             fd_dup2(saved_out, 1);
             fd_dup2(saved_err, 2);
+
+            // anything that arrived after the last take() belongs to no test; print it rather than lose it
+            std::string leftover;
+            {
+                std::lock_guard<std::mutex> lock(mtx);
+                leftover.swap(buffer);
+            }
+            if (!leftover.empty()) {
+                console << leftover;
+            }
         }
     }
 
@@ -185,6 +197,9 @@ struct testing_capture {
 
     void sync() {
         flush_std();
+        // the common logger writes from its own thread; pause joins that thread after it drains its queue
+        common_log_pause(common_log_main());
+        common_log_resume(common_log_main());
         uint64_t expected;
         {
             std::lock_guard<std::mutex> lock(mtx);
