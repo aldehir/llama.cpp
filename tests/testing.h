@@ -4,10 +4,16 @@
 #include <functional>
 #include <iostream>
 #include <memory>
+#include <sstream>
 #include <string>
 #include <vector>
 
 struct testing_state;
+
+enum testing_style {
+    TESTING_STYLE_DOTS, // one mark per test, failures reported with their output at the end
+    TESTING_STYLE_TREE, // one line per test with its result as it finishes
+};
 
 // one node of the test tree: test() and bench() create a child node, hand it to the body, and roll its results up into the parent when it finishes
 struct testing {
@@ -16,6 +22,7 @@ struct testing {
     bool throw_exception = false;
     // capture fd 1 and 2 while a test runs and print the output only if the test fails
     bool capture_output  = false;
+    testing_style style  = TESTING_STYLE_DOTS;
 
     // results of this node and everything below it
     int tests      = 0;
@@ -38,13 +45,16 @@ struct testing {
 
     // where the framework itself writes; bypasses the capture redirect
     std::ostream & stream() const;
+    // where messages about this test go: the console in tree style, the failure report in dots style
+    std::ostream & report_stream();
 
     int depth() const;
     std::string indent() const;
     std::string full_name() const;
 
+    // in dots style the message is kept and shown only if the test fails
     void log(const std::string & msg);
-    // LLAMA_TEST_VERBOSE=1 turns on log(), LLAMA_TEST_CAPTURE=0 shows test output live, LLAMA_TEST_FILTER sets the filter
+    // LLAMA_TEST_VERBOSE=1 turns on log(), LLAMA_TEST_CAPTURE=0 shows test output live, LLAMA_TEST_FILTER sets the filter, LLAMA_TEST_STYLE=tree|dots picks the output style
     void apply_env();
     // run only the tests whose dotted full name matches; a matched test runs its whole subtree
     void set_filter(const std::string & re);
@@ -87,7 +97,7 @@ struct testing {
         ++assertions;
         if (!(actual == expected)) {
             ++failures;
-            std::ostream & out = stream();
+            std::ostream & out = report_stream();
             out << indent() << "ASSERT EQUAL FAILED";
             if (!msg.empty()) {
                 out << " : " << msg;
@@ -118,9 +128,14 @@ private:
     void roll_up();
     void finish(const std::string & label, const std::string & extra);
 
+    int own_failures() const;
+    int own_exceptions() const;
+
+    void print_mark(char mark) const;
     void print_result(const std::string & label, const std::string & extra, bool was_skipped) const;
     void print_captured(const std::string & captured) const;
-    void collect_failed(std::vector<std::string> & names) const;
+    void print_failures(const std::vector<const testing *> & failed) const;
+    void collect_failed(std::vector<const testing *> & failed) const;
 
     std::shared_ptr<testing_state> state;
 
@@ -130,4 +145,8 @@ private:
 
     bool        capturing     = false;
     std::size_t capture_start = 0;
+
+    // dots style keeps the messages and the captured output of a failed test for the report
+    std::ostringstream report;
+    std::string        captured;
 };
