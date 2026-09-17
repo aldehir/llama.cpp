@@ -266,6 +266,7 @@ llama_build(test-chat-analysis.cpp)
 llama_build_and_test(test-log.cpp)
 llama_build_and_test(
     test-peg-parser.cpp
+    testing.cpp
     peg-parser/simple-tokenize.cpp
     peg-parser/test-basic.cpp
     peg-parser/test-gbnf-generation.cpp
