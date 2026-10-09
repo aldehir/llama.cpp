@@ -296,7 +296,7 @@ struct value_string_t : public value_t {
     virtual std::string as_repr() const override {
         std::ostringstream ss;
         for (const auto & part : val_str.parts) {
-            ss << (part.is_input ? "INPUT: " : "TMPL:  ") << part.val << "\n";
+            ss << (part.is_input() ? "INPUT: " : "TMPL:  ") << part.val << "\n";
         }
         return ss.str();
     }
@@ -312,8 +312,8 @@ struct value_string_t : public value_t {
         val_str.hash_update(hash);
         return hash;
     }
-    void mark_input() {
-        val_str.mark_input();
+    void mark_kind(uint32_t kind) {
+        val_str.mark_kind(kind);
     }
 protected:
     virtual bool equivalent(const value_t & other) const override {

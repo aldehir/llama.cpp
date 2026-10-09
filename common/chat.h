@@ -395,7 +395,13 @@ std::string common_chat_template_direct_apply(
     const common_chat_template & tmpl,
     const autoparser::generation_params & inputs);
 
-std::string common_chat_template_generation_prompt(
+// a prompt rendered once, with the generation prompt located by the parts the template marked
+struct common_chat_template_rendered {
+    std::string prompt;
+    std::string generation_prompt;
+};
+
+common_chat_template_rendered common_chat_template_render(
     const common_chat_template &          tmpl,
     const autoparser::generation_params & inputs);
 

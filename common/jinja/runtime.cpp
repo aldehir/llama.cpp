@@ -460,11 +460,32 @@ value unary_expression::execute_impl(context & ctx) const {
     throw std::runtime_error("Unknown unary operator '" + op.value + "'");
 }
 
+// restores the kinds added to string literals when leaving a scope
+struct active_kind_guard {
+    context & ctx;
+    uint32_t  prev;
+    ~active_kind_guard() { ctx.active_kind = prev; }
+};
+
+uint32_t if_statement::test_kind(const statement * test) {
+    if (auto * id = dynamic_cast<const identifier *>(test)) {
+        return id->val == "add_generation_prompt" ? string_part::KIND_GEN_PROMPT : string_part::KIND_NONE;
+    }
+    if (auto * bin = dynamic_cast<const binary_expression *>(test); bin && bin->op.value == "and") {
+        return test_kind(bin->left.get()) | test_kind(bin->right.get());
+    }
+    return string_part::KIND_NONE;
+}
+
 value if_statement::execute_impl(context & ctx) const {
     value test_val = test->execute(ctx);
 
     auto out = mk_val<value_array>();
-    if (test_val->as_bool()) {
+    const bool taken = test_val->as_bool();
+    if (taken) {
+        // literals built in the body may reach the output later, e.g. through `set ns.out = ns.out ~ '...'`
+        active_kind_guard guard{ ctx, ctx.active_kind };
+        ctx.active_kind |= body_kind;
         for (auto & stmt : body) {
             JJ_DEBUG("IF --> Executing THEN body, current block: %s", stmt->type().c_str());
             out->push_back(stmt->execute(ctx));
@@ -478,6 +499,9 @@ value if_statement::execute_impl(context & ctx) const {
     // convert to string parts
     value_string str = mk_val<value_string>();
     gather_string_parts_recursive(out, str);
+    if (taken && body_kind != string_part::KIND_NONE) {
+        str->mark_kind(body_kind);
+    }
     return str;
 }
 

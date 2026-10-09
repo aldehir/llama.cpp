@@ -68,7 +68,6 @@ struct generation_params {
     json                                  extra_context;
     bool                                  add_bos       = false;
     bool                                  add_eos       = false;
-    bool                                  is_inference  = true;
     bool                                  add_inference = false;
     bool                                  mark_input    = true;  // whether to mark input strings in the jinja context
 

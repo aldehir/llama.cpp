@@ -275,7 +275,7 @@ static jinja::value_string format_using_direct_engine(
 
     std::cout << "\n=== RESULTS ===\n";
     for (const auto & part : parts->as_string().parts) {
-        std::cout << (part.is_input ? "DATA" : "TMPL") << ": " << part.val << "\n";
+        std::cout << (part.is_input() ? "DATA" : "TMPL") << ": " << part.val << "\n";
     }
 
     return parts;

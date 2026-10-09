@@ -36,9 +36,9 @@ bool string_part::is_lowercase() const {
 // string
 //
 
-void string::mark_input() {
+void string::mark_kind(uint32_t kind) {
     for (auto & part : parts) {
-        part.is_input = true;
+        part.kind |= kind;
     }
 }
 
@@ -67,13 +67,15 @@ void string::hash_update(hasher & hash) const noexcept {
     }
 }
 
-bool string::all_parts_are_input() const {
-    for (const auto & part : parts) {
-        if (!part.is_input) {
-            return false;
-        }
+uint32_t string::common_kind() const {
+    if (parts.empty()) {
+        return string_part::KIND_NONE;
     }
-    return true;
+    uint32_t kind = parts[0].kind;
+    for (const auto & part : parts) {
+        kind &= part.kind;
+    }
+    return kind;
 }
 
 bool string::is_uppercase() const {
@@ -94,13 +96,8 @@ bool string::is_lowercase() const {
     return true;
 }
 
-// mark this string as input if other has ALL parts as input
-void string::mark_input_based_on(const string & other) {
-    if (other.all_parts_are_input()) {
-        for (auto & part : parts) {
-            part.is_input = true;
-        }
-    }
+void string::mark_kind_based_on(const string & other) {
+    mark_kind(other.common_kind());
 }
 
 string & string::append(const string & other) {

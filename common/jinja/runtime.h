@@ -58,6 +58,8 @@ struct context {
 
     bool is_get_stats = false; // whether to collect stats
 
+    uint32_t active_kind = string_part::KIND_NONE; // kinds added to string literals created in this scope
+
     visitor_fn visitor;
 
     // src is optional, used for error reporting
@@ -82,6 +84,7 @@ struct context {
         }
         current_time = parent.current_time;
         is_get_stats = parent.is_get_stats;
+        active_kind = parent.active_kind;
         src = parent.src;
     }
 
@@ -176,11 +179,15 @@ struct if_statement : public statement {
     statement_ptr test;
     statements body;
     statements alternate;
+    uint32_t body_kind = string_part::KIND_NONE;
 
     if_statement(statement_ptr && test, statements && body, statements && alternate)
         : test(std::move(test)), body(std::move(body)), alternate(std::move(alternate)) {
         chk_type<expression>(this->test);
+        body_kind = test_kind(this->test.get());
     }
+
+    static uint32_t test_kind(const statement * test);
 
     std::string type() const override { return "If"; }
     value execute_impl(context & ctx) const override;
@@ -397,8 +404,12 @@ struct string_literal : public expression {
     std::string val;
     explicit string_literal(const std::string & val) : val(val) {}
     std::string type() const override { return "StringLiteral"; }
-    value execute_impl(context &) const override {
-        return mk_val<value_string>(val);
+    value execute_impl(context & ctx) const override {
+        auto str = mk_val<value_string>(val);
+        if (ctx.active_kind != string_part::KIND_NONE) {
+            str->mark_kind(ctx.active_kind);
+        }
+        return str;
     }
 };
 
@@ -761,7 +772,7 @@ struct runtime {
         }
         size_t w = 0;
         for (size_t r = 1; r < p.size(); r++) {
-            if (p[w].is_input == p[r].is_input) {
+            if (p[w].kind == p[r].kind) {
                 p[w].val += p[r].val;
             } else {
                 w++;

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <optional>
 #include <string>
 #include <vector>
@@ -8,14 +9,22 @@
 
 namespace jinja {
 
-// allow differentiate between user input strings and template strings
-// transformations should handle this information as follows:
-// - one-to-one (e.g., uppercase, lowercase): preserve is_input flag
-// - one-to-many (e.g., strip): if input string is marked as is_input, all resulting parts should be marked as is_input
-// - many-to-one (e.g., concat): if ALL input parts are marked as is_input, resulting part should be marked as is_input
 struct string_part {
-    bool is_input = false; // may skip parsing special tokens if true
+    // kinds tag where a part came from, as a bitmask, e.g. to differentiate between user input and template strings
+    // transformations should handle them as follows:
+    // - one-to-one (e.g., uppercase, lowercase): preserve kinds
+    // - one-to-many (e.g., strip): all resulting parts keep the kinds of the input string
+    // - many-to-one (e.g., concat): the resulting part keeps the kinds shared by ALL input parts
+    enum kinds : uint32_t {
+        KIND_NONE       = 0,
+        KIND_INPUT      = 1 << 0, // user input, may skip parsing special tokens
+        KIND_GEN_PROMPT = 1 << 1, // emitted by a branch taken on add_generation_prompt
+    };
+
     std::string val;
+    uint32_t kind = KIND_NONE;
+
+    bool is_input() const { return kind & KIND_INPUT; }
 
     bool is_uppercase() const;
     bool is_lowercase() const;
@@ -24,28 +33,29 @@ struct string_part {
 struct string {
     std::vector<string_part> parts;
     string() = default;
-    string(const std::string & v, bool user_input = false) {
-        parts.push_back({user_input, v});
+    string(const std::string & v, uint32_t kind = string_part::KIND_NONE) {
+        parts.push_back({v, kind});
     }
     string(int v) {
-        parts.push_back({false, std::to_string(v)});
+        parts.push_back({std::to_string(v)});
     }
     string(double v) {
-        parts.push_back({false, std::to_string(v)});
+        parts.push_back({std::to_string(v)});
     }
 
-    // mark all parts as user input
-    void mark_input();
+    // add a kind to all parts
+    void mark_kind(uint32_t kind);
 
     std::string str() const;
     size_t length() const;
     void hash_update(hasher & hash) const noexcept;
-    bool all_parts_are_input() const;
+    // the kinds shared by ALL parts
+    uint32_t common_kind() const;
     bool is_uppercase() const;
     bool is_lowercase() const;
 
-    // mark this string as input if other has ALL parts as input
-    void mark_input_based_on(const string & other);
+    // add the kinds shared by ALL parts of other
+    void mark_kind_based_on(const string & other);
 
     string & append(const string & other);
 
