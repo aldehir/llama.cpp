@@ -2308,9 +2308,9 @@ static void test_string_parts(testing & t) {
                                    json{{"val", json{{"a", "A"}, {"b", "B"}, {"c", "C"}}}});
 
         if (t.assert_true("3 parts after the merge", res.parts.size() == 3)) {
-            t.assert_true("part 0 is the merged input", res.parts[0].val == "AB" && res.parts[0].is_input);
-            t.assert_true("part 1 is from the template", res.parts[1].val == "-" && !res.parts[1].is_input);
-            t.assert_true("part 2 is input",             res.parts[2].val == "C" && res.parts[2].is_input);
+            t.assert_true("part 0 is the merged input", res.parts[0].val == "AB" && res.parts[0].is_input());
+            t.assert_true("part 1 is from the template", res.parts[1].val == "-" && !res.parts[1].is_input());
+            t.assert_true("part 2 is input",             res.parts[2].val == "C" && res.parts[2].is_input());
         } else {
             t.log("parts: " + std::to_string(res.parts.size()) + ", rendered: " + json(res.str()).dump());
         }

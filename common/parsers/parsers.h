@@ -31,8 +31,8 @@ std::string common_chat_template_direct_apply_impl(
     const std::optional<json> & tools_override = std::nullopt,
     const std::optional<json> & additional_context = std::nullopt);
 
-// the suffix a template appends when add_generation_prompt is set
-std::string common_chat_template_generation_prompt_impl(
+// render a template along with the suffix it appends when add_generation_prompt is set
+common_chat_template_rendered common_chat_template_render_impl(
     const common_chat_template & tmpl,
     const autoparser::generation_params & inputs,
     const std::optional<json> & messages_override = std::nullopt,

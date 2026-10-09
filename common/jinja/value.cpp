@@ -759,7 +759,7 @@ const func_builtins & value_string_t::get_builtins() const {
                 --maxsplit;
             }
             auto res = mk_val<value_string>(str);
-            res->val_str.mark_input_based_on(args.get_pos(0)->val_str);
+            res->val_str.mark_kind_based_on(args.get_pos(0)->val_str);
             result->push_back(std::move(res));
             return result;
         }},
@@ -786,7 +786,7 @@ const func_builtins & value_string_t::get_builtins() const {
                 --maxsplit;
             }
             auto res = mk_val<value_string>(str);
-            res->val_str.mark_input_based_on(args.get_pos(0)->val_str);
+            res->val_str.mark_kind_based_on(args.get_pos(0)->val_str);
             result->push_back(std::move(res));
             result->reverse();
             return result;
@@ -819,7 +819,7 @@ const func_builtins & value_string_t::get_builtins() const {
                 }
             }
             auto res = mk_val<value_string>(str);
-            res->val_str.mark_input_based_on(args.get_pos(0)->val_str);
+            res->val_str.mark_kind_based_on(args.get_pos(0)->val_str);
             return res;
         }},
         {"format", [](const func_args & args) -> value {
@@ -828,14 +828,14 @@ const func_builtins & value_string_t::get_builtins() const {
                 throw raised_exception("format() first argument must be a string");
             }
             const jinja::string & fmt = val_input->as_string();
-            const bool fmt_is_input = fmt.all_parts_are_input();
+            const uint32_t fmt_kind = fmt.common_kind();
 
             const std::string str = fmt.str();
             jinja::string result;
             std::string literal;
             auto flush_literal = [&]() {
                 if (!literal.empty()) {
-                    result.parts.push_back({fmt_is_input, literal});
+                    result.parts.push_back({literal, fmt_kind});
                     literal.clear();
                 }
             };
@@ -935,7 +935,7 @@ const func_builtins & value_string_t::get_builtins() const {
             auto input = args.get_pos(0);
             auto sliced = slice(input->as_string().str(), start, stop, step);
             auto res = mk_val<value_string>(sliced);
-            res->val_str.mark_input_based_on(input->as_string());
+            res->val_str.mark_kind_based_on(input->as_string());
             return res;
         }},
         {"safe", [](const func_args & args) -> value {
@@ -982,7 +982,7 @@ const func_builtins & value_string_t::get_builtins() const {
             }
 
             auto res = mk_val<value_string>(indented);
-            res->val_str.mark_input_based_on(val_input->as_string());
+            res->val_str.mark_kind_based_on(val_input->as_string());
             return res;
         }},
         {"join", string_join_not_implemented},
@@ -1421,7 +1421,7 @@ static value from_json(const common_json & j, bool mark_input) {
     } else if (j.is_string()) {
         auto str = mk_val<value_string>(j.get<std::string>());
         if (mark_input) {
-            str->mark_input();
+            str->mark_kind(string_part::KIND_INPUT);
         }
         return str;
     } else if (j.is_array()) {
