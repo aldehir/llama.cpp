@@ -42,9 +42,9 @@ void string::mark_input() {
     }
 }
 
-void string::set_tag(uint32_t tag) {
+void string::add_flags(uint32_t flags) {
     for (auto & part : parts) {
-        part.tag = tag;
+        part.flags |= flags;
     }
 }
 

@@ -56,7 +56,7 @@ struct context;
 
 // called around the execution of each statement, user_data is passed as-is
 // on_exit is not called if the statement throws (incl. break/continue)
-// on_exit may modify result, e.g. to set string_part::tag
+// on_exit may modify result, e.g. to set string_part::flags
 struct hooks {
     void * user_data = nullptr;
     void (*on_enter)(const statement &, context &, void * user_data) = nullptr;
@@ -775,7 +775,7 @@ struct runtime {
         }
         size_t w = 0;
         for (size_t r = 1; r < p.size(); r++) {
-            if (p[w].is_input == p[r].is_input && p[w].tag == p[r].tag) {
+            if (p[w].is_input == p[r].is_input && p[w].flags == p[r].flags) {
                 p[w].val += p[r].val;
             } else {
                 w++;

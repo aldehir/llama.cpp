@@ -2321,34 +2321,39 @@ static void test_string_parts(testing & t) {
 }
 
 static void test_hooks(testing & t) {
-    static const uint32_t TAG_GEN_PROMPT = 1;
+    static const uint32_t FLAG_GEN_PROMPT = 1u << 0;
+    static const uint32_t FLAG_THINKING   = 1u << 1;
 
-    struct gen_prompt_state {
+    struct hook_state {
         size_t n_enter = 0;
         size_t n_exit  = 0;
     };
 
     static auto on_enter = [](const jinja::statement &, jinja::context &, void * user_data) {
-        static_cast<gen_prompt_state *>(user_data)->n_enter++;
+        static_cast<hook_state *>(user_data)->n_enter++;
     };
 
-    // tags the output of {% if add_generation_prompt %} when the branch is taken
+    // flags the output of {% if <var> %} when the branch is taken
     static auto on_exit = [](const jinja::statement & stmt, jinja::context & ctx, jinja::value & result, void * user_data) {
-        static_cast<gen_prompt_state *>(user_data)->n_exit++;
+        static_cast<hook_state *>(user_data)->n_exit++;
         auto * if_stmt = dynamic_cast<const jinja::if_statement *>(&stmt);
-        if (!if_stmt) {
+        if (!if_stmt || !jinja::is_val<jinja::value_string>(result)) {
             return;
         }
         auto * id = dynamic_cast<const jinja::identifier *>(if_stmt->test.get());
-        if (!id || id->val != "add_generation_prompt" || !ctx.get_val(id->val)->as_bool()) {
+        if (!id || !ctx.get_val(id->val)->as_bool()) {
             return;
         }
-        if (jinja::is_val<jinja::value_string>(result)) {
-            jinja::cast_val<jinja::value_string>(result)->val_str.set_tag(TAG_GEN_PROMPT);
+        uint32_t flags = 0;
+        if (id->val == "add_generation_prompt") {
+            flags = FLAG_GEN_PROMPT;
+        } else if (id->val == "enable_thinking") {
+            flags = FLAG_THINKING;
         }
+        jinja::cast_val<jinja::value_string>(result)->val_str.add_flags(flags);
     };
 
-    static auto render = [](const std::string & tmpl, const json & vars, gen_prompt_state * state) -> jinja::string {
+    static auto render = [](const std::string & tmpl, const json & vars, hook_state * state) -> jinja::string {
         jinja::lexer lexer;
         auto lexer_res = lexer.tokenize(tmpl);
 
@@ -2370,41 +2375,56 @@ static void test_hooks(testing & t) {
 
     static const json messages = json::array({ json{{"role", "user"}, {"content", "hi"}} });
 
-    t.test("generation prompt is tagged", [](testing & t) {
-        gen_prompt_state state;
-        jinja::string res = render(tmpl, json{{"messages", messages}, {"add_generation_prompt", true}, {"enable_thinking", true}}, &state);
+    t.test("generation prompt is flagged", [](testing & t) {
+        hook_state state;
+        jinja::string res = render(tmpl, json{{"messages", messages}, {"add_generation_prompt", true}}, &state);
 
-        std::string tagged;
-        std::string untagged;
+        std::string flagged;
+        std::string unflagged;
         for (const auto & part : res.parts) {
-            (part.tag == TAG_GEN_PROMPT ? tagged : untagged) += part.val;
+            (part.flags == FLAG_GEN_PROMPT ? flagged : unflagged) += part.val;
         }
-        t.assert_equal("tagged text", std::string("<|assistant|><think>"), tagged);
-        t.assert_equal("untagged text", std::string("<|user|>hi<|end|>"), untagged);
-        t.assert_true("last part is tagged", !res.parts.empty() && res.parts.back().tag == TAG_GEN_PROMPT);
+        t.assert_equal("flagged text", std::string("<|assistant|>"), flagged);
+        t.assert_equal("unflagged text", std::string("<|user|>hi<|end|>"), unflagged);
         t.assert_true("enter and exit are balanced", state.n_enter > 0 && state.n_enter == state.n_exit);
     });
 
-    t.test("nothing is tagged without generation prompt", [](testing & t) {
-        gen_prompt_state state;
+    t.test("nested flags are combined", [](testing & t) {
+        hook_state state;
+        jinja::string res = render(tmpl, json{{"messages", messages}, {"add_generation_prompt", true}, {"enable_thinking", true}}, &state);
+
+        const size_t n = res.parts.size();
+        if (t.assert_true("at least 2 parts", n >= 2)) {
+            t.assert_true("generation prompt part", res.parts[n - 2].val == "<|assistant|>" && res.parts[n - 2].flags == FLAG_GEN_PROMPT);
+            t.assert_true("thinking part has both flags", res.parts[n - 1].val == "<think>" && res.parts[n - 1].flags == (FLAG_GEN_PROMPT | FLAG_THINKING));
+            for (size_t i = 0; i + 2 < n; i++) {
+                t.assert_true("part has no flags: " + res.parts[i].val, res.parts[i].flags == 0);
+            }
+        } else {
+            t.log("rendered: " + json(res.str()).dump());
+        }
+    });
+
+    t.test("nothing is flagged without generation prompt", [](testing & t) {
+        hook_state state;
         jinja::string res = render(tmpl, json{{"messages", messages}, {"add_generation_prompt", false}}, &state);
 
         for (const auto & part : res.parts) {
-            t.assert_true("part is not tagged: " + part.val, part.tag == 0);
+            t.assert_true("part has no flags: " + part.val, part.flags == 0);
         }
         t.assert_equal("rendered", std::string("<|user|>hi<|end|>"), res.str());
     });
 
     t.test("hook reaches child scopes", [](testing & t) {
-        gen_prompt_state state;
+        hook_state state;
         jinja::string res = render(
             "{% macro gen() %}{% if add_generation_prompt %}<|assistant|>{% endif %}{% endmacro %}"
             "{% for i in [1] %}x{{ gen() }}{% endfor %}",
             json{{"add_generation_prompt", true}}, &state);
 
         if (t.assert_true("2 parts", res.parts.size() == 2)) {
-            t.assert_true("part 0 is not tagged", res.parts[0].val == "x" && res.parts[0].tag == 0);
-            t.assert_true("part 1 is tagged", res.parts[1].val == "<|assistant|>" && res.parts[1].tag == TAG_GEN_PROMPT);
+            t.assert_true("part 0 has no flags", res.parts[0].val == "x" && res.parts[0].flags == 0);
+            t.assert_true("part 1 is flagged", res.parts[1].val == "<|assistant|>" && res.parts[1].flags == FLAG_GEN_PROMPT);
         } else {
             t.log("rendered: " + json(res.str()).dump());
         }
