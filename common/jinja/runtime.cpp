@@ -57,7 +57,16 @@ value statement::execute(context & ctx) const {
         if (h.on_enter) {
             h.on_enter(*this, ctx, h.user_data);
         }
-        value res = execute_impl(ctx);
+        value res;
+        try {
+            res = execute_impl(ctx);
+        } catch (...) {
+            if (h.on_exit) {
+                value none;
+                h.on_exit(*this, ctx, none, h.user_data);
+            }
+            throw;
+        }
         if (h.on_exit) {
             h.on_exit(*this, ctx, res, h.user_data);
         }

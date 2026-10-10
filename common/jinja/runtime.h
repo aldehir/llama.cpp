@@ -55,7 +55,7 @@ using visitor_fn = std::function<void(bool, const statement *, std::vector<visit
 struct context;
 
 // called around the execution of each statement, user_data is passed as-is
-// on_exit is not called if the statement throws (incl. break/continue)
+// on_exit is always called; result is null if the statement throws (incl. break/continue)
 // on_exit may modify result, e.g. to set string_part::flags
 struct hooks {
     void * user_data = nullptr;

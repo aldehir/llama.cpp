@@ -2415,6 +2415,16 @@ static void test_hooks(testing & t) {
         t.assert_equal("rendered", std::string("<|user|>hi<|end|>"), res.str());
     });
 
+    t.test("enter and exit are balanced across break and continue", [](testing & t) {
+        hook_state state;
+        jinja::string res = render(
+            "{% for i in [1, 2, 3] %}{% if i == 1 %}{% continue %}{% endif %}{{ i }}{% if i == 2 %}{% break %}{% endif %}{% endfor %}",
+            json::object(), &state);
+
+        t.assert_equal("rendered", std::string("2"), res.str());
+        t.assert_true("enter and exit are balanced", state.n_enter > 0 && state.n_enter == state.n_exit);
+    });
+
     t.test("hook reaches child scopes", [](testing & t) {
         hook_state state;
         jinja::string res = render(
