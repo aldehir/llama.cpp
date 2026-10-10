@@ -42,6 +42,12 @@ void string::mark_input() {
     }
 }
 
+void string::add_flags(uint32_t flags) {
+    for (auto & part : parts) {
+        part.flags |= flags;
+    }
+}
+
 std::string string::str() const {
     if (parts.size() == 1) {
         return parts[0].val;

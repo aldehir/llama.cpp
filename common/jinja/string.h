@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <optional>
 #include <string>
 #include <vector>
@@ -16,6 +17,7 @@ namespace jinja {
 struct string_part {
     bool is_input = false; // may skip parsing special tokens if true
     std::string val;
+    uint32_t flags = 0; // user-defined bits, not used by the engine
 
     bool is_uppercase() const;
     bool is_lowercase() const;
@@ -36,6 +38,9 @@ struct string {
 
     // mark all parts as user input
     void mark_input();
+
+    // OR flags into all parts
+    void add_flags(uint32_t flags);
 
     std::string str() const;
     size_t length() const;

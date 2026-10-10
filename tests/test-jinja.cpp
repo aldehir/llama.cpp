@@ -36,6 +36,7 @@ static void test_hasher(testing & t);
 static void test_stats(testing & t);
 static void test_caps(testing & t);
 static void test_string_parts(testing & t);
+static void test_hooks(testing & t);
 static void test_fuzzing(testing & t);
 
 static bool g_python_mode = false;
@@ -77,6 +78,7 @@ int main(int argc, char *argv[]) {
         t.test("stats", test_stats);
         t.test("caps", test_caps);
         t.test("string parts", test_string_parts);
+        t.test("hooks", test_hooks);
         t.test("fuzzing", test_fuzzing);
     }
 
@@ -2316,6 +2318,127 @@ static void test_string_parts(testing & t) {
         }
     });
 
+}
+
+static void test_hooks(testing & t) {
+    static const uint32_t FLAG_GEN_PROMPT = 1u << 0;
+    static const uint32_t FLAG_THINKING   = 1u << 1;
+
+    struct hook_state {
+        size_t n_enter = 0;
+        size_t n_exit  = 0;
+    };
+
+    static auto on_enter = [](const jinja::statement &, jinja::context &, void * user_data) {
+        static_cast<hook_state *>(user_data)->n_enter++;
+    };
+
+    // flags the output of {% if <var> %} when the branch is taken
+    static auto on_exit = [](const jinja::statement & stmt, jinja::context & ctx, jinja::value & result, void * user_data) {
+        static_cast<hook_state *>(user_data)->n_exit++;
+        auto * if_stmt = dynamic_cast<const jinja::if_statement *>(&stmt);
+        if (!if_stmt || !jinja::is_val<jinja::value_string>(result)) {
+            return;
+        }
+        auto * id = dynamic_cast<const jinja::identifier *>(if_stmt->test.get());
+        if (!id || !ctx.get_val(id->val)->as_bool()) {
+            return;
+        }
+        uint32_t flags = 0;
+        if (id->val == "add_generation_prompt") {
+            flags = FLAG_GEN_PROMPT;
+        } else if (id->val == "enable_thinking") {
+            flags = FLAG_THINKING;
+        }
+        jinja::cast_val<jinja::value_string>(result)->val_str.add_flags(flags);
+    };
+
+    static auto render = [](const std::string & tmpl, const json & vars, hook_state * state) -> jinja::string {
+        jinja::lexer lexer;
+        auto lexer_res = lexer.tokenize(tmpl);
+
+        jinja::program ast = jinja::parse_from_tokens(lexer_res);
+
+        jinja::context ctx(tmpl);
+        ctx.hook.user_data = state;
+        ctx.hook.on_enter  = on_enter;
+        ctx.hook.on_exit   = on_exit;
+        jinja::global_from_json(ctx, vars, true);
+
+        jinja::runtime runtime(ctx);
+        return runtime.gather_string_parts(runtime.execute(ast))->as_string();
+    };
+
+    static const std::string tmpl =
+        "{% for m in messages %}<|{{ m.role }}|>{{ m.content }}<|end|>{% endfor %}"
+        "{% if add_generation_prompt %}<|assistant|>{% if enable_thinking %}<think>{% endif %}{% endif %}";
+
+    static const json messages = json::array({ json{{"role", "user"}, {"content", "hi"}} });
+
+    t.test("generation prompt is flagged", [](testing & t) {
+        hook_state state;
+        jinja::string res = render(tmpl, json{{"messages", messages}, {"add_generation_prompt", true}}, &state);
+
+        std::string flagged;
+        std::string unflagged;
+        for (const auto & part : res.parts) {
+            (part.flags == FLAG_GEN_PROMPT ? flagged : unflagged) += part.val;
+        }
+        t.assert_equal("flagged text", std::string("<|assistant|>"), flagged);
+        t.assert_equal("unflagged text", std::string("<|user|>hi<|end|>"), unflagged);
+        t.assert_true("enter and exit are balanced", state.n_enter > 0 && state.n_enter == state.n_exit);
+    });
+
+    t.test("nested flags are combined", [](testing & t) {
+        hook_state state;
+        jinja::string res = render(tmpl, json{{"messages", messages}, {"add_generation_prompt", true}, {"enable_thinking", true}}, &state);
+
+        const size_t n = res.parts.size();
+        if (t.assert_true("at least 2 parts", n >= 2)) {
+            t.assert_true("generation prompt part", res.parts[n - 2].val == "<|assistant|>" && res.parts[n - 2].flags == FLAG_GEN_PROMPT);
+            t.assert_true("thinking part has both flags", res.parts[n - 1].val == "<think>" && res.parts[n - 1].flags == (FLAG_GEN_PROMPT | FLAG_THINKING));
+            for (size_t i = 0; i + 2 < n; i++) {
+                t.assert_true("part has no flags: " + res.parts[i].val, res.parts[i].flags == 0);
+            }
+        } else {
+            t.log("rendered: " + json(res.str()).dump());
+        }
+    });
+
+    t.test("nothing is flagged without generation prompt", [](testing & t) {
+        hook_state state;
+        jinja::string res = render(tmpl, json{{"messages", messages}, {"add_generation_prompt", false}}, &state);
+
+        for (const auto & part : res.parts) {
+            t.assert_true("part has no flags: " + part.val, part.flags == 0);
+        }
+        t.assert_equal("rendered", std::string("<|user|>hi<|end|>"), res.str());
+    });
+
+    t.test("enter and exit are balanced across break and continue", [](testing & t) {
+        hook_state state;
+        jinja::string res = render(
+            "{% for i in [1, 2, 3] %}{% if i == 1 %}{% continue %}{% endif %}{{ i }}{% if i == 2 %}{% break %}{% endif %}{% endfor %}",
+            json::object(), &state);
+
+        t.assert_equal("rendered", std::string("2"), res.str());
+        t.assert_true("enter and exit are balanced", state.n_enter > 0 && state.n_enter == state.n_exit);
+    });
+
+    t.test("hook reaches child scopes", [](testing & t) {
+        hook_state state;
+        jinja::string res = render(
+            "{% macro gen() %}{% if add_generation_prompt %}<|assistant|>{% endif %}{% endmacro %}"
+            "{% for i in [1] %}x{{ gen() }}{% endfor %}",
+            json{{"add_generation_prompt", true}}, &state);
+
+        if (t.assert_true("2 parts", res.parts.size() == 2)) {
+            t.assert_true("part 0 has no flags", res.parts[0].val == "x" && res.parts[0].flags == 0);
+            t.assert_true("part 1 is flagged", res.parts[1].val == "<|assistant|>" && res.parts[1].flags == FLAG_GEN_PROMPT);
+        } else {
+            t.log("rendered: " + json(res.str()).dump());
+        }
+    });
 }
 
 static void test_template_cpp(testing & t, const std::string & name, const std::string & tmpl, const json & vars, const std::string & expect) {
