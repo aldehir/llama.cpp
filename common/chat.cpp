@@ -874,13 +874,15 @@ common_reasoning_format common_reasoning_format_from_name(const std::string & fo
     throw std::runtime_error("Unknown reasoning format: " + format);
 }
 
-std::string common_chat_template_direct_apply_impl(
+static jinja::string common_chat_template_render(
     const common_chat_template & tmpl,
     const autoparser::generation_params & inputs,
     const std::optional<json> & messages_override,
     const std::optional<json> & tools_override,
-    const std::optional<json> & additional_context) {
+    const std::optional<json> & additional_context,
+    const jinja::hooks & hook = {}) {
     jinja::context ctx(tmpl.source());
+    ctx.hook = hook;
 
     // messages_override is already built for this template, do not touch its content parts
     json inp = json{
@@ -923,9 +925,16 @@ std::string common_chat_template_direct_apply_impl(
     // render
     jinja::runtime runtime(ctx);
     const jinja::value results = runtime.execute(tmpl.prog);
-    auto parts = jinja::runtime::gather_string_parts(results);
+    return jinja::runtime::gather_string_parts(results)->as_string();
+}
 
-    std::string result = parts->as_string().str();
+std::string common_chat_template_direct_apply_impl(
+    const common_chat_template & tmpl,
+    const autoparser::generation_params & inputs,
+    const std::optional<json> & messages_override,
+    const std::optional<json> & tools_override,
+    const std::optional<json> & additional_context) {
+    std::string result = common_chat_template_render(tmpl, inputs, messages_override, tools_override, additional_context).str();
 
     // TODO: improve this later
     if (inputs.add_bos && string_starts_with(result, tmpl.bos_token())) {
@@ -943,6 +952,85 @@ std::string common_chat_template_direct_apply(
     return common_chat_template_direct_apply_impl(tmpl, inputs, std::nullopt, std::nullopt, std::nullopt);
 }
 
+static const uint32_t COMMON_CHAT_PART_GENERATION_PROMPT = 1u << 0;
+
+struct generation_prompt_marker {
+    struct frame {
+        const jinja::if_statement * stmt;
+        uint32_t prev_active;
+        bool     gen_prompt = false; // the branch is taken because of add_generation_prompt
+    };
+
+    std::unordered_map<const jinja::statement *, bool> refs; // if test -> references add_generation_prompt
+    std::vector<frame> frames;                               // if statements being executed
+    uint32_t active = 0;                                     // flags added to string literals created in a marked branch
+
+    bool test_references_generation_prompt(const jinja::statement & test) {
+        auto it = refs.find(&test);
+        if (it != refs.end()) {
+            return it->second;
+        }
+        bool res = false;
+        jinja::context vctx;
+        vctx.visitor = [&](bool, const jinja::statement * node, std::vector<jinja::visitor_pair> children) {
+            auto * id = dynamic_cast<const jinja::identifier *>(node);
+            if (id && id->val == "add_generation_prompt") {
+                res = true;
+            }
+            for (const auto & child : children) {
+                for (const auto * n : child.second) {
+                    if (n) {
+                        n->visit(vctx);
+                    }
+                }
+            }
+        };
+        test.visit(vctx);
+        return refs[&test] = res;
+    }
+
+    static void on_enter(const jinja::statement & stmt, jinja::context &, void * user_data) {
+        auto * self = static_cast<generation_prompt_marker *>(user_data);
+        if (auto * if_stmt = dynamic_cast<const jinja::if_statement *>(&stmt)) {
+            self->frames.push_back({ if_stmt, self->active });
+        }
+    }
+
+    // flag the output of an if branch that runs only because add_generation_prompt is true, and the string literals
+    // created in it, as they may reach the output later, e.g. through `set ns.out = ns.out ~ '...'`
+    static void on_exit(const jinja::statement & stmt, jinja::context & ctx, jinja::value & result, void * user_data) {
+        auto * self = static_cast<generation_prompt_marker *>(user_data);
+
+        if (!self->frames.empty() && &stmt == self->frames.back().stmt->test.get()) {
+            frame & f = self->frames.back();
+            if (result && result->as_bool() && self->test_references_generation_prompt(stmt)) {
+                jinja::context probe(ctx);
+                probe.hook = {};
+                probe.set_val("add_generation_prompt", jinja::mk_val<jinja::value_bool>(false));
+                if (!stmt.execute(probe)->as_bool()) {
+                    f.gen_prompt = true;
+                    self->active |= COMMON_CHAT_PART_GENERATION_PROMPT;
+                }
+            }
+            return;
+        }
+
+        if (dynamic_cast<const jinja::if_statement *>(&stmt)) {
+            const frame f = self->frames.back();
+            self->frames.pop_back();
+            self->active = f.prev_active;
+            if (f.gen_prompt && jinja::is_val<jinja::value_string>(result)) {
+                jinja::cast_val<jinja::value_string>(result)->val_str.add_flags(COMMON_CHAT_PART_GENERATION_PROMPT);
+            }
+            return;
+        }
+
+        if (self->active && dynamic_cast<const jinja::string_literal *>(&stmt) && jinja::is_val<jinja::value_string>(result)) {
+            jinja::cast_val<jinja::value_string>(result)->val_str.add_flags(self->active);
+        }
+    }
+};
+
 std::string common_chat_template_generation_prompt_impl(
     const common_chat_template & tmpl,
     const autoparser::generation_params & inputs,
@@ -951,18 +1039,26 @@ std::string common_chat_template_generation_prompt_impl(
     const std::optional<json> & additional_context) {
 
     autoparser::generation_params params = inputs;
-    params.add_generation_prompt = false;
-    params.continue_final_message = COMMON_CHAT_CONTINUATION_NONE;
-    std::string no_gen_prompt    = common_chat_template_direct_apply_impl(tmpl, params, messages_override, tools_override, additional_context);
     params.add_generation_prompt = true;
-    std::string gen_prompt       = common_chat_template_direct_apply_impl(tmpl, params, messages_override, tools_override, additional_context);
+    params.continue_final_message = COMMON_CHAT_CONTINUATION_NONE;
 
-    size_t prefix_len = 0;
-    size_t min_size = std::min(no_gen_prompt.size(), gen_prompt.size());
-    while (prefix_len < min_size && no_gen_prompt[prefix_len] == gen_prompt[prefix_len]) {
-        prefix_len++;
+    generation_prompt_marker marker;
+    jinja::hooks hook;
+    hook.user_data = &marker;
+    hook.on_enter  = generation_prompt_marker::on_enter;
+    hook.on_exit   = generation_prompt_marker::on_exit;
+
+    // the generation prompt is the flagged tail of the prompt
+    const jinja::string rendered = common_chat_template_render(tmpl, params, messages_override, tools_override, additional_context, hook);
+    size_t i = rendered.parts.size();
+    while (i > 0 && (rendered.parts[i - 1].flags & COMMON_CHAT_PART_GENERATION_PROMPT)) {
+        i--;
     }
-    return gen_prompt.substr(prefix_len);
+    std::string gen_prompt;
+    for (; i < rendered.parts.size(); i++) {
+        gen_prompt += rendered.parts[i].val;
+    }
+    return gen_prompt;
 }
 
 std::string common_chat_template_generation_prompt(

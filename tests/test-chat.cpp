@@ -7328,6 +7328,24 @@ static void test_template_generation_prompt() {
     }
 
     {
+        // both branches start with <|im_start|>, a diff of two renders would cut it off
+        auto tmpls = common_chat_templates_ptr(common_chat_templates_init(/* model= */ nullptr,
+            "{%- for message in messages %}<|im_start|>{{ message.role }}\n{{ message.content }}<|im_end|>\n{% endfor -%}"
+            "{%- if add_generation_prompt %}<|im_start|>assistant\n{% else %}<|im_start|>user\n{% endif -%}"));
+        check(tmpls, basic(), "<|im_start|>assistant\n");
+    }
+
+    {
+        // the generation prompt branch only appends to a variable, which is output after it
+        auto tmpls = common_chat_templates_ptr(common_chat_templates_init(/* model= */ nullptr,
+            "{%- set ns = namespace(out='') -%}"
+            "{%- for message in messages %}{% set ns.out = ns.out ~ '<|im_start|>' ~ message.role ~ '\n' ~ message.content ~ '<|im_end|>\n' %}{% endfor -%}"
+            "{%- if add_generation_prompt %}{% set ns.out = ns.out ~ '<|im_start|>assistant\n' %}{% endif -%}"
+            "{{- ns.out -}}"));
+        check(tmpls, basic(), "<|im_start|>assistant\n");
+    }
+
+    {
         auto tmpls = read_templates("models/templates/openai-gpt-oss-120b.jinja");
         check(tmpls, basic(),                  "<|start|>assistant");
         check(tmpls, continuation_content(),   "<|start|>assistant<|channel|>analysis<|message|>I'm thinking<|end|><|start|>assistant<|channel|>final<|message|>Hello, ");
