@@ -42,6 +42,12 @@ void string::mark_input() {
     }
 }
 
+void string::set_tag(uint32_t tag) {
+    for (auto & part : parts) {
+        part.tag = tag;
+    }
+}
+
 std::string string::str() const {
     if (parts.size() == 1) {
         return parts[0].val;

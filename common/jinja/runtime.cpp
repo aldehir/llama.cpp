@@ -53,7 +53,15 @@ static void ensure_key_type_allowed(const value & val) {
 // execute with error handling
 value statement::execute(context & ctx) const {
     try {
-        return execute_impl(ctx);
+        const hooks & h = ctx.hook;
+        if (h.on_enter) {
+            h.on_enter(*this, ctx, h.user_data);
+        }
+        value res = execute_impl(ctx);
+        if (h.on_exit) {
+            h.on_exit(*this, ctx, res, h.user_data);
+        }
+        return res;
     } catch (const continue_statement::signal & /* ex */) {
         throw;
     } catch (const break_statement::signal & /* ex */) {

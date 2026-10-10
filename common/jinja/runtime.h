@@ -52,6 +52,17 @@ void enable_debug(bool enable);
 using visitor_pair = std::pair<std::string, std::vector<const statement *>>;
 using visitor_fn = std::function<void(bool, const statement *, std::vector<visitor_pair>)>;
 
+struct context;
+
+// called around the execution of each statement, user_data is passed as-is
+// on_exit is not called if the statement throws (incl. break/continue)
+// on_exit may modify result, e.g. to set string_part::tag
+struct hooks {
+    void * user_data = nullptr;
+    void (*on_enter)(const statement &, context &, void * user_data) = nullptr;
+    void (*on_exit)(const statement &, context &, value & result, void * user_data) = nullptr;
+};
+
 struct context {
     std::shared_ptr<std::string> src; // for debugging; use shared_ptr to avoid copying on scope creation
     std::time_t current_time; // for functions that need current time
@@ -59,6 +70,8 @@ struct context {
     bool is_get_stats = false; // whether to collect stats
 
     visitor_fn visitor;
+
+    hooks hook; // inherited by child scopes
 
     // src is optional, used for error reporting
     context(std::string src = "") : src(std::make_shared<std::string>(std::move(src))) {
@@ -82,6 +95,7 @@ struct context {
         }
         current_time = parent.current_time;
         is_get_stats = parent.is_get_stats;
+        hook = parent.hook;
         src = parent.src;
     }
 
@@ -761,7 +775,7 @@ struct runtime {
         }
         size_t w = 0;
         for (size_t r = 1; r < p.size(); r++) {
-            if (p[w].is_input == p[r].is_input) {
+            if (p[w].is_input == p[r].is_input && p[w].tag == p[r].tag) {
                 p[w].val += p[r].val;
             } else {
                 w++;
