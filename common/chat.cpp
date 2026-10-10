@@ -955,7 +955,15 @@ std::string common_chat_template_direct_apply(
 static const uint32_t COMMON_CHAT_PART_GENERATION_PROMPT = 1u << 0;
 
 struct generation_prompt_marker {
+    struct frame {
+        const jinja::if_statement * stmt;
+        uint32_t prev_active;
+        bool     gen_prompt = false; // the branch is taken because of add_generation_prompt
+    };
+
     std::unordered_map<const jinja::statement *, bool> refs; // if test -> references add_generation_prompt
+    std::vector<frame> frames;                               // if statements being executed
+    uint32_t active = 0;                                     // flags added to string literals created in a marked branch
 
     bool test_references_generation_prompt(const jinja::statement & test) {
         auto it = refs.find(&test);
@@ -981,22 +989,44 @@ struct generation_prompt_marker {
         return refs[&test] = res;
     }
 
-    // flag the output of an if branch that runs only because add_generation_prompt is true
+    static void on_enter(const jinja::statement & stmt, jinja::context &, void * user_data) {
+        auto * self = static_cast<generation_prompt_marker *>(user_data);
+        if (auto * if_stmt = dynamic_cast<const jinja::if_statement *>(&stmt)) {
+            self->frames.push_back({ if_stmt, self->active });
+        }
+    }
+
+    // flag the output of an if branch that runs only because add_generation_prompt is true, and the string literals
+    // created in it, as they may reach the output later, e.g. through `set ns.out = ns.out ~ '...'`
     static void on_exit(const jinja::statement & stmt, jinja::context & ctx, jinja::value & result, void * user_data) {
         auto * self = static_cast<generation_prompt_marker *>(user_data);
-        auto * if_stmt = dynamic_cast<const jinja::if_statement *>(&stmt);
-        if (!if_stmt || !jinja::is_val<jinja::value_string>(result) || !self->test_references_generation_prompt(*if_stmt->test)) {
+
+        if (!self->frames.empty() && &stmt == self->frames.back().stmt->test.get()) {
+            frame & f = self->frames.back();
+            if (result && result->as_bool() && self->test_references_generation_prompt(stmt)) {
+                jinja::context probe(ctx);
+                probe.hook = {};
+                probe.set_val("add_generation_prompt", jinja::mk_val<jinja::value_bool>(false));
+                if (!stmt.execute(probe)->as_bool()) {
+                    f.gen_prompt = true;
+                    self->active |= COMMON_CHAT_PART_GENERATION_PROMPT;
+                }
+            }
             return;
         }
 
-        auto eval_test = [&](bool add_generation_prompt) {
-            jinja::context probe(ctx);
-            probe.hook = {};
-            probe.set_val("add_generation_prompt", jinja::mk_val<jinja::value_bool>(add_generation_prompt));
-            return if_stmt->test->execute(probe)->as_bool();
-        };
-        if (ctx.get_val("add_generation_prompt")->as_bool() && eval_test(true) && !eval_test(false)) {
-            jinja::cast_val<jinja::value_string>(result)->val_str.add_flags(COMMON_CHAT_PART_GENERATION_PROMPT);
+        if (dynamic_cast<const jinja::if_statement *>(&stmt)) {
+            const frame f = self->frames.back();
+            self->frames.pop_back();
+            self->active = f.prev_active;
+            if (f.gen_prompt && jinja::is_val<jinja::value_string>(result)) {
+                jinja::cast_val<jinja::value_string>(result)->val_str.add_flags(COMMON_CHAT_PART_GENERATION_PROMPT);
+            }
+            return;
+        }
+
+        if (self->active && dynamic_cast<const jinja::string_literal *>(&stmt) && jinja::is_val<jinja::value_string>(result)) {
+            jinja::cast_val<jinja::value_string>(result)->val_str.add_flags(self->active);
         }
     }
 };
@@ -1015,6 +1045,7 @@ std::string common_chat_template_generation_prompt_impl(
     generation_prompt_marker marker;
     jinja::hooks hook;
     hook.user_data = &marker;
+    hook.on_enter  = generation_prompt_marker::on_enter;
     hook.on_exit   = generation_prompt_marker::on_exit;
 
     // the generation prompt is the flagged tail of the prompt
@@ -1023,26 +1054,11 @@ std::string common_chat_template_generation_prompt_impl(
     while (i > 0 && (rendered.parts[i - 1].flags & COMMON_CHAT_PART_GENERATION_PROMPT)) {
         i--;
     }
-    std::string flagged;
+    std::string gen_prompt;
     for (; i < rendered.parts.size(); i++) {
-        flagged += rendered.parts[i].val;
+        gen_prompt += rendered.parts[i].val;
     }
-    if (!flagged.empty()) {
-        return flagged;
-    }
-
-    // the template does not emit the generation prompt from an if branch (e.g. it builds the output in a variable), fall back to diffing two renders
-    params.add_generation_prompt = false;
-    std::string no_gen_prompt    = common_chat_template_direct_apply_impl(tmpl, params, messages_override, tools_override, additional_context);
-    params.add_generation_prompt = true;
-    std::string gen_prompt       = common_chat_template_direct_apply_impl(tmpl, params, messages_override, tools_override, additional_context);
-
-    size_t prefix_len = 0;
-    size_t min_size = std::min(no_gen_prompt.size(), gen_prompt.size());
-    while (prefix_len < min_size && no_gen_prompt[prefix_len] == gen_prompt[prefix_len]) {
-        prefix_len++;
-    }
-    return gen_prompt.substr(prefix_len);
+    return gen_prompt;
 }
 
 std::string common_chat_template_generation_prompt(
