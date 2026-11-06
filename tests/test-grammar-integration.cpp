@@ -1284,14 +1284,11 @@ static void test_json_schema() {
             // "By extension, even an empty object is valid"
             R"""({})""",
             R"""({ "number": 1600, "street_name": "Pennsylvania", "street_type": "Avenue" })""",
+            R"""({ "street_name": "Pennsylvania", "number": 1600 })""",
         },
         // Failing strings
         {
             // Change datatype from number to string
-            R"""({ "number": "1600", "street_name": "Pennsylvania", "street_type":"Avenue"})""",
-            // Reorder properties
-            R"""({ "street_name": "Pennsylvania", "number": 1600 })""",
-            // Reorder properties
             R"""({ "number": "1600", "street_name": "Pennsylvania", "street_type":"Avenue"})""",
             // "Additional properties default to false for generation, even though the spec says true.
             R"""({ "number": 1600, "street_name": "Pennsylvania", "street_type":"Avenue", "direction":"NW"})""",
@@ -1347,19 +1344,18 @@ static void test_json_schema() {
             // "By default, providing additional properties is valid"
             R"""({ "number": 1600, "street_name": "Pennsylvania", "street_type":"Avenue", "direction":"NW"})""",
             R"""({ "number": 1600, "street_name": "Pennsylvania", "street_type": "Avenue" })""",
+            R"""({ "street_name": "Pennsylvania", "number": 1600, "street_type":"Avenue"})""",
         },
         // Failing strings
         {
             // Change datatype from number to string
             R"""({ "number": "1600", "street_name": "Pennsylvania", "street_type":"Avenue"})""",
-            // Reorder properties
-            R"""({ "street_name": "Pennsylvania", "number": 1600, "street_type":"Avenue"})""",
         }
     );
 
     // Additional properties: false
     test_schema(
-        "required + optional props each in original order",
+        "required + optional props in any order",
         // Schema
         R"""({
             "type": "object",
@@ -1378,18 +1374,17 @@ static void test_json_schema() {
             R"""({ "number": 1600, "street_name": "Pennsylvania", "street_type":"Avenue"})""",
             // Spaces are permitted around enum values
             R"""({ "number": 1600, "street_name": "Pennsylvania", "street_type": "Avenue" })""",
+            R"""({ "street_type": "Avenue", "number": 1600 })""",
         },
         // Failing strings
         {
-            // Reorder properties
-            R"""({ "street_type": "Avenue", "number": 1600 })""",
             // Add "direction"
             R"""({ "number": 1600, "street_name": "Pennsylvania", "street_type": "Avenue", "direction": "NW" })""",
         }
     );
 
     test_schema(
-        "required + optional props each in original order",
+        "required + optional props in any order",
         // Schema
         R"""({
             "properties": {
@@ -1406,13 +1401,13 @@ static void test_json_schema() {
             R"""({"b": "foo", "a": "bar"})""",
             R"""({"b":"foo","a":"bar","d":"qux"})""",
             R"""({"b":"foo", "a":"bar", "d":"qux", "c":"baz"})""",
+            R"""({"a": "foo", "b": "bar"})""",
+            R"""({"a":"foo", "b":"bar", "c":"baz", "d":"qux"})""",
         },
         // Failing strings
         {
-            R"""({"a": "foo", "b": "bar"})""",
             R"""({"b": "bar"})""",
             R"""({"a": "foo", "c": "baz"})""",
-            R"""({"a":"foo", "b":"bar", "c":"baz", "d":"qux"})""",
         }
     );
 
@@ -1472,18 +1467,18 @@ static void test_json_schema() {
             R"""({"productId": 1, "productName": "A green door", "price": 12.50})""",
             R"""({"productId": 1, "productName": "A green door", "price": 12.50, "tags": ["home", "green"]})""",
             R"""({"productId": 1, "productName": "A green door", "price": 12.50, "tags": ["home", "green"], "dimensions": {"length": 785, "width": 250.5, "height": -0.359}})""",
+            R"""({"productName": "A green door", "price": 12.50, "productId": 1})""",
+            R"""({"productId": 1, "productName": "A green door", "price": 12.50, "dimensions": {"length": 785, "width": 250.5, "height": -0.359}, "tags": ["home", "green"]})""",
         },
         // Failing strings
         {
             R"""({})""", // Missing all required properties
-            R"""({"productName": "A green door", "price": 12.50, "productId": 1})""", // Out of order properties
             // TODO: The following line should fail, but currently it passes. `exclusiveMinimum` is not supported, as it would likely be too difficult to implement.
             //  Perhaps special checks for minimum and maximum values of 0 could be added (since that's relatively easy to do with grammars), but anything else would likely be too complex.
             // R"""({"productId": 1, "productName": "A green door", "price": -12.50})""",
             R"""({"productId": 1, "productName": "A green door"})""", // Missing required property (price)
             R"""({"productName": "A green door", "price": 12.50})""", // Missing required property (productId)
             R"""({"productId": 1, "productName": "A green door", "price": 12.50, "tags": []})""", // tags is empty, but minItems is 1
-            R"""({"productId": 1, "productName": "A green door", "price": 12.50, "dimensions": {"length": 785, "width": 250.5, "height": -0.359}, "tags": ["home", "green"]})""", // Tags and dimensions are out of order
             // TODO: The following line should fail, but currently it passes. `uniqueItems` is not supported, as it would likely be too difficult to implement.
             // R"""({"productId": 1, "productName": "A green door", "price": 12.50, "tags": ["home", "green", "home"]})""",
         }
@@ -1509,6 +1504,183 @@ static void test_json_schema() {
     );
 }
 
+static void test_json_schema_any_order() {
+    test_schema(
+        "up to 6 properties: any order, each key at most once",
+        R"""({
+            "type": "object",
+            "properties": {"a": {}, "b": {}, "c": {}, "d": {}, "e": {}, "f": {}},
+            "required": ["a", "b"]
+        })""",
+        {
+            R"""({"a": 1, "b": 1})""",
+            R"""({"b": 1, "a": 1})""",
+            R"""({"f": 1, "e": 1, "d": 1, "c": 1, "b": 1, "a": 1})""",
+            R"""({"c": 1, "a": 1, "f": 1, "b": 1})""",
+        },
+        {
+            R"""({"a": 1})""",
+            R"""({"c": 1, "d": 1})""",
+            R"""({"a": 1, "b": 1, "a": 1})""",
+            R"""({"a": 1, "b": 1, "c": 1, "c": 1})""",
+            R"""({"a": 1, "b": 1, "x": 1})""",
+        });
+
+    test_schema(
+        "more than 6 properties: declared order, each key at most once",
+        R"""({
+            "type": "object",
+            "properties": {"a": {}, "b": {}, "c": {}, "d": {}, "e": {}, "f": {}, "g": {}},
+            "required": ["a"],
+            "additionalProperties": false
+        })""",
+        {
+            R"""({"a": 1, "c": 1, "g": 1})""",
+        },
+        {
+            R"""({"c": 1, "a": 1})""",
+            R"""({"a": 1, "g": 1, "c": 1})""",
+            R"""({"a": 1, "c": 1, "c": 1})""",
+        });
+
+    test_schema(
+        "up to 6 properties with additional properties: any order, additional keys after all required ones",
+        R"""({
+            "type": "object",
+            "properties": {"a": {"type": "string"}, "b": {"type": "string"}, "c": {"type": "integer"}, "d": {"type": "integer"}},
+            "required": ["a", "b"],
+            "additionalProperties": true
+        })""",
+        {
+            R"""({"a": "x", "b": "x"})""",
+            R"""({"c": 1, "b": "x", "d": 1, "a": "x"})""",
+            R"""({"b": "x", "a": "x", "z": 1})""",
+            R"""({"d": 1, "a": "x", "b": "x", "y": 1, "c": 1, "z": 1})""",
+            R"""({"a": "x", "b": "x", "c": 1, "d": 1, "y": 1, "z": 1})""",
+        },
+        {
+            R"""({"a": "x"})""",
+            R"""({"c": 1, "d": 1})""",
+            R"""({"z": 1, "a": "x", "b": "x"})""",
+            R"""({"a": "x", "z": 1, "b": "x"})""",
+            R"""({"c": 1, "c": 1, "a": "x", "b": "x"})""",
+            R"""({"a": "x", "b": "x", "c": 1, "z": 1, "c": 1})""",
+            R"""({"a": "x", "b": "x", "c": "x"})""",
+        });
+
+    test_schema(
+        "additional properties with no required keys: any key may come first",
+        R"""({
+            "type": "object",
+            "properties": {"a": {"type": "string"}, "b": {"type": "integer"}},
+            "additionalProperties": true
+        })""",
+        {
+            R"""({})""",
+            R"""({"z": 1})""",
+            R"""({"z": 1, "b": 1, "y": 1, "a": "x"})""",
+            R"""({"b": 1, "a": "x", "z": 1})""",
+        },
+        {
+            R"""({"a": "x", "z": 1, "a": "y"})""",
+            R"""({"z": 1, "b": "x"})""",
+        });
+
+    test_schema(
+        "more than 6 properties: optional keys interleave with required ones in schema order",
+        R"""({
+            "type": "object",
+            "properties": {"a": {}, "b": {}, "c": {}, "d": {}, "e": {}, "f": {}, "g": {}},
+            "required": ["b", "d"]
+        })""",
+        {
+            R"""({"b": 1, "d": 1})""",
+            R"""({"a": 1, "b": 1, "c": 1, "d": 1, "e": 1, "f": 1, "g": 1})""",
+            R"""({"a": 1, "b": 1, "d": 1, "g": 1})""",
+            R"""({"b": 1, "c": 1, "d": 1, "f": 1})""",
+        },
+        {
+            R"""({"a": 1, "b": 1})""",
+            R"""({"d": 1, "b": 1})""",
+            R"""({"b": 1, "a": 1, "d": 1})""",
+            R"""({"a": 1, "c": 1, "d": 1})""",
+            R"""({"b": 1, "d": 1, "f": 1, "e": 1})""",
+            R"""({"b": 1, "d": 1, "x": 1})""",
+        });
+
+    test_schema(
+        "more than 6 properties with additional properties, none required: any key in any order",
+        R"""({
+            "type": "object",
+            "properties": {"a": {"type": "string"}, "b": {}, "c": {}, "d": {}, "e": {}, "f": {}, "g": {}},
+            "additionalProperties": true
+        })""",
+        {
+            R"""({})""",
+            R"""({"e": 1})""",
+            R"""({"x": 1, "y": 1})""",
+            R"""({"f": 1, "x": 1, "c": 1})""",
+        },
+        {
+            R"""({"a": 1})""",
+            R"""({"x": 1, "a": 1})""",
+            R"""({"x": 1,})""",
+        });
+
+    test_schema(
+        "more than 6 properties with additional properties: schema order up to the last required key, then any key",
+        R"""({
+            "type": "object",
+            "properties": {"a": {}, "b": {}, "c": {"type": "string"}, "d": {}, "e": {"type": "string"}, "f": {}, "g": {}},
+            "required": ["b", "d"],
+            "additionalProperties": true
+        })""",
+        {
+            R"""({"b": 1, "d": 1})""",
+            R"""({"a": 1, "b": 1, "c": "x", "d": 1})""",
+            R"""({"b": 1, "d": 1, "g": 1, "x": 1, "e": "x", "a": 1})""",
+            R"""({"b": 1, "d": 1, "c": "x"})""",
+        },
+        {
+            R"""({"a": 1, "b": 1})""",
+            R"""({"d": 1, "b": 1})""",
+            R"""({"c": "x", "b": 1, "d": 1})""",
+            R"""({"b": 1, "a": 1, "d": 1})""",
+            R"""({"x": 1, "b": 1, "d": 1})""",
+            R"""({"b": 1, "x": 1, "d": 1})""",
+            R"""({"b": 1, "d": 1, "e": 1})""",
+            R"""({"b": 1, "d": 1, "x": 1, "c": 1})""",
+        });
+
+    test_schema(
+        "more than 6 properties with additional properties: required keys first, then any key under its own schema",
+        R"""({
+            "type": "object",
+            "properties": {
+                "name": {"type": "string"}, "column_type": {"type": "string"}, "drop": {"type": "boolean"},
+                "expr": {"type": "string"}, "dtype": {"type": "string"}, "sampler_type": {"type": "string"},
+                "params": {"type": "object"}, "code_lang": {"type": "string"}, "scores": {"type": "array"},
+                "output_format": {"type": "object"}, "prompt": {"type": "string"}, "model_alias": {"type": "string"},
+                "system_prompt": {"type": "string"}, "extract_reasoning_content": {"type": "boolean"}
+            },
+            "required": ["name", "column_type"],
+            "additionalProperties": true
+        })""",
+        {
+            R"""({"name": "n", "column_type": "expression", "expr": "0", "dtype": "int"})""",
+            R"""({"name": "n", "column_type": "expression", "dtype": "int", "expr": "0"})""",
+            R"""({"name": "n", "column_type": "x", "other": 1, "extract_reasoning_content": true, "drop": false})""",
+        },
+        {
+            R"""({"name": "n"})""",
+            R"""({"column_type": "x", "name": "n"})""",
+            R"""({"name": "n", "name": "m", "column_type": "x"})""",
+            R"""({"name": "n", "column_type": "x", "prompt": 1})""",
+            R"""({"name": "n", "column_type": "x", "dtype": "int", "drop": "yes"})""",
+            R"""({"name": "n", "column_type": "x",})""",
+        });
+}
+
 int main() {
     fprintf(stdout, "Running grammar integration tests...\n");
     test_simple_grammar();
@@ -1521,6 +1693,7 @@ int main() {
     test_failure_missing_root_symbol();
     test_custom_root_symbol_check();
     test_json_schema();
+    test_json_schema_any_order();
     fprintf(stdout, "All tests passed.\n");
     return 0;
 }
