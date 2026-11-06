@@ -723,6 +723,46 @@ private:
         return ref_name;
     }
 
+    // Accepts each key once, in any order. A rest-<seen> rule continues after a comma from the keys not yet seen, and is optional once all required keys are seen.
+    // Additional keys are only legal from that point on, so a model that skips a required key cannot keep writing keys instead of it.
+    std::string _build_permuted_object_rule(const std::vector<std::string> & kv_rules, size_t n_required, const std::string & additional_kv, const std::string & name) {
+        const size_t all_keys     = (size_t(1) << kv_rules.size()) - 1;
+        const size_t all_required = (size_t(1) << n_required) - 1;
+        const std::string more    = additional_kv.empty() ? "" : "( \",\" space " + additional_kv + " )*";
+
+        std::map<size_t, std::string> rest_rules;
+        std::function<std::vector<std::string>(size_t)> next_keys;
+        const std::function<std::string(size_t)> rest_rule = [&](size_t seen) {
+            auto it = rest_rules.find(seen);
+            if (it == rest_rules.end()) {
+                const auto next = next_keys(seen);
+                std::string rule = next.empty() ? "" : "\",\" space " + (next.size() == 1 ? next[0] : "( " + string_join(next, " | ") + " )");
+                if ((seen & all_required) == all_required) {
+                    rule = next.empty() ? more : (more.empty() ? "" : more + " ") + "( " + rule + " )?";
+                }
+                it = rest_rules.emplace(seen, _add_rule(name + (name.empty() ? "" : "-") + "rest-" + std::to_string(seen), rule)).first;
+            }
+            return it->second;
+        };
+        next_keys = [&](size_t seen) {
+            std::vector<std::string> alts;
+            for (size_t i = 0; i < kv_rules.size(); i++) {
+                const size_t after = seen | (size_t(1) << i);
+                if (after == seen) {
+                    continue;
+                }
+                alts.push_back(after == all_keys && more.empty() ? kv_rules[i] : kv_rules[i] + " " + rest_rule(after));
+            }
+            return alts;
+        };
+
+        auto first = next_keys(0);
+        if (n_required == 0 && !additional_kv.empty()) {
+            first.push_back(additional_kv + " " + rest_rule(0));
+        }
+        return "\"{\" space ( " + string_join(first, " | ") + " )" + (n_required == 0 ? "?" : "") + " space \"}\"";
+    }
+
     std::string _build_object_rule(
         const std::vector<std::pair<std::string, const common_chat_schema *>> & properties,
         const std::unordered_set<std::string> & required,
@@ -749,6 +789,7 @@ private:
             }
             prop_names.push_back(prop_name);
         }
+        std::string additional_kv;
         if (additional_properties) {
             std::string sub_name = name + (name.empty() ? "" : "-") + "additional";
             std::string value_rule =
@@ -758,66 +799,64 @@ private:
             auto key_rule =
                 prop_names.empty() ? _add_primitive("string", PRIMITIVE_RULES.at("string"))
                 : _add_rule(sub_name + "-k", _not_strings(prop_names));
-            std::string kv_rule = _add_rule(sub_name + "-kv", key_rule + " \":\" space " + value_rule);
-            prop_kv_rule_names["*"] = kv_rule;
-            optional_props.push_back("*");
+            additional_kv = _add_rule(sub_name + "-kv", key_rule + " \":\" space " + value_rule);
         }
 
-        if (required_props.empty() && optional_props.empty()) {
+        if (required_props.empty() && optional_props.empty() && additional_kv.empty()) {
             return "\"{\" space \"}\"";
         }
 
-        std::string rule = "\"{\" space ";
-        for (size_t i = 0; i < required_props.size(); i++) {
+        if (properties.size() <= COMMON_CHAT_MAX_PERMUTE && (properties.size() > 1 || (properties.size() == 1 && !additional_kv.empty()))) {
+            std::vector<std::string> kv_rules;
+            for (const auto & prop_name : required_props) {
+                kv_rules.push_back(prop_kv_rule_names[prop_name]);
+            }
+            for (const auto & prop_name : optional_props) {
+                kv_rules.push_back(prop_kv_rule_names[prop_name]);
+            }
+            return _build_permuted_object_rule(kv_rules, required_props.size(), additional_kv, name);
+        }
+
+        // Keys follow the schema order and each optional one can be skipped. With additional properties, any key may follow
+        // the last required one, so a declared key written late still matches its own schema instead of corrupting on additional-k.
+        size_t n_ordered = properties.size();
+        std::string any_kv;
+        std::string more;
+        if (!additional_kv.empty()) {
+            while (n_ordered > 0 && required.find(properties[n_ordered - 1].first) == required.end()) {
+                n_ordered--;
+            }
+            std::vector<std::string> kvs;
+            for (const auto & kv : properties) {
+                kvs.push_back(prop_kv_rule_names[kv.first]);
+            }
+            kvs.push_back(additional_kv);
+            any_kv = kvs.size() == 1 ? additional_kv : _add_rule(name + (name.empty() ? "" : "-") + "any-kv", string_join(kvs, " | "));
+            more = "( \",\" space " + any_kv + " )*";
+        }
+        std::string after = more;
+        std::vector<std::string> first;
+        for (size_t i = n_ordered; i-- > 0; ) {
+            const auto & kv_rule = prop_kv_rule_names[properties[i].first];
+            const bool is_required = required.find(properties[i].first) != required.end();
+            if (is_required) {
+                first.clear();
+            }
+            first.insert(first.begin(), kv_rule + (after.empty() ? "" : " " + after));
             if (i > 0) {
-                rule += " \",\" space ";
+                const std::string item = is_required ? "\",\" space " + kv_rule : "( \",\" space " + kv_rule + " )?";
+                after = _add_rule(
+                    name + (name.empty() ? "" : "-") + properties[i - 1].first + "-rest",
+                    item + (after.empty() ? "" : " " + after));
             }
-            rule += prop_kv_rule_names[required_props[i]];
         }
-
-        if (!optional_props.empty()) {
-            rule += " (";
-            if (!required_props.empty()) {
-                rule += " \",\" space ( ";
-            }
-
-            std::function<std::string(const std::vector<std::string> &, bool)> get_recursive_refs = [&](const std::vector<std::string> & ks, bool first_is_optional) {
-                std::string res;
-                if (ks.empty()) {
-                    return res;
-                }
-                const std::string& k = ks[0];
-                std::string kv_rule_name = prop_kv_rule_names[k];
-                std::string comma_ref = "( \",\" space " + kv_rule_name + " )";
-                if (first_is_optional) {
-                    res = comma_ref + (k == "*" ? "*" : "?");
-                } else {
-                    res = kv_rule_name + (k == "*" ? " " + comma_ref + "*" : "");
-                }
-                if (ks.size() > 1) {
-                    res += " " + _add_rule(
-                        name + (name.empty() ? "" : "-") + k + "-rest",
-                        get_recursive_refs(std::vector<std::string>(ks.begin() + 1, ks.end()), true)
-                    );
-                }
-                return res;
-            };
-
-            for (size_t i = 0; i < optional_props.size(); i++) {
-                if (i > 0) {
-                    rule += " | ";
-                }
-                rule += get_recursive_refs(std::vector<std::string>(optional_props.begin() + i, optional_props.end()), false);
-            }
-            if (!required_props.empty()) {
-                rule += " )";
-            }
-            rule += " )?";
+        if (required_props.empty() && !additional_kv.empty()) {
+            first.push_back(any_kv + " " + more);
         }
-
-        rule += " space \"}\"";
-
-        return rule;
+        if (first.size() == 1 && !required_props.empty()) {
+            return "\"{\" space " + first[0] + " space \"}\"";
+        }
+        return "\"{\" space ( " + string_join(first, " | ") + " )" + (required_props.empty() ? "?" : "") + " space \"}\"";
     }
 
     std::string _add_primitive(const std::string & name, const BuiltinRule & rule) {
