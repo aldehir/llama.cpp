@@ -116,14 +116,7 @@ common_chat_params common_chat_params_init_qwen3_coder(const common_chat_templat
 
                     auto types = param.schema->value_types();
 
-                    auto arg_value = p.eps();
-                    if (!types.has(common_chat_schema::TYPE_STRING)) {
-                        arg_value = p.tool_arg_json_value(p.schema(p.json(), rule_name + "-schema", doc, *param.schema)) + arg_close;
-                    } else if (types.is_only(common_chat_schema::TYPE_STRING)) {
-                        arg_value = arg_string;
-                    } else {
-                        // The string alternative accepts any text, so the grammar only keeps the raw string
-                        // rule. The parser still tries the JSON alternatives first to type the value.
+                    auto typed_json_value = [&]() {
                         auto json_value = p.choice();
                         if (types.has(common_chat_schema::TYPE_OBJECT)) {
                             json_value |= p.json_object();
@@ -140,7 +133,23 @@ common_chat_params common_chat_params_init_qwen3_coder(const common_chat_templat
                         if (types.has(common_chat_schema::TYPE_NULL)) {
                             json_value |= p.json_null();
                         }
-                        arg_value = p.gbnf(p.atomic(p.tool_arg_json_value(json_value) + arg_close) | arg_string, "xml-arg-string");
+                        return json_value;
+                    };
+
+                    auto arg_value = p.eps();
+                    if (!types.has(common_chat_schema::TYPE_STRING)) {
+                        if (types.has(common_chat_schema::TYPE_OBJECT) || types.has(common_chat_schema::TYPE_ARRAY)) {
+                            // Nested values are any object or array of the right kind, their schema is not enforced
+                            arg_value = p.tool_arg_json_value(typed_json_value()) + arg_close;
+                        } else {
+                            arg_value = p.tool_arg_json_value(p.schema(p.json(), rule_name + "-schema", doc, *param.schema)) + arg_close;
+                        }
+                    } else if (types.is_only(common_chat_schema::TYPE_STRING)) {
+                        arg_value = arg_string;
+                    } else {
+                        // The string alternative accepts any text, so the grammar only keeps the raw string
+                        // rule. The parser still tries the JSON alternatives first to type the value.
+                        arg_value = p.gbnf(p.atomic(p.tool_arg_json_value(typed_json_value()) + arg_close) | arg_string, "xml-arg-string");
                     }
 
                     auto arg_rule = p.rule(rule_name, p.tool_arg(arg_open + arg_value));
